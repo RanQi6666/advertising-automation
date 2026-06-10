@@ -1,0 +1,35 @@
+from fastapi import APIRouter, Query, status
+
+from backend.app.api.deps import DbSession
+from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
+from backend.app.services.topic_service import TopicService
+
+router = APIRouter()
+service = TopicService()
+
+
+@router.post(
+    "/topics/generate", response_model=list[TopicRead], status_code=status.HTTP_201_CREATED
+)
+async def generate_topics(payload: TopicGenerateRequest, session: DbSession):
+    return await service.generate_topics(session, payload)
+
+
+@router.get("/campaigns/{campaign_id}/topics", response_model=list[TopicRead])
+async def list_topics(
+    campaign_id: str,
+    session: DbSession,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return await service.list_topics(session, campaign_id=campaign_id, limit=limit, offset=offset)
+
+
+@router.post("/topics/{topic_id}/select", response_model=TopicRead)
+async def select_topic(topic_id: str, session: DbSession):
+    return await service.select_topic(session, topic_id)
+
+
+@router.post("/topics/{topic_id}/reject", response_model=TopicRead)
+async def reject_topic(topic_id: str, session: DbSession):
+    return await service.reject_topic(session, topic_id)
