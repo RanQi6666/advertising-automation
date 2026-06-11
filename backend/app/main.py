@@ -1,9 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.api.v1.router import api_router
 from backend.app.core.config import get_settings
@@ -23,6 +25,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    storage_root = Path(settings.local_storage_root)
+    storage_root.mkdir(parents=True, exist_ok=True)
+
     app = FastAPI(
         title=settings.project_name,
         version="0.1.0",
@@ -36,6 +41,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(api_router, prefix=settings.api_v1_prefix)
+    app.mount("/storage", StaticFiles(directory=storage_root), name="storage")
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(_: Request, exc: NotFoundError) -> JSONResponse:

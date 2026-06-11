@@ -27,6 +27,25 @@ class ImageBrief(BaseModel):
     size: str = "1:1"
 
 
+class VideoStoryboardScene(BaseModel):
+    scene_index: int
+    start_second: int | None = None
+    end_second: int | None = None
+    visual: str
+    subtitle: str | None = None
+    motion: str | None = None
+    voiceover: str | None = None
+    source_asset_ids: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+
+class VideoStoryboardCandidate(BaseModel):
+    duration_seconds: int
+    aspect_ratio: str
+    scenes: list[VideoStoryboardScene] = Field(default_factory=list)
+    rationale: str | None = None
+
+
 class GeneratedImage(BaseModel):
     prompt: str
     url: str | None = None

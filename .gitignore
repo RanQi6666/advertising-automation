@@ -7,8 +7,11 @@ __pycache__/
 .mypy_cache/
 *.sqlite3
 *.db
+*.tsbuildinfo
 dist/
 build/
 *.egg-info/
 storage/
 logs/
+node_modules/
+frontend/web-admin/dist/

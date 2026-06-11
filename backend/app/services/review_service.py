@@ -97,5 +97,17 @@ class ReviewService:
 
         if payload.entity_type == ReviewEntityType.PUBLISH_JOB:
             job = await get_required(session, PublishJob, payload.entity_id)
-            if payload.decision == ReviewDecision.REJECTED:
+            metadata = dict(job.metadata_json or {})
+            if payload.decision == ReviewDecision.APPROVED:
+                metadata["review_status"] = "approved"
+                metadata["review_feedback"] = payload.feedback
+                job.metadata_json = metadata
+            elif payload.decision == ReviewDecision.REJECTED:
+                metadata["review_status"] = "rejected"
+                metadata["review_feedback"] = payload.feedback
+                job.metadata_json = metadata
                 job.status = PublishStatus.CANCELLED.value
+            else:
+                metadata["review_status"] = "needs_revision"
+                metadata["review_feedback"] = payload.feedback
+                job.metadata_json = metadata

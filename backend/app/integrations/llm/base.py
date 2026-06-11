@@ -2,8 +2,14 @@ from typing import Protocol
 
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
-from backend.app.schemas.ai import CopyDraftCandidate, ImageBrief, TopicCandidate
+from backend.app.schemas.ai import (
+    CopyDraftCandidate,
+    ImageBrief,
+    TopicCandidate,
+    VideoStoryboardCandidate,
+)
 
 
 class LLMProvider(Protocol):
@@ -40,3 +46,15 @@ class LLMProvider(Protocol):
         size: str,
     ) -> list[ImageBrief]:
         """Condense copy into image-by-image creative briefs."""
+
+    async def generate_video_storyboard(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        instructions: str | None = None,
+    ) -> VideoStoryboardCandidate:
+        """Create a scene-by-scene video storyboard from copy and image assets."""

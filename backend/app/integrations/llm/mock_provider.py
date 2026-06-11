@@ -1,7 +1,14 @@
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
-from backend.app.schemas.ai import CopyDraftCandidate, ImageBrief, TopicCandidate
+from backend.app.schemas.ai import (
+    CopyDraftCandidate,
+    ImageBrief,
+    TopicCandidate,
+    VideoStoryboardCandidate,
+    VideoStoryboardScene,
+)
 
 
 class MockLLMProvider:
@@ -145,6 +152,66 @@ class MockLLMProvider:
                 )
             )
         return briefs
+
+    async def generate_video_storyboard(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        instructions: str | None = None,
+    ) -> VideoStoryboardCandidate:
+        product = campaign.product_name or campaign.name
+        asset_count = max(1, len(assets))
+        scene_count = min(max(asset_count, 3), 5)
+        segment = max(1, duration_seconds // scene_count)
+        landing_page = context.get("landing_page") or {}
+        landing_title = landing_page.get("title") or "landing page"
+        scenes: list[VideoStoryboardScene] = []
+
+        for index in range(scene_count):
+            asset = assets[index % asset_count]
+            start_second = index * segment
+            end_second = duration_seconds if index == scene_count - 1 else (index + 1) * segment
+            if index == 0:
+                visual = f"Open with the strongest product benefit for {product}."
+                subtitle = f"{product}: watch instantly"
+            elif index == scene_count - 1:
+                visual = "End on a clear call to action and keep the final frame readable."
+                subtitle = "Download Now"
+            else:
+                visual = f"Show proof and variety using context from {landing_title[:80]}."
+                subtitle = "Free live channels in HD"
+
+            scenes.append(
+                VideoStoryboardScene(
+                    scene_index=index + 1,
+                    start_second=start_second,
+                    end_second=end_second,
+                    visual=f"{visual} Use image asset {asset.id}.",
+                    subtitle=subtitle,
+                    motion="Slow zoom, quick text reveal, and clean vertical-safe framing.",
+                    voiceover=(
+                        draft.primary_text[:120]
+                        if draft and draft.primary_text
+                        else f"Discover {product} in a simple, fast experience."
+                    ),
+                    source_asset_ids=[asset.id],
+                    notes=instructions or "Mock storyboard for reserved video generation.",
+                )
+            )
+
+        return VideoStoryboardCandidate(
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            scenes=scenes,
+            rationale=(
+                "Mock storyboard uses selected creative assets, copy context, and landing page "
+                "signals to produce a reviewable video plan."
+            ),
+        )
 
 
 def _append_context(

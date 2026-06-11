@@ -1,11 +1,51 @@
 from fastapi import APIRouter, Query, status
 
 from backend.app.api.deps import DbSession
-from backend.app.schemas.publishing import PublishJobCreate, PublishJobRead
+from backend.app.schemas.publishing import (
+    AdCreativeDraftRead,
+    AdCreativeDraftRequest,
+    AdsPlanDraftRead,
+    AdsPlanDraftRequest,
+    FacebookPublishConfigRead,
+    MetaAdsDraftCreateRead,
+    MetaAdsDraftCreateRequest,
+    MetaAdsPackagePrepareRequest,
+    PublishJobCreate,
+    PublishJobRead,
+)
 from backend.app.services.publish_service import PublishService
 
 router = APIRouter()
 service = PublishService()
+
+
+@router.get("/publishing/meta-config", response_model=FacebookPublishConfigRead)
+async def get_meta_publish_config():
+    return service.get_meta_config()
+
+
+@router.post("/publishing/ad-creative-draft", response_model=AdCreativeDraftRead)
+async def build_ad_creative_draft(payload: AdCreativeDraftRequest, session: DbSession):
+    return await service.build_ad_creative_draft(session, payload)
+
+
+@router.post("/publishing/ads-plan-draft", response_model=AdsPlanDraftRead)
+async def build_ads_plan_draft(payload: AdsPlanDraftRequest, session: DbSession):
+    return await service.build_ads_plan_draft(session, payload)
+
+
+@router.post("/publishing/meta-ads-draft", response_model=MetaAdsDraftCreateRead)
+async def create_meta_ads_draft(payload: MetaAdsDraftCreateRequest, session: DbSession):
+    return await service.create_meta_ads_draft(session, payload)
+
+
+@router.post(
+    "/publishing/meta-ads-package",
+    response_model=PublishJobRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def prepare_meta_ads_package(payload: MetaAdsPackagePrepareRequest, session: DbSession):
+    return await service.prepare_meta_ads_package(session, payload)
 
 
 @router.post("/publishing/jobs", response_model=PublishJobRead, status_code=status.HTTP_201_CREATED)
