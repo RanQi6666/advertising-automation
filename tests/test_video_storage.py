@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from backend.app.core.config import Settings
+from backend.app.db.models.video_asset import VideoAsset
+from backend.app.services.video_service import VideoService
 from backend.app.services.video_storage_service import VideoStorageService, _extension_from_url
 
 
@@ -35,3 +37,39 @@ async def test_local_video_transfer_returns_public_url_and_storage_key(tmp_path:
     assert public_url == "http://api.test/storage/videos/video-1/job-1.mp4"
     assert storage_key == "local://videos/video-1/job-1.mp4"
     assert (tmp_path / "videos" / "video-1" / "job-1.mp4").read_bytes() == b"video-bytes"
+
+
+def test_public_url_for_local_video_storage_key_uses_current_base_url() -> None:
+    service = VideoStorageService(
+        Settings(
+            public_base_url="http://127.0.0.1:8001",
+            object_storage_provider="local",
+        )
+    )
+
+    assert (
+        service.public_url_for_storage_key("local://videos/video-1/job-1.mp4")
+        == "http://127.0.0.1:8001/storage/videos/video-1/job-1.mp4"
+    )
+    assert service.public_url_for_storage_key("https://provider.test/video.mp4") is None
+
+
+def test_video_service_normalizes_old_local_video_url() -> None:
+    service = object.__new__(VideoService)
+    service.video_storage = VideoStorageService(
+        Settings(
+            public_base_url="http://127.0.0.1:8001",
+            object_storage_provider="local",
+        )
+    )
+    video = VideoAsset(
+        campaign_id="campaign-1",
+        source_asset_ids=[],
+        url="http://127.0.0.1:8000/storage/videos/video-1/job-1.mp4",
+        storage_key="local://videos/video-1/job-1.mp4",
+        aspect_ratio="9:16",
+    )
+
+    assert service._normalize_local_video_url(video) is True
+    assert video.url == "http://127.0.0.1:8001/storage/videos/video-1/job-1.mp4"
+    assert service._normalize_local_video_url(video) is False

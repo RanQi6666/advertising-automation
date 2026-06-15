@@ -13,6 +13,9 @@ from backend.app.schemas.ai import (
 
 
 class LLMProvider(Protocol):
+    async def extract_delivery_fields(self, raw_content: str) -> dict:
+        """Extract and suggest work-order fields that directly affect ad delivery."""
+
     async def generate_topics(
         self,
         campaign: Campaign,

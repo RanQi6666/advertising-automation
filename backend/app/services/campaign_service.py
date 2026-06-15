@@ -52,12 +52,13 @@ class CampaignService:
             await get_required(session, Brand, payload.brand_id)
 
         parsed_fields = work_order.parsed_fields or {}
+        work_order_metadata = work_order.metadata_json or {}
         campaign = Campaign(
             client_id=payload.client_id,
             brand_id=payload.brand_id,
             work_order_id=work_order.id,
             name=payload.name or work_order.project_name or "Untitled work order campaign",
-            objective=payload.objective or parsed_fields.get("event_name"),
+            objective=payload.objective or work_order.event_name or parsed_fields.get("event_name"),
             product_name=payload.product_name or work_order.product_name,
             audience_description=(payload.audience_description or work_order.audience_description),
             budget_notes=_build_budget_notes(parsed_fields),
@@ -68,8 +69,16 @@ class CampaignService:
                     "parsed_fields": parsed_fields,
                     "country": work_order.country,
                     "media": work_order.media,
+                    "event_name": work_order.event_name,
+                    "product_name": work_order.product_name,
+                    "audience_description": work_order.audience_description,
                     "landing_url": work_order.landing_url,
                     "report_timezone": work_order.report_timezone,
+                    "llm_delivery_fields": work_order_metadata.get("llm_delivery_fields") or {},
+                    "reviewed_delivery_fields": work_order_metadata.get(
+                        "reviewed_delivery_fields"
+                    )
+                    or {},
                 },
             },
         )

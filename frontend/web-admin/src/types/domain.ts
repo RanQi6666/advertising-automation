@@ -21,6 +21,44 @@ export interface WorkOrder extends Timestamped {
   metadata_json: Record<string, unknown>;
 }
 
+export type DeliveryFieldStatus = "extracted" | "suggested" | "missing" | "conflict";
+
+export interface WorkOrderDeliveryField<T = unknown> {
+  value: T | null;
+  normalized_value: T | null;
+  status: DeliveryFieldStatus;
+  confidence: number;
+  evidence: string[];
+  candidates: unknown[];
+  reason: string | null;
+}
+
+export interface WorkOrderDeliveryFields {
+  landing_url: WorkOrderDeliveryField<string>;
+  event_name: WorkOrderDeliveryField<string>;
+  country: WorkOrderDeliveryField<string>;
+  age_min: WorkOrderDeliveryField<number | string>;
+  age_max: WorkOrderDeliveryField<number | string>;
+  gender: WorkOrderDeliveryField<string>;
+  audience_description_raw: WorkOrderDeliveryField<string>;
+}
+
+export interface WorkOrderDeliveryExtraction {
+  schema_version: string;
+  fields: WorkOrderDeliveryFields;
+  review: Record<string, unknown>;
+}
+
+export interface ReviewedDeliveryFields {
+  landing_url: string;
+  event_name: string;
+  country: string;
+  age_min: string;
+  age_max: string;
+  gender: string;
+  audience_description_raw: string;
+}
+
 export interface Campaign extends Timestamped {
   client_id: string | null;
   brand_id: string | null;
@@ -143,6 +181,7 @@ export interface AdCreativeDraft {
   media_type: string;
   creative_asset_id: string | null;
   image_url: string | null;
+  facebook_image_hash: string | null;
   video_asset_id: string | null;
   facebook_video_id: string | null;
   page_id: string | null;
@@ -160,6 +199,8 @@ export interface AdsPlanDraft {
   headline: string;
   primary_text: string;
   media_type: string;
+  creative_asset_id: string | null;
+  facebook_image_hash: string | null;
   page_id: string | null;
   ad_account_id: string | null;
   ad_creative_id: string | null;
@@ -190,6 +231,13 @@ export interface MetaAdsDraftCreateResult {
   warnings: string[];
 }
 
+export interface AdPixel {
+  id: string;
+  name: string | null;
+  last_fired_time: string | null;
+  metadata_json: Record<string, unknown>;
+}
+
 export interface FacebookPublishConfig {
   dry_run: boolean;
   graph_api_version: string;
@@ -209,8 +257,33 @@ export interface FacebookPublishConfig {
     ad_account_configured: boolean;
     access_token_configured: boolean;
     access_token_ref: string;
+    dry_run: boolean;
   };
   missing_fields: string[];
+}
+
+export interface MetaOAuthAuthorizeUrl {
+  authorization_url: string;
+  redirect_uri: string;
+  scopes: string[];
+  state: string;
+}
+
+export interface MetaAccount extends Timestamped {
+  name: string;
+  page_id: string | null;
+  page_name: string | null;
+  ad_account_id: string | null;
+  ad_account_name: string | null;
+  business_id: string | null;
+  business_name: string | null;
+  token_expires_at: string | null;
+  status: string;
+  access_token_configured: boolean;
+  page_access_token_configured: boolean;
+  available_pages: Record<string, unknown>[];
+  available_ad_accounts: Record<string, unknown>[];
+  metadata_json: Record<string, unknown>;
 }
 
 export interface ReviewTask extends Timestamped {

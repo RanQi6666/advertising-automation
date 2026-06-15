@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
@@ -80,6 +80,15 @@ class TopicService:
 
     async def select_topic(self, session: AsyncSession, topic_id: str) -> ContentTopic:
         topic = await get_required(session, ContentTopic, topic_id)
+        await session.execute(
+            update(ContentTopic)
+            .where(
+                ContentTopic.campaign_id == topic.campaign_id,
+                ContentTopic.id != topic.id,
+                ContentTopic.status == TopicStatus.SELECTED.value,
+            )
+            .values(status=TopicStatus.PROPOSED.value)
+        )
         topic.status = TopicStatus.SELECTED.value
         await session.commit()
         await session.refresh(topic)

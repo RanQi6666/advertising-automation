@@ -1,10 +1,16 @@
 import pytest
 
+from backend.app.core.config import Settings
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.schemas.video import VideoGenerateRequest
+from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.video_service import (
+    _redact_provider_request_payload,
+    _resolve_video_source_image_url,
+)
 
 
 @pytest.mark.asyncio
@@ -75,3 +81,67 @@ def test_video_generate_request_accepts_storyboard() -> None:
 
     assert payload.storyboard[0]["scene_index"] == 1
     assert payload.storyboard[0]["visual"] == "Open with the app benefit."
+
+
+def test_video_source_image_prefers_local_data_url_for_local_storage(tmp_path) -> None:
+    image_path = tmp_path / "images" / "campaign-1" / "local.jpeg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image-bytes")
+    image_storage = ImageStorageService(
+        Settings(
+            local_storage_root=str(tmp_path),
+            object_storage_provider="local",
+            public_base_url="http://127.0.0.1:8001",
+        )
+    )
+    asset = CreativeAsset(
+        id="asset-1",
+        campaign_id="campaign-1",
+        url="http://127.0.0.1:8001/storage/images/local.jpeg",
+        storage_key="local://images/campaign-1/local.jpeg",
+        metadata_json={"provider_image_url": "https://example.com/provider.jpeg?signature=1"},
+    )
+
+    url = _resolve_video_source_image_url(asset, image_storage)
+
+    assert url == "data:image/jpeg;base64,aW1hZ2UtYnl0ZXM="
+
+
+def test_video_source_image_falls_back_to_provider_url_when_local_file_missing() -> None:
+    image_storage = ImageStorageService(
+        Settings(
+            object_storage_provider="local",
+            public_base_url="http://127.0.0.1:8001",
+        )
+    )
+    asset = CreativeAsset(
+        id="asset-1",
+        campaign_id="campaign-1",
+        url="http://127.0.0.1:8001/storage/images/local.jpeg",
+        storage_key="local://images/local.jpeg",
+        metadata_json={"provider_image_url": "https://example.com/provider.jpeg?signature=1"},
+    )
+
+    url = _resolve_video_source_image_url(asset, image_storage)
+
+    assert url == "https://example.com/provider.jpeg?signature=1"
+
+
+def test_provider_request_payload_redacts_inline_image_data_urls() -> None:
+    payload = {
+        "model": "seedance",
+        "content": [
+            {"type": "text", "text": "Create a video."},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,aW1hZ2UtYnl0ZXM="},
+            },
+        ],
+    }
+
+    redacted = _redact_provider_request_payload(payload)
+
+    assert redacted["content"][1]["image_url"]["url"] == (
+        "data:image/jpeg;base64,<redacted 11 bytes>"
+    )
+    assert payload["content"][1]["image_url"]["url"].endswith("aW1hZ2UtYnl0ZXM=")

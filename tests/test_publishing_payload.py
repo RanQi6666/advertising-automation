@@ -19,6 +19,7 @@ async def test_facebook_page_video_dry_run_payload() -> None:
     client = FacebookGraphClient(
         Settings(
             facebook_dry_run=True,
+            facebook_ads_dry_run=True,
             facebook_graph_api_base_url="https://graph.facebook.com",
             facebook_graph_api_version="v24.0",
         )
@@ -40,10 +41,34 @@ async def test_facebook_page_video_dry_run_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_facebook_ad_image_dry_run_payload_supports_local_file_upload() -> None:
+    client = FacebookGraphClient(
+        Settings(
+            facebook_dry_run=True,
+            facebook_ads_dry_run=True,
+            facebook_graph_api_base_url="https://graph.facebook.com",
+            facebook_graph_api_version="v24.0",
+        )
+    )
+
+    response = await client.create_ad_image(
+        ad_account_id="act_123456",
+        image_file_path=Path("storage/images/example.jpeg"),
+        access_token_ref=None,
+    )
+
+    assert response["dry_run"] is True
+    assert response["endpoint"] == "https://graph.facebook.com/v24.0/act_123456/adimages"
+    assert response["payload"] == {"source": "example.jpeg"}
+    assert response["images"]["example.jpeg"]["hash"].startswith("dry_run_image_hash_")
+
+
+@pytest.mark.asyncio
 async def test_facebook_ad_video_dry_run_payload_normalizes_account_id() -> None:
     client = FacebookGraphClient(
         Settings(
             facebook_dry_run=True,
+            facebook_ads_dry_run=True,
             facebook_graph_api_base_url="https://graph.facebook.com",
             facebook_graph_api_version="v24.0",
         )
@@ -69,6 +94,7 @@ async def test_facebook_ad_video_dry_run_payload_supports_local_file_upload() ->
     client = FacebookGraphClient(
         Settings(
             facebook_dry_run=True,
+            facebook_ads_dry_run=True,
             facebook_graph_api_base_url="https://graph.facebook.com",
             facebook_graph_api_version="v24.0",
         )
@@ -94,6 +120,7 @@ async def test_facebook_video_ad_creative_dry_run_payload() -> None:
     client = FacebookGraphClient(
         Settings(
             facebook_dry_run=True,
+            facebook_ads_dry_run=True,
             facebook_graph_api_base_url="https://graph.facebook.com",
             facebook_graph_api_version="v24.0",
         )
@@ -133,6 +160,7 @@ async def test_facebook_meta_ads_object_dry_run_payloads() -> None:
     client = FacebookGraphClient(
         Settings(
             facebook_dry_run=True,
+            facebook_ads_dry_run=True,
             facebook_graph_api_base_url="https://graph.facebook.com",
             facebook_graph_api_version="v24.0",
         )
@@ -177,6 +205,79 @@ async def test_facebook_meta_ads_object_dry_run_payloads() -> None:
     assert adset["payload"]["targeting"]["geo_locations"]["countries"] == ["IN"]
     assert ad["endpoint"].endswith("/act_123456/ads")
     assert ad["payload"]["creative"] == {"creative_id": "creative-123"}
+
+
+@pytest.mark.asyncio
+async def test_facebook_ad_object_status_update_dry_run_payload() -> None:
+    client = FacebookGraphClient(
+        Settings(
+            facebook_dry_run=True,
+            facebook_ads_dry_run=True,
+            facebook_graph_api_base_url="https://graph.facebook.com",
+            facebook_graph_api_version="v24.0",
+        )
+    )
+
+    response = await client.update_ad_object_status(
+        object_id="ad-123",
+        status="ACTIVE",
+        access_token_ref=None,
+    )
+
+    assert response["dry_run"] is True
+    assert response["endpoint"] == "https://graph.facebook.com/v24.0/ad-123"
+    assert response["payload"] == {"status": "ACTIVE"}
+
+
+@pytest.mark.asyncio
+async def test_facebook_ad_object_status_fetch_dry_run_payload() -> None:
+    client = FacebookGraphClient(
+        Settings(
+            facebook_dry_run=True,
+            facebook_ads_dry_run=True,
+            facebook_graph_api_base_url="https://graph.facebook.com",
+            facebook_graph_api_version="v24.0",
+        )
+    )
+
+    response = await client.get_ad_object_status(
+        object_id="ad-123",
+        access_token_ref=None,
+        fields=["id", "status", "effective_status"],
+    )
+
+    assert response["dry_run"] is True
+    assert response["endpoint"] == "https://graph.facebook.com/v24.0/ad-123"
+    assert response["payload"] == {"fields": "id,status,effective_status"}
+    assert response["effective_status"] == "PAUSED"
+
+
+@pytest.mark.asyncio
+async def test_facebook_ad_insights_fetch_dry_run_payload() -> None:
+    client = FacebookGraphClient(
+        Settings(
+            facebook_dry_run=True,
+            facebook_ads_dry_run=True,
+            facebook_graph_api_base_url="https://graph.facebook.com",
+            facebook_graph_api_version="v24.0",
+        )
+    )
+
+    response = await client.get_ad_insights(
+        ad_id="ad-123",
+        access_token_ref=None,
+        fields=["ad_id", "spend", "impressions"],
+        date_preset="today",
+    )
+
+    assert response["dry_run"] is True
+    assert response["endpoint"] == "https://graph.facebook.com/v24.0/ad-123/insights"
+    assert response["payload"] == {
+        "fields": "ad_id,spend,impressions",
+        "date_preset": "today",
+        "level": "ad",
+    }
+    assert response["data"][0]["ad_id"] == "ad-123"
 
 
 def test_publish_service_builds_video_meta_request_preview() -> None:
@@ -255,9 +356,10 @@ def test_publish_service_builds_video_ad_creative_preview() -> None:
 def test_publish_service_ad_preview_body_does_not_self_reference() -> None:
     service = PublishService()
     prepared = {
-        "media_type": "text",
+        "media_type": "image",
         "ad_account_id": "123456",
         "message": "Launch copy",
+        "image_url": "https://example.com/image.jpg",
     }
 
     preview = service._build_meta_request_preview(PublishChannel.FACEBOOK_AD, prepared)

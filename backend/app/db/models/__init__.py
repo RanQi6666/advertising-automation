@@ -1,4 +1,5 @@
 from backend.app.db.base import Base
+from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.agent_run import AgentRun
 from backend.app.db.models.brand import Brand
 from backend.app.db.models.campaign import Campaign
@@ -18,6 +19,7 @@ from backend.app.db.models.work_order import WorkOrder
 
 __all__ = [
     "AgentRun",
+    "AdGenerationJob",
     "Base",
     "Brand",
     "Campaign",

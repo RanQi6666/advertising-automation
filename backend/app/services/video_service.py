@@ -16,6 +16,11 @@ from backend.app.schemas.video import (
     VideoStoryboardGenerateRequest,
     VideoStoryboardRead,
 )
+from backend.app.services.creative_asset_urls import (
+    repair_creative_asset_urls,
+    resolve_creative_image_url,
+)
+from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
@@ -27,6 +32,7 @@ class VideoService:
         self.llm = get_llm_provider(self.settings)
         self.video_provider = get_video_provider(self.settings)
         self.landing_pages = LandingPageService()
+        self.image_storage = ImageStorageService(self.settings)
         self.video_storage = VideoStorageService(self.settings)
 
     async def generate_storyboard(
@@ -130,7 +136,13 @@ class VideoService:
             .limit(limit)
             .offset(offset)
         )
-        return list(result.scalars().all())
+        videos = list(result.scalars().all())
+        urls_changed = False
+        for video in videos:
+            urls_changed = self._normalize_local_video_url(video) or urls_changed
+        if urls_changed:
+            await session.commit()
+        return videos
 
     async def start_video_generation(
         self,
@@ -158,7 +170,7 @@ class VideoService:
                 "implementation_status": "provider_started",
                 "video_provider": self.settings.video_provider,
                 "provider_status": started.provider_status,
-                "provider_request": started.request_payload,
+                "provider_request": _redact_provider_request_payload(started.request_payload),
                 "provider_start_response": started.raw_response,
                 "transient_url_note": (
                     "Provider video URLs may expire. Transfer to object storage before publishing."
@@ -193,6 +205,7 @@ class VideoService:
             video.storage_key = stored_storage_key
         elif provider_status.video_url:
             video.url = provider_status.video_url
+        self._normalize_local_video_url(video)
         video.error_message = provider_status.error_message
         video.metadata_json = _merge_metadata(
             video.metadata_json,
@@ -234,7 +247,9 @@ class VideoService:
                 "Creative assets do not belong to the requested campaign: "
                 f"{', '.join(wrong_campaign_ids)}"
             )
-        return [assets_by_id[asset_id] for asset_id in asset_ids]
+        ordered_assets = [assets_by_id[asset_id] for asset_id in asset_ids]
+        await repair_creative_asset_urls(session, ordered_assets, self.image_storage)
+        return ordered_assets
 
     async def _load_draft(
         self,
@@ -268,10 +283,11 @@ class VideoService:
         source_images: list[VideoSourceImage] = []
         missing_url_ids: list[str] = []
         for asset in assets:
-            if not asset.url:
+            image_url = _resolve_video_source_image_url(asset, self.image_storage)
+            if not image_url:
                 missing_url_ids.append(asset.id)
                 continue
-            source_images.append(VideoSourceImage(id=asset.id, url=asset.url))
+            source_images.append(VideoSourceImage(id=asset.id, url=image_url))
         if missing_url_ids:
             raise AppError(
                 "Selected creative assets do not have public image URLs: "
@@ -310,6 +326,13 @@ class VideoService:
             },
         )
 
+    def _normalize_local_video_url(self, video: VideoAsset) -> bool:
+        public_url = self.video_storage.public_url_for_storage_key(video.storage_key)
+        if not public_url or video.url == public_url:
+            return False
+        video.url = public_url
+        return True
+
 
 def _storyboard_to_prompt(storyboard: list[dict]) -> str:
     lines = ["Create a short ad video using this approved storyboard:"]
@@ -329,6 +352,58 @@ def _storyboard_to_prompt(storyboard: list[dict]) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def _resolve_video_source_image_url(
+    asset: CreativeAsset,
+    image_storage: ImageStorageService,
+) -> str | None:
+    if image_storage.settings.object_storage_provider == "local":
+        storage_key = asset.storage_key or image_storage.storage_key_for_public_url(asset.url)
+        data_url = image_storage.data_url_for_storage_key(storage_key)
+        if data_url:
+            return data_url
+
+        provider_url = (asset.metadata_json or {}).get("provider_image_url")
+        if isinstance(provider_url, str) and provider_url.startswith(("http://", "https://")):
+            return provider_url
+    return resolve_creative_image_url(asset, image_storage)
+
+
+def _redact_provider_request_payload(payload: dict) -> dict:
+    redacted = dict(payload)
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return redacted
+
+    redacted_content = []
+    for item in content:
+        if not isinstance(item, dict):
+            redacted_content.append(item)
+            continue
+
+        redacted_item = dict(item)
+        image_url = redacted_item.get("image_url")
+        if isinstance(image_url, dict):
+            redacted_image_url = dict(image_url)
+            url = redacted_image_url.get("url")
+            if isinstance(url, str) and url.startswith("data:"):
+                redacted_image_url["url"] = _redact_data_url(url)
+            redacted_item["image_url"] = redacted_image_url
+        redacted_content.append(redacted_item)
+
+    redacted["content"] = redacted_content
+    return redacted
+
+
+def _redact_data_url(url: str) -> str:
+    header, separator, encoded = url.partition(",")
+    if not separator:
+        return "data:<redacted>"
+
+    padding = encoded.count("=")
+    decoded_bytes = max((len(encoded) * 3 // 4) - padding, 0)
+    return f"{header},<redacted {decoded_bytes} bytes>"
 
 
 def _provider_status_to_video_status(provider_status: str) -> str:

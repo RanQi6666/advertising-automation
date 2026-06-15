@@ -5,6 +5,8 @@ from backend.app.schemas.campaign import CampaignRead
 from backend.app.schemas.work_order import (
     CampaignFromWorkOrderRequest,
     WorkOrderCreate,
+    WorkOrderDeliveryExtractionRead,
+    WorkOrderDeliveryExtractionRequest,
     WorkOrderRead,
 )
 from backend.app.services.campaign_service import CampaignService
@@ -18,6 +20,11 @@ campaign_service = CampaignService()
 @router.post("/work-orders", response_model=WorkOrderRead, status_code=status.HTTP_201_CREATED)
 async def create_work_order(payload: WorkOrderCreate, session: DbSession):
     return await work_order_service.create_work_order(session, payload)
+
+
+@router.post("/work-orders/extract-delivery-fields", response_model=WorkOrderDeliveryExtractionRead)
+async def extract_work_order_delivery_fields(payload: WorkOrderDeliveryExtractionRequest):
+    return await work_order_service.extract_delivery_fields(payload.raw_content)
 
 
 @router.get("/work-orders", response_model=list[WorkOrderRead])

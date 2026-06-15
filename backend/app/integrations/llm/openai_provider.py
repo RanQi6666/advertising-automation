@@ -38,6 +38,25 @@ class OpenAILLMProvider:
         except json.JSONDecodeError as exc:
             raise ProviderError("LLM returned invalid JSON.") from exc
 
+    async def extract_delivery_fields(self, raw_content: str) -> dict[str, Any]:
+        return await self._json_completion(
+            system=(
+                "You extract only ad-delivery fields from Chinese work orders. Return valid "
+                "JSON only. Do not invent precise age, gender, or country without evidence; "
+                "use suggested defaults only where instructed. The root object must include "
+                "schema_version, fields, and review. fields must include landing_url, "
+                "event_name, country, age_min, age_max, gender, and audience_description_raw. "
+                "Each field must include value, normalized_value, status, confidence, evidence, "
+                "candidates, and reason. status must be one of extracted, suggested, missing, "
+                "conflict. For missing age/gender, suggest unrestricted: age fields may have "
+                "null value and gender value can be '不限'. For missing event_name, suggest "
+                "'流量'. landing_url must be a real URL from the text; if multiple URLs appear, "
+                "mark conflict with candidates. Use event normalized values traffic, purchase, "
+                "add_to_cart, lead. Use country normalized_value as ISO-2 if clear."
+            ),
+            user=json.dumps({"raw_content": raw_content}, ensure_ascii=False),
+        )
+
     async def generate_topics(
         self,
         campaign: Campaign,

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     environment: str = "local"
     api_v1_prefix: str = "/api/v1"
 
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ad_automation"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5433/ad_automation"
     sync_database_url: str | None = None
     create_db_on_startup: bool = False
 
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     volcengine_model: str = "doubao-seed-1-8-251228"
     volcengine_image_model: str = "doubao-seedream-4-5-251128"
     volcengine_image_size: str = "2K"
-    volcengine_image_watermark: bool = True
+    volcengine_image_watermark: bool = False
     volcengine_video_api_key: str | None = None
     volcengine_video_model: str = "doubao-seedance-1-5-pro"
     volcengine_video_resolution: str = "720p"
@@ -56,12 +56,15 @@ class Settings(BaseSettings):
     image_provider: Literal["placeholder", "volcengine"] = "placeholder"
     video_provider: Literal["placeholder", "volcengine"] = "placeholder"
     object_storage_provider: Literal["local", "s3", "r2", "minio"] = "local"
-    public_base_url: str = "http://127.0.0.1:8000"
+    public_base_url: str = "http://127.0.0.1:8001"
     local_storage_root: str = "storage"
+    image_download_timeout_seconds: float = 60.0
+    image_download_max_bytes: int = 25 * 1024 * 1024
     video_download_timeout_seconds: float = 120.0
     video_download_max_bytes: int = 500 * 1024 * 1024
 
     facebook_dry_run: bool = True
+    facebook_ads_dry_run: bool | None = None
     facebook_graph_api_base_url: str = "https://graph.facebook.com"
     facebook_graph_api_version: str = "v24.0"
     facebook_app_id: str | None = None
@@ -70,6 +73,17 @@ class Settings(BaseSettings):
     facebook_page_access_token: str | None = None
     facebook_ad_account_id: str | None = None
     facebook_ad_access_token: str | None = None
+    facebook_oauth_redirect_uri: str = (
+        "http://127.0.0.1:8001/api/v1/meta-oauth/callback"
+    )
+    facebook_oauth_success_redirect_url: str = (
+        "http://127.0.0.1:5173/?view=publishing&meta_oauth=success"
+    )
+    facebook_login_config_id: str | None = None
+    facebook_oauth_scopes: str = (
+        "ads_management,ads_read,business_management,"
+        "pages_show_list,pages_read_engagement"
+    )
 
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"

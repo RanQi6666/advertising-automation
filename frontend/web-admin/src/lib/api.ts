@@ -1,21 +1,26 @@
 import type {
   AdCreativeDraft,
+  AdPixel,
   AdsPlanDraft,
   Campaign,
   CopyDraft,
   CreativeAsset,
   FacebookPublishConfig,
   LandingPageSnapshot,
+  MetaAccount,
   MetaAdsDraftCreateResult,
+  MetaOAuthAuthorizeUrl,
   PublishJob,
   ReviewTask,
   Topic,
   VideoAsset,
   VideoStoryboardResponse,
   WorkOrder,
+  ReviewedDeliveryFields,
+  WorkOrderDeliveryExtraction,
 } from "../types/domain";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8001/api/v1";
 
 type JsonBody = Record<string, unknown> | unknown[];
 
@@ -70,7 +75,20 @@ export const api = {
   baseUrl: API_BASE_URL,
 
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
-  createWorkOrder: (rawContent: string) => post<WorkOrder>("/work-orders", { raw_content: rawContent }),
+  extractWorkOrderDeliveryFields: (rawContent: string) =>
+    post<WorkOrderDeliveryExtraction>("/work-orders/extract-delivery-fields", {
+      raw_content: rawContent,
+    }),
+  createWorkOrder: (
+    rawContent: string,
+    reviewedDeliveryFields?: ReviewedDeliveryFields,
+    llmDeliveryFields?: WorkOrderDeliveryExtraction,
+  ) =>
+    post<WorkOrder>("/work-orders", {
+      raw_content: rawContent,
+      reviewed_delivery_fields: reviewedDeliveryFields ?? {},
+      llm_delivery_fields: llmDeliveryFields ?? {},
+    }),
   createCampaignFromWorkOrder: (workOrderId: string) =>
     post<Campaign>(`/work-orders/${workOrderId}/campaign`, {}),
 
@@ -85,11 +103,11 @@ export const api = {
   listLandingPageSnapshots: (campaignId: string) =>
     request<LandingPageSnapshot[]>(`/campaigns/${campaignId}/landing-page/snapshots?limit=10`),
 
-  generateTopics: (campaignId: string, limit = 3) =>
+  generateTopics: (campaignId: string, limit = 3, signals: Record<string, unknown> = {}) =>
     post<Topic[]>("/topics/generate", {
       campaign_id: campaignId,
       limit,
-      signals: {},
+      signals,
     }),
   listTopics: (campaignId: string) => request<Topic[]>(`/campaigns/${campaignId}/topics?limit=20`),
   selectTopic: (topicId: string) => post<Topic>(`/topics/${topicId}/select`),
@@ -173,8 +191,21 @@ export const api = {
   listPublishJobs: (campaignId?: string) =>
     request<PublishJob[]>(`/publishing/jobs?limit=20${campaignId ? `&campaign_id=${campaignId}` : ""}`),
   getMetaPublishConfig: () => request<FacebookPublishConfig>("/publishing/meta-config"),
+  listAdPixels: (facebookAccountId?: string | null, adAccountId?: string | null) => {
+    const params = new URLSearchParams();
+    if (facebookAccountId) params.set("facebook_account_id", facebookAccountId);
+    if (adAccountId) params.set("ad_account_id", adAccountId);
+    const query = params.toString();
+    return request<AdPixel[]>(`/publishing/ad-pixels${query ? `?${query}` : ""}`);
+  },
+  listMetaAccounts: () => request<MetaAccount[]>("/meta-oauth/accounts"),
+  getMetaOAuthAuthorizeUrl: (returnUrl?: string) =>
+    request<MetaOAuthAuthorizeUrl>(
+      `/meta-oauth/authorize-url${returnUrl ? `?return_url=${encodeURIComponent(returnUrl)}` : ""}`,
+    ),
   buildAdCreativeDraft: (payload: {
     campaignId: string;
+    facebookAccountId?: string | null;
     draftId?: string | null;
     topicId?: string | null;
     creativeAssetId?: string | null;
@@ -187,6 +218,7 @@ export const api = {
   }) =>
     post<AdCreativeDraft>("/publishing/ad-creative-draft", {
       campaign_id: payload.campaignId,
+      facebook_account_id: payload.facebookAccountId ?? null,
       draft_id: payload.draftId ?? null,
       topic_id: payload.topicId ?? null,
       creative_asset_id: payload.creativeAssetId ?? null,
@@ -199,6 +231,7 @@ export const api = {
     }),
   buildAdsPlanDraft: (payload: {
     campaignId: string;
+    facebookAccountId?: string | null;
     draftId?: string | null;
     topicId?: string | null;
     creativeAssetId?: string | null;
@@ -213,6 +246,7 @@ export const api = {
   }) =>
     post<AdsPlanDraft>("/publishing/ads-plan-draft", {
       campaign_id: payload.campaignId,
+      facebook_account_id: payload.facebookAccountId ?? null,
       draft_id: payload.draftId ?? null,
       topic_id: payload.topicId ?? null,
       creative_asset_id: payload.creativeAssetId ?? null,
@@ -227,6 +261,7 @@ export const api = {
     }),
   createMetaAdsDraft: (payload: {
     campaignId: string;
+    facebookAccountId?: string | null;
     draftId: string;
     topicId?: string | null;
     creativeAssetId?: string | null;
@@ -241,6 +276,7 @@ export const api = {
   }) =>
     post<MetaAdsDraftCreateResult>("/publishing/meta-ads-draft", {
       campaign_id: payload.campaignId,
+      facebook_account_id: payload.facebookAccountId ?? null,
       draft_id: payload.draftId,
       topic_id: payload.topicId ?? null,
       creative_asset_id: payload.creativeAssetId ?? null,
@@ -256,6 +292,7 @@ export const api = {
     }),
   prepareMetaAdsPackage: (payload: {
     campaignId: string;
+    facebookAccountId?: string | null;
     draftId: string;
     topicId?: string | null;
     creativeAssetId?: string | null;
@@ -270,6 +307,7 @@ export const api = {
   }) =>
     post<PublishJob>("/publishing/meta-ads-package", {
       campaign_id: payload.campaignId,
+      facebook_account_id: payload.facebookAccountId ?? null,
       draft_id: payload.draftId,
       topic_id: payload.topicId ?? null,
       creative_asset_id: payload.creativeAssetId ?? null,
@@ -285,6 +323,7 @@ export const api = {
     }),
   createPublishJob: (payload: {
     campaignId: string;
+    facebookAccountId?: string | null;
     draftId: string | null;
     channel: "facebook_page" | "facebook_ad";
     message: string;
@@ -292,7 +331,7 @@ export const api = {
     adAccountId?: string;
     imageUrl?: string;
     videoAssetId?: string;
-    mediaType?: "text" | "image" | "video";
+    mediaType?: "image" | "video";
     accessTokenRef?: string;
   }) =>
     post<PublishJob>("/publishing/jobs", {
@@ -300,7 +339,8 @@ export const api = {
       draft_id: payload.draftId,
       channel: payload.channel,
       payload: {
-        media_type: payload.mediaType ?? "text",
+        facebook_account_id: payload.facebookAccountId ?? null,
+        media_type: payload.mediaType ?? "image",
         page_id: payload.pageId || "dry-run-page",
         ad_account_id: payload.adAccountId || "dry-run-ad-account",
         message: payload.message,
@@ -310,6 +350,19 @@ export const api = {
       },
     }),
   publishJob: (jobId: string) => post<PublishJob>(`/publishing/jobs/${jobId}/publish`),
+  activateMetaAdsJob: (jobId: string, confirmationText: string) =>
+    post<PublishJob>(`/publishing/jobs/${jobId}/activate-meta-ads`, {
+      confirm_activate: true,
+      confirmation_text: confirmationText,
+    }),
+  pauseMetaAdsJob: (jobId: string, confirmationText: string) =>
+    post<PublishJob>(`/publishing/jobs/${jobId}/pause-meta-ads`, {
+      confirm_pause: true,
+      confirmation_text: confirmationText,
+    }),
+  syncMetaAdsStatus: (jobId: string) => post<PublishJob>(`/publishing/jobs/${jobId}/sync-meta-status`),
+  syncMetaAdsInsights: (jobId: string, datePreset = "today") =>
+    post<PublishJob>(`/publishing/jobs/${jobId}/sync-meta-insights?date_preset=${datePreset}`),
 };
 
 export { ApiError };

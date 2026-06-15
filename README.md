@@ -22,20 +22,20 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 docker compose -f infra/docker-compose.yml up -d
 alembic upgrade head
-uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8001
 ```
 
 Health check:
 
 ```text
-GET http://127.0.0.1:8000/api/v1/health/live
-GET http://127.0.0.1:8000/api/v1/health/ready
+GET http://127.0.0.1:8001/api/v1/health/live
+GET http://127.0.0.1:8001/api/v1/health/ready
 ```
 
 API docs:
 
 ```text
-http://127.0.0.1:8000/docs
+http://127.0.0.1:8001/docs
 ```
 
 Web admin:
@@ -52,10 +52,10 @@ The admin opens at:
 http://127.0.0.1:5173
 ```
 
-The default API base URL is `http://127.0.0.1:8000/api/v1`. Override it with:
+The default API base URL is `http://127.0.0.1:8001/api/v1`. Override it with:
 
 ```env
-VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1
+VITE_API_BASE_URL=http://127.0.0.1:8001/api/v1
 ```
 
 ## Architecture
@@ -103,7 +103,7 @@ Image generation can also use Volcengine Ark:
 IMAGE_PROVIDER=volcengine
 VOLCENGINE_IMAGE_MODEL=doubao-seedream-4-5-251128
 VOLCENGINE_IMAGE_SIZE=2K
-VOLCENGINE_IMAGE_WATERMARK=true
+VOLCENGINE_IMAGE_WATERMARK=false
 ```
 
 Use `IMAGE_PROVIDER=placeholder` when you want to create creative records without

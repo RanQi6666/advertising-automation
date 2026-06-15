@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +9,8 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.image import get_image_provider
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.creative import CreativeGenerateRequest
+from backend.app.services.creative_asset_urls import repair_creative_asset_urls
+from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.utils import get_required
 
 
@@ -15,6 +19,7 @@ class CreativeService:
         self.settings = get_settings()
         self.llm = get_llm_provider(self.settings)
         self.image_provider = get_image_provider(self.settings)
+        self.image_storage = ImageStorageService(self.settings)
 
     async def generate_creatives(
         self,
@@ -30,15 +35,28 @@ class CreativeService:
         generated_images = await self.image_provider.generate_images(briefs)
         assets: list[CreativeAsset] = []
         for image in generated_images:
+            image_url = image.url
+            storage_key = image.storage_key
+            metadata = dict(image.metadata)
+            if image.url:
+                metadata["provider_image_url"] = image.url
+                if image.storage_key:
+                    metadata["provider_storage_key"] = image.storage_key
+                image_id = str(uuid4())
+                image_url, storage_key = await self.image_storage.transfer_provider_image(
+                    source_url=image.url,
+                    campaign_id=draft.campaign_id,
+                    image_id=image_id,
+                )
             asset = CreativeAsset(
                 campaign_id=draft.campaign_id,
                 draft_id=draft.id,
-                url=image.url,
-                storage_key=image.storage_key,
+                url=image_url,
+                storage_key=storage_key,
                 prompt=image.prompt,
                 alt_text=image.alt_text,
                 size=image.size,
-                metadata_json=image.metadata,
+                metadata_json=metadata,
             )
             session.add(asset)
             assets.append(asset)
@@ -62,4 +80,6 @@ class CreativeService:
             .limit(limit)
             .offset(offset)
         )
-        return list(result.scalars().all())
+        assets = list(result.scalars().all())
+        await repair_creative_asset_urls(session, assets, self.image_storage)
+        return assets
