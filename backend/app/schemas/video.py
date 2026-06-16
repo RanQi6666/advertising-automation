@@ -24,6 +24,18 @@ class VideoStoryboardGenerateRequest(BaseModel):
     metadata_json: dict = Field(default_factory=dict)
 
 
+class VideoStoryboardRewriteRequest(BaseModel):
+    campaign_id: str
+    creative_asset_ids: list[str] = Field(min_length=1, max_length=20)
+    draft_id: str | None = None
+    duration_seconds: int = Field(default=12, ge=1, le=300)
+    aspect_ratio: str = "9:16"
+    storyboard: list[dict] = Field(default_factory=list)
+    storyboard_text: str | None = None
+    feedback: str = Field(min_length=1)
+    metadata_json: dict = Field(default_factory=dict)
+
+
 class VideoStoryboardRead(BaseModel):
     campaign_id: str
     draft_id: str | None = None

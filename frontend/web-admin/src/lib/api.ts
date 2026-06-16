@@ -1,16 +1,10 @@
 import type {
-  AdCreativeDraft,
-  AdPixel,
-  AdsPlanDraft,
+  AdGenerationJob,
+  AdGenerationJobAccepted,
   Campaign,
   CopyDraft,
   CreativeAsset,
-  FacebookPublishConfig,
   LandingPageSnapshot,
-  MetaAccount,
-  MetaAdsDraftCreateResult,
-  MetaOAuthAuthorizeUrl,
-  PublishJob,
   ReviewTask,
   Topic,
   VideoAsset,
@@ -23,6 +17,23 @@ import type {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8001/api/v1";
 
 type JsonBody = Record<string, unknown> | unknown[];
+export type TopicStreamEvent =
+  | { type: "start"; limit: number }
+  | { type: "slot"; index: number }
+  | { type: "topic"; index: number; topic: Topic }
+  | { type: "error"; index?: number; message: string }
+  | { type: "done"; generated?: number };
+export type CreativeStreamEvent =
+  | { type: "start"; limit: number; indices?: number[] }
+  | { type: "slot"; index: number }
+  | { type: "asset"; index: number; asset: CreativeAsset }
+  | { type: "error"; index?: number; message: string }
+  | { type: "done"; generated?: number };
+export type VideoStoryboardTextStreamEvent =
+  | { type: "start"; duration_seconds: number; aspect_ratio: string }
+  | { type: "delta"; text: string }
+  | { type: "error"; message: string }
+  | { type: "done"; duration_seconds: number; aspect_ratio: string; text?: string };
 
 class ApiError extends Error {
   status: number;
@@ -71,10 +82,169 @@ function post<T>(path: string, body?: JsonBody): Promise<T> {
   });
 }
 
+async function streamNdjson<TEvent>(
+  path: string,
+  body: JsonBody,
+  onEvent: (event: TEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiError(response.status, text || response.statusText);
+  }
+  if (!response.body) {
+    throw new ApiError(response.status, "Streaming response is not available.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function processLine(line: string) {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    onEvent(JSON.parse(trimmed) as TEvent);
+  }
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      processLine(line);
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+
+  buffer += decoder.decode();
+  processLine(buffer);
+}
+
+async function streamSse<TEvent>(
+  path: string,
+  body: JsonBody,
+  onEvent: (event: TEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiError(response.status, text || response.statusText);
+  }
+  if (!response.body) {
+    throw new ApiError(response.status, "Streaming response is not available.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function processBlock(block: string) {
+    const lines = block.split("\n");
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    const data = dataLines.join("\n").trim();
+    if (!data) return;
+    onEvent(JSON.parse(data) as TEvent);
+  }
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    let boundaryIndex = buffer.indexOf("\n\n");
+    while (boundaryIndex >= 0) {
+      const block = buffer.slice(0, boundaryIndex);
+      buffer = buffer.slice(boundaryIndex + 2);
+      processBlock(block);
+      boundaryIndex = buffer.indexOf("\n\n");
+    }
+  }
+
+  buffer += decoder.decode().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (buffer.trim()) processBlock(buffer);
+}
+
 export const api = {
   baseUrl: API_BASE_URL,
 
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
+  listAdGenerationJobs: (limit = 50) =>
+    request<AdGenerationJob[]>(`/integrations/publishing/ad-generation/jobs?limit=${limit}`),
+  getAdGenerationJob: (jobId: string) =>
+    request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}`),
+  getAdGenerationResult: (jobId: string) =>
+    request<Record<string, unknown>>(
+      `/integrations/publishing/ad-generation/jobs/${jobId}/result`,
+    ),
+  deleteAdGenerationJob: (jobId: string) =>
+    request<void>(`/integrations/publishing/ad-generation/jobs/${jobId}`, {
+      method: "DELETE",
+    }),
+  createAdGenerationJob: (payload: {
+    externalOrderId?: string | null;
+    rawContent: string;
+    structuredFields: Record<string, unknown>;
+    deliveryExtraction?: WorkOrderDeliveryExtraction | null;
+    returnUrl?: string | null;
+    creativeType?: "image" | "video" | "carousel";
+    imageCount?: number;
+    dailyBudget?: number | null;
+  }) =>
+    post<AdGenerationJobAccepted>("/integrations/publishing/ad-generation/jobs", {
+      external_order_id: payload.externalOrderId ?? null,
+      return_url: payload.returnUrl ?? null,
+      work_order: {
+        raw_content: payload.rawContent,
+        structured_fields: payload.structuredFields,
+        delivery_extraction: payload.deliveryExtraction ?? null,
+      },
+      preferences: {
+        creative_type: payload.creativeType ?? "image",
+        image_count: payload.imageCount ?? 1,
+        daily_budget: payload.dailyBudget ?? 5000,
+      },
+    }),
+  updateAdGenerationReview: (
+    jobId: string,
+    resultPayload: Record<string, unknown>,
+    reviewNotes?: string,
+  ) =>
+    request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}/review`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        result_payload: resultPayload,
+        review_notes: reviewNotes ?? null,
+      }),
+    }),
+  confirmAdGenerationReview: (
+    jobId: string,
+    resultPayload?: Record<string, unknown>,
+    reviewNotes?: string,
+  ) =>
+    post<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}/confirm`, {
+      result_payload: resultPayload ?? null,
+      review_notes: reviewNotes ?? null,
+    }),
   extractWorkOrderDeliveryFields: (rawContent: string) =>
     post<WorkOrderDeliveryExtraction>("/work-orders/extract-delivery-fields", {
       raw_content: rawContent,
@@ -109,6 +279,21 @@ export const api = {
       limit,
       signals,
     }),
+  generateTopicsStream: (
+    campaignId: string,
+    limit = 3,
+    signals: Record<string, unknown> = {},
+    onEvent: (event: TopicStreamEvent) => void,
+  ) =>
+    streamNdjson(
+      "/topics/generate/stream",
+      {
+        campaign_id: campaignId,
+        limit,
+        signals,
+      },
+      onEvent,
+    ),
   listTopics: (campaignId: string) => request<Topic[]>(`/campaigns/${campaignId}/topics?limit=20`),
   selectTopic: (topicId: string) => post<Topic>(`/topics/${topicId}/select`),
   rejectTopic: (topicId: string) => post<Topic>(`/topics/${topicId}/reject`),
@@ -131,6 +316,28 @@ export const api = {
       count,
       size,
     }),
+  generateCreativesStream: (
+    draftId: string,
+    count = 3,
+    size = "1:1",
+    onEvent: (event: CreativeStreamEvent) => void,
+    targetIndex?: number,
+  ) =>
+    streamNdjson<CreativeStreamEvent>(
+      "/creatives/generate/stream",
+      {
+        draft_id: draftId,
+        count,
+        size,
+        ...(targetIndex ? { target_index: targetIndex } : {}),
+      },
+      onEvent,
+    ),
+  regenerateCreative: (creativeId: string, feedback: string, size?: string) =>
+    post<CreativeAsset>(`/creatives/${creativeId}/regenerate`, {
+      feedback,
+      ...(size ? { size } : {}),
+    }),
   listCreatives: (campaignId: string) =>
     request<CreativeAsset[]>(`/campaigns/${campaignId}/creatives?limit=20`),
 
@@ -150,6 +357,74 @@ export const api = {
       aspect_ratio: aspectRatio,
       ...(instructions?.trim() ? { instructions } : {}),
     }),
+  streamVideoStoryboard: (
+    campaignId: string,
+    creativeAssetIds: string[],
+    draftId: string | null,
+    durationSeconds: number,
+    aspectRatio: string,
+    instructions: string | undefined,
+    onEvent: (event: VideoStoryboardTextStreamEvent) => void,
+  ) =>
+    streamSse<VideoStoryboardTextStreamEvent>(
+      "/videos/storyboard/stream",
+      {
+        campaign_id: campaignId,
+        creative_asset_ids: creativeAssetIds,
+        draft_id: draftId,
+        duration_seconds: durationSeconds,
+        aspect_ratio: aspectRatio,
+        ...(instructions?.trim() ? { instructions } : {}),
+      },
+      onEvent,
+    ),
+  rewriteVideoStoryboard: (payload: {
+    campaignId: string;
+    creativeAssetIds: string[];
+    draftId: string | null;
+    durationSeconds: number;
+    aspectRatio: string;
+    storyboard: Record<string, unknown>[];
+    storyboardText: string;
+    feedback: string;
+  }) =>
+    post<VideoStoryboardResponse>("/videos/storyboard/rewrite", {
+      campaign_id: payload.campaignId,
+      creative_asset_ids: payload.creativeAssetIds,
+      draft_id: payload.draftId,
+      duration_seconds: payload.durationSeconds,
+      aspect_ratio: payload.aspectRatio,
+      storyboard: payload.storyboard,
+      storyboard_text: payload.storyboardText,
+      feedback: payload.feedback,
+    }),
+  streamRewriteVideoStoryboard: (
+    payload: {
+      campaignId: string;
+      creativeAssetIds: string[];
+      draftId: string | null;
+      durationSeconds: number;
+      aspectRatio: string;
+      storyboard: Record<string, unknown>[];
+      storyboardText: string;
+      feedback: string;
+    },
+    onEvent: (event: VideoStoryboardTextStreamEvent) => void,
+  ) =>
+    streamSse<VideoStoryboardTextStreamEvent>(
+      "/videos/storyboard/rewrite/stream",
+      {
+        campaign_id: payload.campaignId,
+        creative_asset_ids: payload.creativeAssetIds,
+        draft_id: payload.draftId,
+        duration_seconds: payload.durationSeconds,
+        aspect_ratio: payload.aspectRatio,
+        storyboard: payload.storyboard,
+        storyboard_text: payload.storyboardText,
+        feedback: payload.feedback,
+      },
+      onEvent,
+    ),
   createVideoFromImages: (payload: {
     campaignId: string;
     creativeAssetIds: string[];
@@ -187,182 +462,6 @@ export const api = {
       feedback,
     }),
   listPendingReviews: () => request<ReviewTask[]>("/reviews/pending?limit=100"),
-
-  listPublishJobs: (campaignId?: string) =>
-    request<PublishJob[]>(`/publishing/jobs?limit=20${campaignId ? `&campaign_id=${campaignId}` : ""}`),
-  getMetaPublishConfig: () => request<FacebookPublishConfig>("/publishing/meta-config"),
-  listAdPixels: (facebookAccountId?: string | null, adAccountId?: string | null) => {
-    const params = new URLSearchParams();
-    if (facebookAccountId) params.set("facebook_account_id", facebookAccountId);
-    if (adAccountId) params.set("ad_account_id", adAccountId);
-    const query = params.toString();
-    return request<AdPixel[]>(`/publishing/ad-pixels${query ? `?${query}` : ""}`);
-  },
-  listMetaAccounts: () => request<MetaAccount[]>("/meta-oauth/accounts"),
-  getMetaOAuthAuthorizeUrl: (returnUrl?: string) =>
-    request<MetaOAuthAuthorizeUrl>(
-      `/meta-oauth/authorize-url${returnUrl ? `?return_url=${encodeURIComponent(returnUrl)}` : ""}`,
-    ),
-  buildAdCreativeDraft: (payload: {
-    campaignId: string;
-    facebookAccountId?: string | null;
-    draftId?: string | null;
-    topicId?: string | null;
-    creativeAssetId?: string | null;
-    videoAssetId?: string | null;
-    facebookVideoId?: string | null;
-    pageId?: string | null;
-    adAccountId?: string | null;
-    destinationUrl?: string | null;
-    ctaType?: string;
-  }) =>
-    post<AdCreativeDraft>("/publishing/ad-creative-draft", {
-      campaign_id: payload.campaignId,
-      facebook_account_id: payload.facebookAccountId ?? null,
-      draft_id: payload.draftId ?? null,
-      topic_id: payload.topicId ?? null,
-      creative_asset_id: payload.creativeAssetId ?? null,
-      video_asset_id: payload.videoAssetId ?? null,
-      facebook_video_id: payload.facebookVideoId ?? null,
-      page_id: payload.pageId ?? null,
-      ad_account_id: payload.adAccountId ?? null,
-      destination_url: payload.destinationUrl ?? null,
-      cta_type: payload.ctaType ?? "LEARN_MORE",
-    }),
-  buildAdsPlanDraft: (payload: {
-    campaignId: string;
-    facebookAccountId?: string | null;
-    draftId?: string | null;
-    topicId?: string | null;
-    creativeAssetId?: string | null;
-    videoAssetId?: string | null;
-    facebookVideoId?: string | null;
-    pageId?: string | null;
-    adAccountId?: string | null;
-    destinationUrl?: string | null;
-    ctaType?: string;
-    dailyBudget?: number | null;
-    pixelId?: string | null;
-  }) =>
-    post<AdsPlanDraft>("/publishing/ads-plan-draft", {
-      campaign_id: payload.campaignId,
-      facebook_account_id: payload.facebookAccountId ?? null,
-      draft_id: payload.draftId ?? null,
-      topic_id: payload.topicId ?? null,
-      creative_asset_id: payload.creativeAssetId ?? null,
-      video_asset_id: payload.videoAssetId ?? null,
-      facebook_video_id: payload.facebookVideoId ?? null,
-      page_id: payload.pageId ?? null,
-      ad_account_id: payload.adAccountId ?? null,
-      destination_url: payload.destinationUrl ?? null,
-      cta_type: payload.ctaType ?? "LEARN_MORE",
-      daily_budget: payload.dailyBudget ?? null,
-      pixel_id: payload.pixelId ?? null,
-    }),
-  createMetaAdsDraft: (payload: {
-    campaignId: string;
-    facebookAccountId?: string | null;
-    draftId: string;
-    topicId?: string | null;
-    creativeAssetId?: string | null;
-    videoAssetId?: string | null;
-    facebookVideoId?: string | null;
-    pageId?: string | null;
-    adAccountId?: string | null;
-    destinationUrl?: string | null;
-    ctaType?: string;
-    dailyBudget: number;
-    pixelId?: string | null;
-  }) =>
-    post<MetaAdsDraftCreateResult>("/publishing/meta-ads-draft", {
-      campaign_id: payload.campaignId,
-      facebook_account_id: payload.facebookAccountId ?? null,
-      draft_id: payload.draftId,
-      topic_id: payload.topicId ?? null,
-      creative_asset_id: payload.creativeAssetId ?? null,
-      video_asset_id: payload.videoAssetId ?? null,
-      facebook_video_id: payload.facebookVideoId ?? null,
-      page_id: payload.pageId ?? null,
-      ad_account_id: payload.adAccountId ?? null,
-      destination_url: payload.destinationUrl ?? null,
-      cta_type: payload.ctaType ?? "LEARN_MORE",
-      daily_budget: payload.dailyBudget,
-      pixel_id: payload.pixelId ?? null,
-      confirm_create_paused: true,
-    }),
-  prepareMetaAdsPackage: (payload: {
-    campaignId: string;
-    facebookAccountId?: string | null;
-    draftId: string;
-    topicId?: string | null;
-    creativeAssetId?: string | null;
-    videoAssetId?: string | null;
-    facebookVideoId?: string | null;
-    pageId?: string | null;
-    adAccountId?: string | null;
-    destinationUrl?: string | null;
-    ctaType?: string;
-    dailyBudget: number;
-    pixelId?: string | null;
-  }) =>
-    post<PublishJob>("/publishing/meta-ads-package", {
-      campaign_id: payload.campaignId,
-      facebook_account_id: payload.facebookAccountId ?? null,
-      draft_id: payload.draftId,
-      topic_id: payload.topicId ?? null,
-      creative_asset_id: payload.creativeAssetId ?? null,
-      video_asset_id: payload.videoAssetId ?? null,
-      facebook_video_id: payload.facebookVideoId ?? null,
-      page_id: payload.pageId ?? null,
-      ad_account_id: payload.adAccountId ?? null,
-      destination_url: payload.destinationUrl ?? null,
-      cta_type: payload.ctaType ?? "LEARN_MORE",
-      daily_budget: payload.dailyBudget,
-      pixel_id: payload.pixelId ?? null,
-      confirm_prepare: true,
-    }),
-  createPublishJob: (payload: {
-    campaignId: string;
-    facebookAccountId?: string | null;
-    draftId: string | null;
-    channel: "facebook_page" | "facebook_ad";
-    message: string;
-    pageId?: string;
-    adAccountId?: string;
-    imageUrl?: string;
-    videoAssetId?: string;
-    mediaType?: "image" | "video";
-    accessTokenRef?: string;
-  }) =>
-    post<PublishJob>("/publishing/jobs", {
-      campaign_id: payload.campaignId,
-      draft_id: payload.draftId,
-      channel: payload.channel,
-      payload: {
-        facebook_account_id: payload.facebookAccountId ?? null,
-        media_type: payload.mediaType ?? "image",
-        page_id: payload.pageId || "dry-run-page",
-        ad_account_id: payload.adAccountId || "dry-run-ad-account",
-        message: payload.message,
-        ...(payload.accessTokenRef ? { access_token_ref: payload.accessTokenRef } : {}),
-        ...(payload.imageUrl ? { image_url: payload.imageUrl } : {}),
-        ...(payload.videoAssetId ? { video_asset_id: payload.videoAssetId } : {}),
-      },
-    }),
-  publishJob: (jobId: string) => post<PublishJob>(`/publishing/jobs/${jobId}/publish`),
-  activateMetaAdsJob: (jobId: string, confirmationText: string) =>
-    post<PublishJob>(`/publishing/jobs/${jobId}/activate-meta-ads`, {
-      confirm_activate: true,
-      confirmation_text: confirmationText,
-    }),
-  pauseMetaAdsJob: (jobId: string, confirmationText: string) =>
-    post<PublishJob>(`/publishing/jobs/${jobId}/pause-meta-ads`, {
-      confirm_pause: true,
-      confirmation_text: confirmationText,
-    }),
-  syncMetaAdsStatus: (jobId: string) => post<PublishJob>(`/publishing/jobs/${jobId}/sync-meta-status`),
-  syncMetaAdsInsights: (jobId: string, datePreset = "today") =>
-    post<PublishJob>(`/publishing/jobs/${jobId}/sync-meta-insights?date_preset=${datePreset}`),
 };
 
 export { ApiError };

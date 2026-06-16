@@ -14,8 +14,3 @@ class Client(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     brands = relationship("Brand", back_populates="client", cascade="all, delete-orphan")
     campaigns = relationship("Campaign", back_populates="client", cascade="all, delete-orphan")
-    facebook_accounts = relationship(
-        "FacebookAccount",
-        back_populates="client",
-        cascade="all, delete-orphan",
-    )

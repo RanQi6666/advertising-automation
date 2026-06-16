@@ -6,14 +6,12 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import (
     CreativeStatus,
     DraftStatus,
-    PublishStatus,
     ReviewDecision,
     ReviewEntityType,
     ReviewStatus,
     TopicStatus,
     VideoStatus,
 )
-from backend.app.db.models.publish_job import PublishJob
 from backend.app.db.models.review import ReviewTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
@@ -94,20 +92,3 @@ class ReviewService:
             else:
                 video.status = VideoStatus.NEEDS_REVISION.value
             return
-
-        if payload.entity_type == ReviewEntityType.PUBLISH_JOB:
-            job = await get_required(session, PublishJob, payload.entity_id)
-            metadata = dict(job.metadata_json or {})
-            if payload.decision == ReviewDecision.APPROVED:
-                metadata["review_status"] = "approved"
-                metadata["review_feedback"] = payload.feedback
-                job.metadata_json = metadata
-            elif payload.decision == ReviewDecision.REJECTED:
-                metadata["review_status"] = "rejected"
-                metadata["review_feedback"] = payload.feedback
-                job.metadata_json = metadata
-                job.status = PublishStatus.CANCELLED.value
-            else:
-                metadata["review_status"] = "needs_revision"
-                metadata["review_feedback"] = payload.feedback
-                job.metadata_json = metadata

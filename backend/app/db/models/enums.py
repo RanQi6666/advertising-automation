@@ -54,17 +54,3 @@ class ReviewEntityType(StrEnum):
     COPY_DRAFT = "copy_draft"
     CREATIVE_ASSET = "creative_asset"
     VIDEO_ASSET = "video_asset"
-    PUBLISH_JOB = "publish_job"
-
-
-class PublishStatus(StrEnum):
-    QUEUED = "queued"
-    PUBLISHING = "publishing"
-    PUBLISHED = "published"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class PublishChannel(StrEnum):
-    FACEBOOK_PAGE = "facebook_page"
-    FACEBOOK_AD = "facebook_ad"

@@ -1,31 +1,40 @@
 import logging
 import re
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlparse
 
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.config import get_settings
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
+from backend.app.db.models.agent_run import AgentRun
+from backend.app.db.models.campaign import Campaign
+from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
+from backend.app.db.models.review import ReviewTask
+from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.video_asset import VideoAsset
+from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import AsyncSessionLocal
 from backend.app.schemas.ad_generation import (
     PublishingAdGenerationAssets,
     PublishingAdGenerationJobCreate,
     PublishingAdGenerationResult,
     PublishingAdGenerationReview,
+    PublishingAdGenerationReviewConfirm,
+    PublishingAdGenerationReviewUpdate,
     PublishingAdSetPayload,
     PublishingCampaignPayload,
-    PublishingCreativePayload,
-    PublishingGeneratedImage,
 )
-from backend.app.schemas.copywriting import CopyGenerateRequest
-from backend.app.schemas.creative import CreativeGenerateRequest
-from backend.app.schemas.topic import TopicGenerateRequest
-from backend.app.schemas.work_order import CampaignFromWorkOrderRequest, WorkOrderCreate
+from backend.app.schemas.work_order import (
+    CampaignFromWorkOrderRequest,
+    WorkOrderCreate,
+)
 from backend.app.services.campaign_service import CampaignService
-from backend.app.services.copywriting_service import CopywritingService
-from backend.app.services.creative_asset_urls import resolve_creative_image_url
-from backend.app.services.creative_service import CreativeService
-from backend.app.services.topic_service import TopicService
 from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -81,21 +90,38 @@ COUNTRY_ALIASES = {
     "\u9a6c\u6765\u897f\u4e9a": "MY",
 }
 
-SALES_EVENTS = {"purchase", "shop", "buy", "order", "sales", "\u8d2d\u4e70", "\u4e0b\u5355"}
+SALES_EVENTS = {
+    "purchase",
+    "shop",
+    "shopping",
+    "buy",
+    "order",
+    "sales",
+    "\u8d2d\u4e70",
+    "\u8d2d\u7269",
+    "\u4e0b\u5355",
+}
 ADD_TO_CART_EVENTS = {"add_to_cart", "addtocart", "cart", "\u52a0\u8d2d"}
 LEAD_EVENTS = {"lead", "leads", "signup", "register", "\u7ebf\u7d22", "\u6ce8\u518c"}
 TRAFFIC_EVENTS = {"traffic", "click", "link_click", "\u6d41\u91cf", "\u70b9\u51fb"}
 VIDEO_EVENTS = {"video", "view", "engagement", "thruplay", "\u89c6\u9891", "\u4e92\u52a8"}
 APP_EVENTS = {"app", "install", "app_install", "\u5e94\u7528", "\u5b89\u88c5"}
+WORKFLOW_STATUSES = {
+    "fields_review",
+    "topic_review",
+    "copy_review",
+    "image_review",
+    "video_review",
+    "final_review",
+    "reviewing",
+}
 
 
 class AdGenerationService:
     def __init__(self) -> None:
+        self.settings = get_settings()
         self.work_orders = WorkOrderService()
         self.campaigns = CampaignService()
-        self.topics = TopicService()
-        self.copywriting = CopywritingService()
-        self.creatives = CreativeService()
 
     async def create_job(
         self,
@@ -108,15 +134,155 @@ class AdGenerationService:
             callback_url=str(payload.callback_url) if payload.callback_url else None,
             request_payload=payload.model_dump(mode="json"),
             result_payload={},
-            metadata_json=payload.metadata_json or {},
+            metadata_json={
+                **(payload.metadata_json or {}),
+                "return_url": str(payload.return_url) if payload.return_url else None,
+            },
         )
         session.add(job)
         await session.commit()
         await session.refresh(job)
         return job
 
+    async def list_jobs(
+        self,
+        session: AsyncSession,
+        limit: int,
+        offset: int,
+        status: str | None = None,
+    ) -> list[AdGenerationJob]:
+        statement = select(AdGenerationJob).order_by(AdGenerationJob.created_at.desc())
+        if status:
+            statement = statement.where(AdGenerationJob.status == status)
+        result = await session.execute(statement.limit(limit).offset(offset))
+        return list(result.scalars().all())
+
     async def get_job(self, session: AsyncSession, job_id: str) -> AdGenerationJob:
         return await get_required(session, AdGenerationJob, job_id)  # type: ignore[return-value]
+
+    async def delete_job(self, session: AsyncSession, job_id: str) -> None:
+        job = await self.get_job(session, job_id)
+        storage_keys = await self._delete_generated_records(session, job)
+        await session.delete(job)
+        await session.commit()
+        _delete_local_storage_keys(storage_keys, self.settings.local_storage_root)
+
+    async def _delete_generated_records(
+        self,
+        session: AsyncSession,
+        job: AdGenerationJob,
+    ) -> set[str]:
+        campaign_id, work_order_id = _generated_record_ids(job)
+        if not campaign_id:
+            campaign_id = await _generated_campaign_id_from_metadata(session, job.id)
+        if not campaign_id and not work_order_id:
+            return set()
+
+        storage_keys: set[str] = set()
+        entity_ids: set[str] = {job.id}
+
+        if campaign_id:
+            entity_ids.add(campaign_id)
+            campaign_work_order_id = await session.scalar(
+                select(Campaign.work_order_id).where(Campaign.id == campaign_id)
+            )
+            work_order_id = work_order_id or campaign_work_order_id
+
+            topic_ids = await _ids_for_campaign(session, ContentTopic, campaign_id)
+            draft_ids = await _ids_for_campaign(session, CopyDraft, campaign_id)
+            creative_rows = await session.execute(
+                select(CreativeAsset.id, CreativeAsset.storage_key, CreativeAsset.url).where(
+                    CreativeAsset.campaign_id == campaign_id
+                )
+            )
+            video_rows = await session.execute(
+                select(VideoAsset.id, VideoAsset.storage_key, VideoAsset.url).where(
+                    VideoAsset.campaign_id == campaign_id
+                )
+            )
+
+            for creative_id, storage_key, url in creative_rows.all():
+                entity_ids.add(creative_id)
+                _collect_storage_key(storage_keys, storage_key)
+                _collect_storage_key(storage_keys, _storage_key_from_public_url(url))
+            for video_id, storage_key, url in video_rows.all():
+                entity_ids.add(video_id)
+                _collect_storage_key(storage_keys, storage_key)
+                _collect_storage_key(storage_keys, _storage_key_from_public_url(url))
+
+            entity_ids.update(topic_ids)
+            entity_ids.update(draft_ids)
+            if work_order_id:
+                entity_ids.add(work_order_id)
+
+            await session.execute(
+                delete(ReviewTask)
+                .where(ReviewTask.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            if entity_ids:
+                await session.execute(
+                    delete(ReviewTask)
+                    .where(ReviewTask.entity_id.in_(entity_ids))
+                    .execution_options(synchronize_session=False)
+                )
+            await session.execute(
+                delete(AgentRun)
+                .where(AgentRun.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(LandingPageSnapshot)
+                .where(LandingPageSnapshot.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(CreativeAsset)
+                .where(CreativeAsset.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(VideoAsset)
+                .where(VideoAsset.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(CopyDraft)
+                .where(CopyDraft.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(ContentTopic)
+                .where(ContentTopic.campaign_id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(
+                delete(Campaign)
+                .where(Campaign.id == campaign_id)
+                .execution_options(synchronize_session=False)
+            )
+
+        if work_order_id:
+            await session.execute(
+                delete(LandingPageSnapshot)
+                .where(LandingPageSnapshot.work_order_id == work_order_id)
+                .execution_options(synchronize_session=False)
+            )
+            remaining_campaign_id = await session.scalar(
+                select(Campaign.id).where(Campaign.work_order_id == work_order_id).limit(1)
+            )
+            if not remaining_campaign_id:
+                await session.execute(
+                    delete(WorkOrder)
+                    .where(WorkOrder.id == work_order_id)
+                    .execution_options(synchronize_session=False)
+                )
+
+        return storage_keys
+
+    def review_url_for_job(self, job_id: str) -> str:
+        base_url = self.settings.ad_generation_review_base_url.rstrip("/")
+        return f"{base_url}/review/ad-generation/{job_id}"
 
     async def run_job(self, job_id: str) -> None:
         async with AsyncSessionLocal() as session:
@@ -135,8 +301,12 @@ class AdGenerationService:
             payload = PublishingAdGenerationJobCreate.model_validate(job.request_payload)
             result = await self._generate_result(session, job, payload)
             job.result_payload = result.model_dump(mode="json")
-            job.status = "completed"
-            job.completed_at = utcnow()
+            job.status = "fields_review"
+            job.metadata_json = {
+                **(job.metadata_json or {}),
+                "review_url": self.review_url_for_job(job.id),
+                "workflow_stage": "fields_review",
+            }
             await session.commit()
             await session.refresh(job)
             return job
@@ -151,6 +321,52 @@ class AdGenerationService:
             await session.refresh(failed_job)
             return failed_job
 
+    async def update_review_payload(
+        self,
+        session: AsyncSession,
+        job_id: str,
+        payload: PublishingAdGenerationReviewUpdate,
+    ) -> AdGenerationJob:
+        job = await self.get_job(session, job_id)
+        result_payload = _merge_result_payload(job.result_payload or {}, payload.result_payload)
+        next_status = _workflow_status_from_payload(result_payload) or "reviewing"
+        result_payload["status"] = next_status
+        job.result_payload = result_payload
+        job.status = next_status
+        job.metadata_json = {
+            **(job.metadata_json or {}),
+            "review_notes": payload.review_notes,
+            "review_updated_at": utcnow().isoformat(),
+            "workflow_stage": next_status,
+        }
+        await session.commit()
+        await session.refresh(job)
+        return job
+
+    async def confirm_review(
+        self,
+        session: AsyncSession,
+        job_id: str,
+        payload: PublishingAdGenerationReviewConfirm,
+    ) -> AdGenerationJob:
+        job = await self.get_job(session, job_id)
+        result_payload = job.result_payload or {}
+        if payload.result_payload is not None:
+            result_payload = _merge_result_payload(result_payload, payload.result_payload)
+        result_payload["status"] = "returned"
+        job.result_payload = result_payload
+        job.status = "returned"
+        job.completed_at = utcnow()
+        job.metadata_json = {
+            **(job.metadata_json or {}),
+            "review_notes": payload.review_notes,
+            "review_confirmed_at": utcnow().isoformat(),
+            "workflow_stage": "returned",
+        }
+        await session.commit()
+        await session.refresh(job)
+        return job
+
     async def _generate_result(
         self,
         session: AsyncSession,
@@ -159,8 +375,13 @@ class AdGenerationService:
     ) -> PublishingAdGenerationResult:
         raw_content = payload.work_order.raw_content
         structured_fields = payload.work_order.structured_fields or {}
-        extraction = await self.work_orders.extract_delivery_fields(raw_content)
-        extraction_data = extraction.model_dump(mode="json")
+        if payload.work_order.delivery_extraction:
+            extraction_data = payload.work_order.delivery_extraction.model_dump(mode="json")
+            extraction_source = "provided"
+        else:
+            extraction = await self.work_orders.extract_delivery_fields(raw_content)
+            extraction_data = extraction.model_dump(mode="json")
+            extraction_source = "llm"
         llm_fields = extraction_data.get("fields") or {}
         reviewed_fields = _build_reviewed_fields(structured_fields, llm_fields)
 
@@ -175,6 +396,7 @@ class AdGenerationService:
                     "external_order_id": payload.external_order_id,
                     "structured_fields": structured_fields,
                     "extraction_review": extraction_data.get("review") or {},
+                    "extraction_source": extraction_source,
                 },
             ),
         )
@@ -195,64 +417,30 @@ class AdGenerationService:
             ),
         )
 
+        campaign.metadata_json = {
+            **(campaign.metadata_json or {}),
+            "work_order": {
+                "raw_content": raw_content,
+                "parsed_fields": work_order.parsed_fields,
+                "country": work_order.country,
+                "media": work_order.media,
+                "landing_url": landing_url,
+                "report_timezone": work_order.report_timezone,
+            },
+        }
         if landing_url:
             campaign.metadata_json = {
                 **(campaign.metadata_json or {}),
                 "landing_page": {"url": landing_url, "status": "provided"},
             }
-            await session.commit()
-            await session.refresh(campaign)
-
-        topic = (
-            await self.topics.generate_topics(
-                session,
-                TopicGenerateRequest(
-                    campaign_id=campaign.id,
-                    limit=1,
-                    signals={"integration": "publishing_system"},
-                ),
-            )
-        )[0]
-        draft = await self.copywriting.generate_copy(
-            session,
-            CopyGenerateRequest(
-                topic_id=topic.id,
-                constraints={"channel": "facebook_ad", "format": "publishing_system"},
-            ),
-        )
+        await session.commit()
+        await session.refresh(campaign)
 
         warnings: list[str] = []
-        creative_assets = []
-        if payload.preferences.creative_type == "image":
-            creative_assets = await self.creatives.generate_creatives(
-                session,
-                CreativeGenerateRequest(
-                    draft_id=draft.id,
-                    count=payload.preferences.image_count,
-                    size="1:1",
-                ),
-            )
-        else:
+        if payload.preferences.creative_type != "image":
             warnings.append(
                 f"{payload.preferences.creative_type} creative generation is reserved; "
-                "returning copy and targeting only."
-            )
-
-        images = [
-            PublishingGeneratedImage(
-                id=asset.id,
-                filename=_filename_from_url(asset.url),
-                url=resolve_creative_image_url(asset, self.creatives.image_storage),
-                size=asset.size,
-                prompt=asset.prompt,
-                alt_text=asset.alt_text,
-            )
-            for asset in creative_assets
-        ]
-        if creative_assets and not any(image.url for image in images):
-            warnings.append(
-                "Image provider did not return a public asset URL; publishing system needs a "
-                "material-library upload or a real image provider."
+                "workflow starts with targeting and requires manual creative production."
             )
 
         country_value = _field_value(reviewed_fields, "country")
@@ -266,23 +454,10 @@ class AdGenerationService:
         age_max = _age_value(_field_value(reviewed_fields, "age_max"), default=65)
         if age_min > age_max:
             age_min, age_max = age_max, age_min
-
-        pixel_id = _text_or_none(
-            _structured_value(
-                structured_fields,
-                "pixel_id",
-                aliases=("pixel", "facebook_pixel_id", "meta_pixel_id"),
-            )
+        gender = _text_or_none(_field_value(reviewed_fields, "gender"))
+        audience_description = _text_or_none(
+            _field_value(reviewed_fields, "audience_description_raw")
         )
-        custom_event_type = _custom_event_type(event_name)
-        optimization_goal = (
-            "OFFSITE_CONVERSIONS" if pixel_id and custom_event_type else "LINK_CLICKS"
-        )
-        if custom_event_type and not pixel_id:
-            warnings.append(
-                "Conversion event was recognized, but no pixel_id was provided; "
-                "ad set falls back to LINK_CLICKS."
-            )
 
         if _has_multiple_country_values(structured_fields):
             warnings.append(
@@ -293,7 +468,6 @@ class AdGenerationService:
         missing_fields = _missing_fields(
             landing_url=landing_url,
             country_code=None if country_is_missing else country_code,
-            message=draft.primary_text or draft.body,
         )
         review = PublishingAdGenerationReview(
             missing_fields=missing_fields,
@@ -301,53 +475,150 @@ class AdGenerationService:
             low_confidence_fields=_low_confidence_fields(llm_fields, structured_fields),
         )
 
-        headline = _trim(draft.headline or topic.title, 255)
-        creative_url = next((image.url for image in images if image.url), None)
         result = PublishingAdGenerationResult(
             job_id=job.id,
             external_order_id=payload.external_order_id,
-            status="completed",
+            status="fields_review",
             campaign_payload=PublishingCampaignPayload(
                 name=_trim(campaign.name, 255),
                 objective=_campaign_objective(event_name),
             ),
             adset_payload=PublishingAdSetPayload(
-                name=_adset_name(country_code, optimization_goal, age_min, age_max),
+                name=_adset_name(country_code, event_name, age_min, age_max),
                 daily_budget=payload.preferences.daily_budget,
-                billing_event="IMPRESSIONS",
-                optimization_goal=optimization_goal,
-                bid_strategy="LOWEST_COST_WITHOUT_CAP",
-                pixel_id=pixel_id,
-                custom_event_type=custom_event_type if pixel_id else None,
+                optimization_goal=_optimization_goal(event_name),
+                event_name=_text_or_none(event_name),
                 countries=country_code,
                 country_code=country_code,
                 country_label=country_label,
                 age_min=age_min,
                 age_max=age_max,
+                gender=gender,
+                audience_description=audience_description,
             ),
-            creative_payload=PublishingCreativePayload(
-                name=_trim(f"{campaign.name} - {payload.preferences.creative_type}", 255),
-                type=payload.preferences.creative_type,
-                message=draft.primary_text or draft.body,
-                link=_text_or_none(landing_url),
-                ads_name=headline,
-                description=draft.description,
-                asset_url=creative_url,
-                asset_id=None,
-            ),
-            assets=PublishingAdGenerationAssets(images=images),
+            creative_payload=None,
+            assets=PublishingAdGenerationAssets(),
             review=review,
             metadata_json={
                 "source": "publishing_system",
+                "workflow_stage": "fields_review",
                 "work_order_id": work_order.id,
                 "campaign_id": campaign.id,
-                "topic_id": topic.id,
-                "draft_id": draft.id,
-                "creative_asset_ids": [asset.id for asset in creative_assets],
+                "reviewed_delivery_fields": reviewed_fields,
                 "llm_extraction_review": extraction_data.get("review") or {},
+                "extraction_source": extraction_source,
             },
         )
         return result
+
+
+async def _ids_for_campaign(
+    session: AsyncSession,
+    model: type[ContentTopic] | type[CopyDraft],
+    campaign_id: str,
+) -> list[str]:
+    result = await session.execute(select(model.id).where(model.campaign_id == campaign_id))
+    return list(result.scalars().all())
+
+
+def _generated_record_ids(job: AdGenerationJob) -> tuple[str | None, str | None]:
+    result_payload = job.result_payload or {}
+    metadata = result_payload.get("metadata_json")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    campaign_id = _text_or_none(metadata.get("campaign_id"))
+    work_order_id = _text_or_none(metadata.get("work_order_id"))
+    return campaign_id, work_order_id
+
+
+async def _generated_campaign_id_from_metadata(
+    session: AsyncSession,
+    job_id: str,
+) -> str | None:
+    result = await session.execute(select(Campaign.id, Campaign.metadata_json))
+    for campaign_id, metadata in result.all():
+        if isinstance(metadata, dict) and metadata.get("ad_generation_job_id") == job_id:
+            return campaign_id
+    return None
+
+
+def _collect_storage_key(storage_keys: set[str], storage_key: str | None) -> None:
+    if storage_key and storage_key.startswith("local://"):
+        storage_keys.add(storage_key)
+
+
+def _storage_key_from_public_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.path.startswith("/storage/"):
+        return None
+    storage_path = unquote(parsed.path.removeprefix("/storage/").lstrip("/"))
+    return f"local://{storage_path}" if storage_path else None
+
+
+def _delete_local_storage_keys(storage_keys: set[str], storage_root: str) -> None:
+    root = Path(storage_root).resolve()
+    for storage_key in storage_keys:
+        target_path = _local_path_from_storage_key(storage_key, root)
+        if not target_path:
+            continue
+        try:
+            if target_path.is_file():
+                target_path.unlink()
+                _remove_empty_storage_dirs(target_path.parent, root)
+        except OSError as exc:
+            logger.warning("Failed to delete local asset %s: %s", storage_key, exc)
+
+
+def _local_path_from_storage_key(storage_key: str, root: Path) -> Path | None:
+    raw_path = storage_key.removeprefix("local://").lstrip("/\\")
+    relative_path = PurePosixPath(raw_path)
+    if not raw_path or relative_path.is_absolute() or ".." in relative_path.parts:
+        return None
+
+    target_path = (root / Path(*relative_path.parts)).resolve()
+    try:
+        target_path.relative_to(root)
+    except ValueError:
+        return None
+    return target_path
+
+
+def _remove_empty_storage_dirs(path: Path, root: Path) -> None:
+    current = path
+    while current != root:
+        try:
+            current.relative_to(root)
+            current.rmdir()
+        except OSError:
+            break
+        except ValueError:
+            break
+        current = current.parent
+
+
+def _merge_result_payload(current: dict, updates: dict) -> dict:
+    merged = dict(current)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _workflow_status_from_payload(payload: dict) -> str | None:
+    metadata = payload.get("metadata_json")
+    if isinstance(metadata, dict):
+        stage = metadata.get("workflow_stage")
+        if isinstance(stage, str) and stage in WORKFLOW_STATUSES:
+            return stage
+    status = payload.get("status")
+    if isinstance(status, str) and status in WORKFLOW_STATUSES:
+        return status
+    return None
 
 
 def _build_reviewed_fields(structured_fields: dict, llm_fields: dict) -> dict:
@@ -451,15 +722,15 @@ def _campaign_objective(event_name: Any) -> str:
     return "OUTCOME_TRAFFIC"
 
 
-def _custom_event_type(event_name: Any) -> str | None:
+def _optimization_goal(event_name: Any) -> str:
     event_key = _event_key(event_name)
-    if event_key in SALES_EVENTS:
-        return "PURCHASE"
-    if event_key in ADD_TO_CART_EVENTS:
-        return "ADD_TO_CART"
-    if event_key in LEAD_EVENTS:
-        return "LEAD"
-    return None
+    if event_key in SALES_EVENTS or event_key in ADD_TO_CART_EVENTS or event_key in LEAD_EVENTS:
+        return "OFFSITE_CONVERSIONS"
+    if event_key in VIDEO_EVENTS:
+        return "THRUPLAY"
+    if event_key in APP_EVENTS:
+        return "APP_INSTALLS"
+    return "LINK_CLICKS"
 
 
 def _event_key(event_name: Any) -> str | None:
@@ -487,18 +758,17 @@ def _campaign_name(fields: dict, project_name: str | None) -> str:
     return _trim(_text_or_none(structured_name) or project_name or "AI generated campaign", 255)
 
 
-def _adset_name(country_code: str, optimization_goal: str, age_min: int, age_max: int) -> str:
-    return _trim(f"{country_code} - {optimization_goal} - {age_min}-{age_max}", 255)
+def _adset_name(country_code: str, event_name: Any, age_min: int, age_max: int) -> str:
+    event_label = _text_or_none(event_name) or "traffic"
+    return _trim(f"{country_code} - {event_label} - {age_min}-{age_max}", 255)
 
 
-def _missing_fields(landing_url: Any, country_code: str | None, message: str | None) -> list[str]:
+def _missing_fields(landing_url: Any, country_code: str | None) -> list[str]:
     missing = []
     if not _text_or_none(landing_url):
         missing.append("landing_url")
     if not _text_or_none(country_code):
         missing.append("country")
-    if not _text_or_none(message):
-        missing.append("message")
     return missing
 
 
@@ -519,12 +789,6 @@ def _has_multiple_country_values(fields: dict) -> bool:
     if isinstance(value, str) and re.search(r"[,;/|]", value):
         return True
     return False
-
-
-def _filename_from_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    return url.rstrip("/").rsplit("/", 1)[-1] or None
 
 
 def _trim(value: str, length: int) -> str:

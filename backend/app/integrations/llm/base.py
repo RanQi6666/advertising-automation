@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from typing import Protocol
 
 from backend.app.db.models.campaign import Campaign
@@ -24,6 +25,14 @@ class LLMProvider(Protocol):
     ) -> list[TopicCandidate]:
         """Generate selectable content topics."""
 
+    def stream_topics(
+        self,
+        campaign: Campaign,
+        limit: int,
+        signals: dict,
+    ) -> AsyncIterator[TopicCandidate]:
+        """Generate selectable content topics incrementally from one provider request."""
+
     async def generate_copy(
         self,
         campaign: Campaign,
@@ -47,6 +56,8 @@ class LLMProvider(Protocol):
         draft: CopyDraft,
         count: int,
         size: str,
+        feedback: str | None = None,
+        source_asset: CreativeAsset | None = None,
     ) -> list[ImageBrief]:
         """Condense copy into image-by-image creative briefs."""
 
@@ -61,3 +72,43 @@ class LLMProvider(Protocol):
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         """Create a scene-by-scene video storyboard from copy and image assets."""
+
+    def stream_video_storyboard_text(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        instructions: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream an editable plain-text video storyboard script."""
+
+    async def revise_video_storyboard(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        current_storyboard: list[dict],
+        current_storyboard_text: str | None,
+        feedback: str,
+    ) -> VideoStoryboardCandidate:
+        """Revise an existing video storyboard using human feedback."""
+
+    def stream_video_storyboard_revision_text(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        current_storyboard: list[dict],
+        current_storyboard_text: str | None,
+        feedback: str,
+    ) -> AsyncIterator[str]:
+        """Stream a revised editable plain-text video storyboard script."""

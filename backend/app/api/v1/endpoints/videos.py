@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Query, status
+from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
 from backend.app.schemas.video import (
@@ -6,6 +9,7 @@ from backend.app.schemas.video import (
     VideoGenerateRequest,
     VideoStoryboardGenerateRequest,
     VideoStoryboardRead,
+    VideoStoryboardRewriteRequest,
 )
 from backend.app.services.video_service import VideoService
 
@@ -20,6 +24,44 @@ service = VideoService()
 )
 async def generate_video_storyboard(payload: VideoStoryboardGenerateRequest, session: DbSession):
     return await service.generate_storyboard(session, payload)
+
+
+@router.post("/videos/storyboard/stream")
+async def stream_video_storyboard(payload: VideoStoryboardGenerateRequest, session: DbSession):
+    async def event_stream():
+        async for event in service.stream_storyboard_text(session, payload):
+            yield _sse_event(event.get("type", "message"), event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post(
+    "/videos/storyboard/rewrite",
+    response_model=VideoStoryboardRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def rewrite_video_storyboard(payload: VideoStoryboardRewriteRequest, session: DbSession):
+    return await service.rewrite_storyboard(session, payload)
+
+
+@router.post("/videos/storyboard/rewrite/stream")
+async def stream_rewrite_video_storyboard(
+    payload: VideoStoryboardRewriteRequest,
+    session: DbSession,
+):
+    async def event_stream():
+        async for event in service.stream_rewrite_storyboard_text(session, payload):
+            yield _sse_event(event.get("type", "message"), event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(
@@ -54,3 +96,7 @@ async def list_videos(
         limit=limit,
         offset=offset,
     )
+
+
+def _sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

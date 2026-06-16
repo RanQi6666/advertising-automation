@@ -1,10 +1,12 @@
 import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
+from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     ImageBrief,
@@ -166,20 +168,20 @@ class MockLLMProvider:
         country = work_order.get("country") or parsed_fields.get("country")
         event_name = parsed_fields.get("event_name") or campaign.objective
         landing_title = landing_page.get("title")
+        revision_feedback = _text_signal(signals, "topic_revision_feedback")
+        target_language = build_target_language_context(campaign=campaign, signals=signals)
         candidates: list[TopicCandidate] = []
 
-        templates = [
-            ("Pain point hook", "Lead with the daily pain the audience already understands."),
-            ("Before and after", "Show the transformation customers can expect."),
-            ("Proof and trust", "Use credibility, reviews, or measurable proof."),
-            ("Limited offer", "Frame the message around urgency and a clear next step."),
-            ("Educational angle", "Teach one useful idea before presenting the offer."),
-        ]
+        templates = _topic_templates(revision_feedback, target_language)
 
         for index, (title, angle) in enumerate(templates[:limit], start=1):
             candidates.append(
                 TopicCandidate(
-                    title=f"{product}: {title}",
+                    title=(
+                        f"{product}: {title}"
+                        if target_language["country_code"] != "IN"
+                        else title
+                    ),
                     angle=_append_context(
                         angle,
                         country=country,
@@ -195,11 +197,26 @@ class MockLLMProvider:
                     risk_notes="Validate product claims and avoid unsupported guarantees.",
                     rationale=(
                         f"Mock topic {index} generated from campaign and work order signals."
+                        + (
+                            f" Operator feedback applied: {revision_feedback}."
+                            if revision_feedback
+                            else ""
+                        )
                     ),
                     score=max(0.1, 0.95 - index * 0.06),
                 )
             )
         return candidates
+
+    async def stream_topics(
+        self,
+        campaign: Campaign,
+        limit: int,
+        signals: dict,
+    ) -> AsyncIterator[TopicCandidate]:
+        topics = await self.generate_topics(campaign=campaign, limit=limit, signals=signals)
+        for topic in topics:
+            yield topic
 
     async def generate_copy(
         self,
@@ -216,24 +233,37 @@ class MockLLMProvider:
         landing_url = work_order.get("landing_url") or parsed_fields.get("landing_url")
         landing_title = landing_page.get("title")
         landing_excerpt = landing_page.get("text_excerpt")
-        body = (
-            f"{topic.title}\n\n"
-            f"{topic.angle}\n\n"
-            f"Market context: country={country or 'unspecified'}, "
-            f"media={media or 'unspecified'}.\n\n"
-            f"Landing page title: {landing_title or 'not fetched'}.\n\n"
-            f"If your audience is looking for a better way to approach {product}, "
-            "this campaign introduces the benefit clearly, supports it with proof, "
-            "and ends with one simple call to action.\n\n"
-            f"Landing page insight: {(landing_excerpt or 'not available')[:500]}\n\n"
-            f"Landing page: {landing_url or 'not provided'}.\n\n"
-            "Use this draft as the first human-review version before publication."
-        )
+        target_language = build_target_language_context(campaign=campaign)
+        if target_language["country_code"] == "IN":
+            body = (
+                f"{topic.title}\n\n"
+                "घर पर बड़े स्क्रीन वाला मनोरंजन आसान बनाएं। अपनी पसंद की सामग्री देखें "
+                "और साफ, सरल अनुभव के साथ शुरुआत करें।\n\n"
+                f"Landing page: {landing_url or 'not provided'}."
+            )
+            headline = f"{product} के साथ देखें"
+            description = "साफ और आसान मनोरंजन अनुभव।"
+        else:
+            body = (
+                f"{topic.title}\n\n"
+                f"{topic.angle}\n\n"
+                f"Market context: country={country or 'unspecified'}, "
+                f"media={media or 'unspecified'}.\n\n"
+                f"Landing page title: {landing_title or 'not fetched'}.\n\n"
+                f"If your audience is looking for a better way to approach {product}, "
+                "this campaign introduces the benefit clearly, supports it with proof, "
+                "and ends with one simple call to action.\n\n"
+                f"Landing page insight: {(landing_excerpt or 'not available')[:500]}\n\n"
+                f"Landing page: {landing_url or 'not provided'}.\n\n"
+                "Use this draft as the first human-review version before publication."
+            )
+            headline = f"Try {product} today"
+            description = "A clear, benefit-led Facebook ad draft."
         return CopyDraftCandidate(
             body=body,
             primary_text=body[:500],
-            headline=f"Try {product} today",
-            description="A clear, benefit-led Facebook ad draft.",
+            headline=headline,
+            description=description,
             cta=constraints.get("cta", "Learn More"),
         )
 
@@ -262,6 +292,8 @@ class MockLLMProvider:
         draft: CopyDraft,
         count: int,
         size: str,
+        feedback: str | None = None,
+        source_asset: CreativeAsset | None = None,
     ) -> list[ImageBrief]:
         snippets = [
             "Main benefit",
@@ -270,19 +302,39 @@ class MockLLMProvider:
             "Simple offer",
             "Call to action",
         ]
+        target_language = build_target_language_context(draft_metadata=draft.metadata_json)
+        if target_language["country_code"] == "IN":
+            snippets = [
+                "मुख्य फायदा",
+                "आसान मनोरंजन",
+                "भरोसे की वजह",
+                "सरल ऑफर",
+                "अभी देखें",
+            ]
         briefs: list[ImageBrief] = []
         landing_page = draft.metadata_json.get("landing_page") or {}
         landing_hint = landing_page.get("title") or landing_page.get("url")
         for index in range(count):
+            revision_hint = (
+                f" Apply operator revision request: {feedback.strip()[:280]}."
+                if feedback and feedback.strip()
+                else ""
+            )
+            source_hint = (
+                f" Revise previous version {source_asset.version}."
+                if source_asset is not None
+                else ""
+            )
             briefs.append(
                 ImageBrief(
                     image_index=index + 1,
-                    title=snippets[index],
+                    title=("Revised image" if feedback else snippets[index]),
                     short_text=(draft.headline or snippets[index])[:80],
                     visual_direction=(
-                        "Clean performance-ad layout with readable text, product focus, "
-                        "and enough negative space for Facebook placements. "
+                        "Clean standalone performance-ad layout with readable text, product focus, "
+                        "and enough negative space for mobile feed placements. "
                         f"Use landing page context: {landing_hint or 'not available'}."
+                        f"{source_hint}{revision_hint}"
                     ),
                     size=size,
                 )
@@ -300,6 +352,7 @@ class MockLLMProvider:
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         product = campaign.product_name or campaign.name
+        target_language = build_target_language_context(campaign=campaign, context=context)
         asset_count = max(1, len(assets))
         scene_count = min(max(asset_count, 3), 5)
         segment = max(1, duration_seconds // scene_count)
@@ -313,13 +366,25 @@ class MockLLMProvider:
             end_second = duration_seconds if index == scene_count - 1 else (index + 1) * segment
             if index == 0:
                 visual = f"Open with the strongest product benefit for {product}."
-                subtitle = f"{product}: watch instantly"
+                subtitle = (
+                    f"{product}: तुरंत देखें"
+                    if target_language["country_code"] == "IN"
+                    else f"{product}: watch instantly"
+                )
             elif index == scene_count - 1:
                 visual = "End on a clear call to action and keep the final frame readable."
-                subtitle = "Download Now"
+                subtitle = (
+                    "अभी डाउनलोड करें"
+                    if target_language["country_code"] == "IN"
+                    else "Download Now"
+                )
             else:
                 visual = f"Show proof and variety using context from {landing_title[:80]}."
-                subtitle = "Free live channels in HD"
+                subtitle = (
+                    "HD में मनोरंजन देखें"
+                    if target_language["country_code"] == "IN"
+                    else "Free live channels in HD"
+                )
 
             scenes.append(
                 VideoStoryboardScene(
@@ -349,6 +414,111 @@ class MockLLMProvider:
             ),
         )
 
+    async def stream_video_storyboard_text(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        instructions: str | None = None,
+    ) -> AsyncIterator[str]:
+        storyboard = await self.generate_video_storyboard(
+            campaign=campaign,
+            draft=draft,
+            assets=assets,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            context=context,
+            instructions=instructions,
+        )
+        for chunk in _chunk_text(_storyboard_script_text(storyboard)):
+            yield chunk
+
+    async def revise_video_storyboard(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        current_storyboard: list[dict],
+        current_storyboard_text: str | None,
+        feedback: str,
+    ) -> VideoStoryboardCandidate:
+        allowed_asset_ids = {asset.id for asset in assets}
+        scenes: list[VideoStoryboardScene] = []
+        for index, item in enumerate(current_storyboard, start=1):
+            if not isinstance(item, dict):
+                continue
+            source_asset_ids = [
+                asset_id
+                for asset_id in _text_list(item.get("source_asset_ids"))
+                if asset_id in allowed_asset_ids
+            ]
+            if not source_asset_ids and assets:
+                source_asset_ids = [assets[(index - 1) % len(assets)].id]
+            scenes.append(
+                VideoStoryboardScene(
+                    scene_index=_int_or(item.get("scene_index"), index),
+                    start_second=_optional_int(item.get("start_second")),
+                    end_second=_optional_int(item.get("end_second")),
+                    visual=f"{item.get('visual') or current_storyboard_text or 'Storyboard scene'}",
+                    subtitle=item.get("subtitle"),
+                    motion=item.get("motion") or "Keep motion simple and readable.",
+                    voiceover=item.get("voiceover"),
+                    source_asset_ids=source_asset_ids,
+                    notes=f"Revision applied: {feedback}",
+                )
+            )
+
+        if not scenes:
+            generated = await self.generate_video_storyboard(
+                campaign=campaign,
+                draft=draft,
+                assets=assets,
+                duration_seconds=duration_seconds,
+                aspect_ratio=aspect_ratio,
+                context=context,
+                instructions=feedback,
+            )
+            scenes = generated.scenes
+
+        return VideoStoryboardCandidate(
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            scenes=scenes,
+            rationale=f"Mock storyboard revision applied operator feedback: {feedback}",
+        )
+
+    async def stream_video_storyboard_revision_text(
+        self,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        duration_seconds: int,
+        aspect_ratio: str,
+        context: dict,
+        current_storyboard: list[dict],
+        current_storyboard_text: str | None,
+        feedback: str,
+    ) -> AsyncIterator[str]:
+        storyboard = await self.revise_video_storyboard(
+            campaign=campaign,
+            draft=draft,
+            assets=assets,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            context=context,
+            current_storyboard=current_storyboard,
+            current_storyboard_text=current_storyboard_text,
+            feedback=feedback,
+        )
+        for chunk in _chunk_text(_storyboard_script_text(storyboard)):
+            yield chunk
+
 
 def _append_context(
     angle: str,
@@ -366,6 +536,118 @@ def _append_context(
     if not context_parts:
         return angle
     return f"{angle} Context: {', '.join(context_parts)}."
+
+
+def _topic_templates(
+    revision_feedback: str,
+    target_language: dict[str, str],
+) -> list[tuple[str, str]]:
+    if target_language["country_code"] == "IN":
+        if revision_feedback:
+            return [
+                (
+                    "ऑपरेटर की राय के अनुसार नया टीवी एंगल",
+                    f"Apply operator feedback: {revision_feedback}",
+                ),
+                (
+                    "घर के मनोरंजन पर केंद्रित नया संदेश",
+                    f"Reframe the strongest benefit around: {revision_feedback}",
+                ),
+                (
+                    "साफ और सुरक्षित वैल्यू एंगल",
+                    f"Use a more compliant angle while following: {revision_feedback}",
+                ),
+            ]
+        return [
+            (
+                "घर पर मैच और फिल्में देखने का आसान तरीका",
+                "Lead with a broad home entertainment scenario.",
+            ),
+            (
+                "परिवार के लिए साफ और आसान टीवी अनुभव",
+                "Show a family-friendly entertainment use case.",
+            ),
+            ("मनोरंजन के लिए स्मार्ट वैल्यू वाला टीवी", "Use credibility and practical value."),
+            ("आज ही नया देखने का अनुभव शुरू करें", "Frame the message around a clear next step."),
+            ("टीवी चुनते समय ध्यान देने वाली बात", "Teach one useful idea before presenting the offer."),
+        ]
+
+    if revision_feedback:
+        return [
+            ("Revised operator direction", f"Apply operator feedback: {revision_feedback}"),
+            ("Adjusted benefit hook", f"Reframe the strongest benefit around: {revision_feedback}"),
+            (
+                "Cleaner review-safe angle",
+                f"Use a more compliant angle while following: {revision_feedback}",
+            ),
+        ]
+
+    return [
+        ("Pain point hook", "Lead with the daily pain the audience already understands."),
+        ("Before and after", "Show the transformation customers can expect."),
+        ("Proof and trust", "Use credibility, reviews, or measurable proof."),
+        ("Limited offer", "Frame the message around urgency and a clear next step."),
+        ("Educational angle", "Teach one useful idea before presenting the offer."),
+    ]
+
+
+def _text_signal(signals: dict, key: str) -> str:
+    value = signals.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _storyboard_script_text(storyboard: VideoStoryboardCandidate) -> str:
+    lines = [
+        f"视频分镜脚本｜{storyboard.aspect_ratio}｜{storyboard.duration_seconds} 秒",
+        "",
+    ]
+    for scene in storyboard.scenes:
+        time_range = f"{scene.start_second if scene.start_second is not None else '-'}-{scene.end_second if scene.end_second is not None else '-'}s"
+        source_ids = ", ".join(scene.source_asset_ids) if scene.source_asset_ids else "无"
+        lines.extend(
+            [
+                f"第 {scene.scene_index} 幕（{time_range}）",
+                f"画面：{scene.visual}",
+                f"字幕：{scene.subtitle or '无'}",
+                f"镜头：{scene.motion or '无'}",
+                f"旁白：{scene.voiceover or '无'}",
+                f"参考图：{source_ids}",
+            ]
+        )
+        if scene.notes:
+            lines.append(f"备注：{scene.notes}")
+        lines.append("")
+    if storyboard.rationale:
+        lines.append(f"生成思路：{storyboard.rationale}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _chunk_text(value: str, size: int = 24) -> list[str]:
+    return [value[index : index + size] for index in range(0, len(value), size)]
+
+
+def _text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
+def _int_or(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _field(

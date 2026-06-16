@@ -6,120 +6,107 @@ import {
   FileText,
   Film,
   Image,
-  Layers3,
   Loader2,
-  Megaphone,
-  Pause,
   RefreshCw,
   Send,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, api } from "./lib/api";
+import type { CreativeStreamEvent, TopicStreamEvent, VideoStoryboardTextStreamEvent } from "./lib/api";
 import type {
-  AdCreativeDraft,
-  AdPixel,
-  AdsPlanDraft,
+  AdGenerationJob,
   Campaign,
   CopyDraft,
   CreativeAsset,
-  FacebookPublishConfig,
-  LandingPageSnapshot,
-  MetaAccount,
-  MetaAdsDraftCreateResult,
-  PublishJob,
   ReviewedDeliveryFields,
   Topic,
   VideoAsset,
-  WorkOrder,
+  VideoStoryboardResponse,
   WorkOrderDeliveryExtraction,
   WorkOrderDeliveryField,
 } from "./types/domain";
 
-type ViewKey =
-  | "dashboard"
-  | "work-orders"
-  | "campaign"
-  | "topics"
-  | "copy"
-  | "creatives"
-  | "videos"
-  | "publishing";
-
-type PublishChannelKey = "facebook_page" | "facebook_ad";
-type PublishMediaType = "image" | "video";
-type PublishJobFilter = "all" | "review" | "published" | "active" | "paused" | "issue";
-type PreflightStatus = "ready" | "warning" | "error";
-type PreflightChecklistItem = {
-  label: string;
-  status: PreflightStatus;
-  value: string;
-  detail: string;
+type ViewKey = "dashboard" | "work-orders" | "workflow" | "topics" | "copy" | "creatives" | "videos";
+type WorkflowStepStatus = "done" | "active" | "blocked";
+type PublishingEntryContext = {
+  externalOrderId: string | null;
+  returnUrl: string | null;
 };
-type MetaAssetOption = {
-  id: string;
-  name: string;
-  label: string;
-  accountId: string | null;
-  businessId?: string | null;
-  businessName?: string | null;
-};
-type MetaIdentityOption = {
+type DeliveryExtractionCacheEntry = {
   key: string;
-  label: string;
-  subtitle: string;
-  accounts: MetaAccount[];
-  pages: MetaAssetOption[];
-  adAccounts: MetaAssetOption[];
+  extraction: WorkOrderDeliveryExtraction;
+  savedAt: string;
 };
-type PendingPreflightAction =
-  | {
-      kind: "prepare_meta_ads";
-      warnings: PreflightChecklistItem[];
-    }
-  | {
-      kind: "publish_job";
-      jobId: string;
-      warnings: PreflightChecklistItem[];
-    };
-type CreativeGenerationPhase = "submitting" | "generating" | "saving" | "done" | "failed";
-type CreativeGenerationState = {
-  phase: CreativeGenerationPhase;
-  draftId: string;
-  expectedCount: number;
-  completedCount: number;
-  startedAt: number;
-  elapsedSeconds: number;
-  message: string;
-  detail: string;
+type TopicGenerationSlot = {
+  index: number;
+  status: "loading" | "done" | "error";
+  topic?: Topic;
+  message?: string;
 };
+type CreativeGenerationSlot = {
+  index: number;
+  status: "loading" | "done" | "error";
+  asset?: CreativeAsset;
+  message?: string;
+};
+type VideoStoryboardDraftCache = {
+  campaignId: string;
+  aspectRatio: string;
+  durationSeconds: number;
+  instructions: string;
+  selectedCreativeIds: string[];
+  storyboard: Record<string, unknown>[];
+  storyboardText: string;
+  storyboardDirty: boolean;
+  storyboardFeedback: string;
+  savedAt: string;
+};
+
+const VIDEO_MAX_REFERENCE_IMAGES = 2;
+const TOPIC_GENERATION_LIMIT = 3;
+const CREATIVE_GENERATION_LIMIT = 3;
+const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
+const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
+const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
+const DELIVERY_EXTRACTION_CACHE_INDEX_KEY = "ad_delivery_extraction_v1:index";
+const DELIVERY_EXTRACTION_CACHE_LIMIT = 12;
+const DELIVERY_EVENT_OPTIONS = ["流量", "购物", "加购", "线索"] as const;
+const DELIVERY_COUNTRY_OPTIONS = [
+  { label: "印度", value: "印度", code: "IN" },
+  { label: "美国", value: "美国", code: "US" },
+  { label: "印尼", value: "印尼", code: "ID" },
+  { label: "菲律宾", value: "菲律宾", code: "PH" },
+  { label: "泰国", value: "泰国", code: "TH" },
+  { label: "越南", value: "越南", code: "VN" },
+  { label: "马来西亚", value: "马来西亚", code: "MY" },
+  { label: "新加坡", value: "新加坡", code: "SG" },
+  { label: "巴西", value: "巴西", code: "BR" },
+  { label: "墨西哥", value: "墨西哥", code: "MX" },
+] as const;
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof BarChart3 }> = [
   { key: "dashboard", label: "工作台", icon: BarChart3 },
-  { key: "work-orders", label: "工单", icon: ClipboardList },
-  { key: "campaign", label: "广告项目", icon: Layers3 },
+  { key: "work-orders", label: "创建工单", icon: ClipboardList },
+  { key: "workflow", label: "AI 生产", icon: Check },
   { key: "topics", label: "选题", icon: Sparkles },
   { key: "copy", label: "文案", icon: FileText },
   { key: "creatives", label: "图片", icon: Image },
   { key: "videos", label: "视频", icon: Film },
-  { key: "publishing", label: "发布", icon: Megaphone },
 ];
 
 const viewSubtitles: Record<ViewKey, string> = {
-  dashboard: "查看今日待办、审核和发布任务",
-  "work-orders": "粘贴工单内容，解析投放信息并创建项目",
-  campaign: "检查工单信息、落地页分析和项目上下文",
-  topics: "选择 AI 生成的广告角度，进入文案生产",
-  copy: "审核、修改并确认可用于投放的广告文案",
-  creatives: "生成并审核图片素材，可作为视频来源",
-  videos: "基于图片配置视频任务，并提交 Seedance 生成",
-  publishing: "创建 Facebook 发布任务，并先用 dry-run 验证",
+  dashboard: "查看 AI 工单、生产阶段和回传状态",
+  "work-orders": "接收投放系统跳转，创建 AI 工单并确认投放参数",
+  workflow: "按参数确认、选题、文案、图片、视频和最终预审推进任务",
+  topics: "根据投放链接和工单生成选题，并由运营选择一个方向",
+  copy: "根据已选题生成广告文案，并完成人工审核",
+  creatives: "根据已审核文案生成图片，并完成人工审核",
+  videos: "根据已审核图片生成视频，并完成人工审核",
 };
-
-const VIDEO_MAX_REFERENCE_IMAGES = 2;
-const DELIVERY_EVENT_OPTIONS = ["流量", "购物", "加购", "线索"] as const;
 
 const sampleWorkOrder = `工单
 
@@ -129,7 +116,7 @@ const sampleWorkOrder = `工单
 日报时区：+7
 投放媒体：fb
 投放事件：购物
-投放人群；男。年龄25-45
+投放人群：男，年龄25-45
 
 产品名称：印度tv
 打款金额：216（广告过审打款）
@@ -139,79 +126,59 @@ const sampleWorkOrder = `工单
 
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>(() => initialViewFromUrl());
-  const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
+  const publishingEntry = useMemo(() => publishingEntryContextFromUrl(), []);
+
+  const [jobs, setJobs] = useState<AdGenerationJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(() => adGenerationJobIdFromUrl());
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [selectedWorkOrderId, setSelectedWorkOrderId] = useState<string | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
-  const [snapshots, setSnapshots] = useState<LandingPageSnapshot[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
+  const [topicGenerationSlots, setTopicGenerationSlots] = useState<TopicGenerationSlot[]>([]);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<CopyDraft[]>([]);
+  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [creatives, setCreatives] = useState<CreativeAsset[]>([]);
-  const [hiddenCreativeIds, setHiddenCreativeIds] = useState<string[]>([]);
+  const [creativeGenerationSlots, setCreativeGenerationSlots] = useState<CreativeGenerationSlot[]>([]);
+  const [selectedCreativeIds, setSelectedCreativeIds] = useState<string[]>([]);
+  const [creativeRewriteFeedbacks, setCreativeRewriteFeedbacks] = useState<Record<string, string>>({});
   const [videos, setVideos] = useState<VideoAsset[]>([]);
-  const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
-  const [facebookConfig, setFacebookConfig] = useState<FacebookPublishConfig | null>(null);
-  const [metaAccounts, setMetaAccounts] = useState<MetaAccount[]>([]);
-  const [adCreativeDraft, setAdCreativeDraft] = useState<AdCreativeDraft | null>(null);
-  const [adsPlanDraft, setAdsPlanDraft] = useState<AdsPlanDraft | null>(null);
-  const [metaAdsDraftResult, setMetaAdsDraftResult] = useState<MetaAdsDraftCreateResult | null>(null);
-  const [rawWorkOrder, setRawWorkOrder] = useState(sampleWorkOrder);
-  const [deliveryConfirmRawContent, setDeliveryConfirmRawContent] = useState("");
+  const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+
+  const [rawWorkOrder, setRawWorkOrder] = useState(() => initialRawWorkOrderFromUrl());
+  const [deliveryExtractionCache, setDeliveryExtractionCache] =
+    useState<DeliveryExtractionCacheEntry | null>(null);
   const [deliveryExtraction, setDeliveryExtraction] = useState<WorkOrderDeliveryExtraction | null>(null);
   const [deliveryConfirmForm, setDeliveryConfirmForm] = useState<ReviewedDeliveryFields>(() =>
     emptyReviewedDeliveryFields(),
   );
   const [deliveryConfirmOpen, setDeliveryConfirmOpen] = useState(false);
-  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
-  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
-  const [selectedCreativeIds, setSelectedCreativeIds] = useState<string[]>([]);
-  const [currentCreativeBatchIds, setCurrentCreativeBatchIds] = useState<string[]>([]);
+  const [deliveryConfirmRawContent, setDeliveryConfirmRawContent] = useState("");
+
+  const [topicFeedback, setTopicFeedback] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
-  const [publishMessage, setPublishMessage] = useState("");
-  const [publishImageUrl, setPublishImageUrl] = useState("");
-  const [publishVideoAssetId, setPublishVideoAssetId] = useState("");
-  const [publishChannel, setPublishChannel] = useState<PublishChannelKey>("facebook_page");
-  const [publishMediaType, setPublishMediaType] = useState<PublishMediaType>("image");
-  const [publishPageId, setPublishPageId] = useState("dry-run-page");
-  const [publishAdAccountId, setPublishAdAccountId] = useState("dry-run-ad-account");
-  const [selectedMetaAccountId, setSelectedMetaAccountId] = useState("");
-  const [metaDailyBudget, setMetaDailyBudget] = useState("");
-  const [metaPixelId, setMetaPixelId] = useState("");
-  const [metaPixels, setMetaPixels] = useState<AdPixel[]>([]);
-  const [metaPixelError, setMetaPixelError] = useState("");
-  const [loading, setLoading] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [creativeConfirmOpen, setCreativeConfirmOpen] = useState(false);
-  const [creativeGeneration, setCreativeGeneration] = useState<CreativeGenerationState | null>(null);
-  const [videoConfirmId, setVideoConfirmId] = useState<string | null>(null);
-  const [metaAdsConfirmOpen, setMetaAdsConfirmOpen] = useState(false);
-  const [pendingPreflightAction, setPendingPreflightAction] = useState<PendingPreflightAction | null>(null);
-  const [activateConfirmJobId, setActivateConfirmJobId] = useState<string | null>(null);
-  const [activateConfirmText, setActivateConfirmText] = useState("");
-  const [pauseConfirmJobId, setPauseConfirmJobId] = useState<string | null>(null);
-  const [pauseConfirmText, setPauseConfirmText] = useState("");
   const [videoAspectRatio, setVideoAspectRatio] = useState("9:16");
   const [videoDurationSeconds, setVideoDurationSeconds] = useState(12);
   const [videoInstructions, setVideoInstructions] = useState("");
-  const [videoStoryboardText, setVideoStoryboardText] = useState("");
   const [videoStoryboard, setVideoStoryboard] = useState<Record<string, unknown>[]>([]);
+  const [videoStoryboardText, setVideoStoryboardText] = useState("");
   const [videoStoryboardDirty, setVideoStoryboardDirty] = useState(false);
+  const [videoStoryboardFeedback, setVideoStoryboardFeedback] = useState("");
+  const [videoStoryboardCacheReadyCampaignId, setVideoStoryboardCacheReadyCampaignId] = useState<string | null>(null);
 
-  const selectedWorkOrder = useMemo(
-    () => workOrders.find((item) => item.id === selectedWorkOrderId) ?? workOrders[0] ?? null,
-    [selectedWorkOrderId, workOrders],
+  const [finalPayloadDraft, setFinalPayloadDraft] = useState("");
+  const [finalReviewNotes, setFinalReviewNotes] = useState("");
+  const [loading, setLoading] = useState<string | null>(null);
+  const [operationElapsedSeconds, setOperationElapsedSeconds] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const selectedJob = useMemo(
+    () => jobs.find((item) => item.id === selectedJobId) ?? (!selectedJobId ? jobs[0] : null) ?? null,
+    [jobs, selectedJobId],
   );
   const selectedCampaign = useMemo(
     () => campaigns.find((item) => item.id === selectedCampaignId) ?? campaigns[0] ?? null,
-    [selectedCampaignId, campaigns],
-  );
-  const campaignWorkOrder = useMemo(
-    () =>
-      (selectedCampaign?.work_order_id
-        ? workOrders.find((item) => item.id === selectedCampaign.work_order_id)
-        : null) ?? selectedWorkOrder,
-    [selectedCampaign?.work_order_id, selectedWorkOrder, workOrders],
+    [campaigns, selectedCampaignId],
   );
   const selectedTopic = useMemo(
     () =>
@@ -223,82 +190,48 @@ function App() {
   );
   const selectedDraft = useMemo(
     () => drafts.find((item) => item.id === selectedDraftId) ?? drafts[0] ?? null,
-    [selectedDraftId, drafts],
+    [drafts, selectedDraftId],
   );
-  const visibleCreatives = useMemo(
-    () => creatives.filter((item) => Boolean(item.url) && !hiddenCreativeIds.includes(item.id)),
-    [creatives, hiddenCreativeIds],
+  const approvedDraft = useMemo(
+    () => drafts.find((item) => item.status === "approved") ?? null,
+    [drafts],
   );
-  const visibleCreativeIds = useMemo(
-    () => new Set(visibleCreatives.map((item) => item.id)),
-    [visibleCreatives],
+  const approvedCreatives = useMemo(
+    () => creatives.filter((item) => item.status === "approved"),
+    [creatives],
   );
-  const selectedVisibleCreativeIds = useMemo(
-    () => selectedCreativeIds.filter((id) => visibleCreativeIds.has(id)),
-    [selectedCreativeIds, visibleCreativeIds],
-  );
-  const currentCreativeBatchIdSet = useMemo(
-    () => new Set(currentCreativeBatchIds),
-    [currentCreativeBatchIds],
-  );
-  const currentBatchCreatives = useMemo(() => {
-    const creativesById = new Map(visibleCreatives.map((item) => [item.id, item]));
-    return currentCreativeBatchIds
-      .map((id) => creativesById.get(id))
-      .filter((item): item is CreativeAsset => Boolean(item));
-  }, [currentCreativeBatchIds, visibleCreatives]);
-  const historicalCreatives = useMemo(
-    () => visibleCreatives.filter((item) => !currentCreativeBatchIdSet.has(item.id)),
-    [currentCreativeBatchIdSet, visibleCreatives],
-  );
-  const publishableImages = visibleCreatives;
-  const selectedPublishableImage = useMemo(
-    () => publishableImages.find((item) => item.url === publishImageUrl) ?? null,
-    [publishImageUrl, publishableImages],
-  );
-  const publishableVideos = useMemo(
-    () => videos.filter(isPublishableVideo),
+  const approvedVideos = useMemo(
+    () => videos.filter((item) => item.status === "approved"),
     [videos],
   );
-  const selectedPublishableVideo = useMemo(
-    () => publishableVideos.find((item) => item.id === publishVideoAssetId) ?? null,
-    [publishVideoAssetId, publishableVideos],
-  );
-  const selectedVideoThumbnailAssetId = useMemo(() => {
-    const sourceAssetIds = selectedPublishableVideo?.source_asset_ids ?? [];
-    const firstVisibleSource = sourceAssetIds.find((id) => visibleCreativeIds.has(String(id)));
-    return firstVisibleSource ? String(firstVisibleSource) : null;
-  }, [selectedPublishableVideo, visibleCreativeIds]);
-  const publishCreativeAssetId =
-    publishMediaType === "image"
-      ? selectedPublishableImage?.id ?? null
-      : selectedVideoThumbnailAssetId;
-  const selectedMetaAccount = useMemo(
-    () => metaAccounts.find((item) => item.id === selectedMetaAccountId) ?? null,
-    [metaAccounts, selectedMetaAccountId],
-  );
-  const metaIdentityOptions = useMemo(
-    () => buildMetaIdentityOptions(metaAccounts, facebookConfig),
-    [facebookConfig, metaAccounts],
-  );
-  const selectedMetaIdentity = useMemo(
+  const selectableCreativeIds = useMemo(
     () =>
-      selectedMetaAccount
-        ? metaIdentityOptions.find((item) => item.key === metaIdentityKey(selectedMetaAccount)) ?? null
-        : null,
-    [metaIdentityOptions, selectedMetaAccount],
+      selectedCreativeIds.filter((id) =>
+        creatives.some((item) => item.id === id && item.status === "approved"),
+      ),
+    [creatives, selectedCreativeIds],
   );
 
   useEffect(() => {
     void refreshBaseData();
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("meta_oauth") === "success") {
-      setNotice("Meta 账号授权成功，已刷新可用投放账号。");
-    }
-    if (params.get("meta_oauth") === "error") {
-      setError(`Meta 授权失败：${params.get("reason") ?? "unknown"}`);
+    const reviewJobId = adGenerationJobIdFromUrl();
+    if (reviewJobId) {
+      void refreshJob(reviewJobId);
     }
   }, []);
+
+  useEffect(() => {
+    setDeliveryExtractionCache(loadDeliveryExtractionCache(rawWorkOrder));
+  }, [rawWorkOrder]);
+
+  useEffect(() => {
+    if (!selectedJob) return;
+    const campaignId = adGenerationCampaignId(selectedJob);
+    if (campaignId && campaignId !== selectedCampaignId) {
+      setSelectedCampaignId(campaignId);
+      void refreshCampaignData(campaignId);
+    }
+  }, [selectedJob?.id, selectedJob?.updated_at, selectedCampaignId]);
 
   useEffect(() => {
     if (selectedCampaign?.id) {
@@ -307,92 +240,138 @@ function App() {
   }, [selectedCampaign?.id]);
 
   useEffect(() => {
-    if (!publishMessage && selectedDraft) {
-      setPublishMessage(selectedDraft.primary_text || selectedDraft.body);
-    }
-  }, [publishMessage, selectedDraft]);
-
-  useEffect(() => {
-    setPublishImageUrl((current) => {
-      if (current && publishableImages.some((item) => item.url === current)) return current;
-      return publishableImages[0]?.url ?? "";
-    });
-  }, [publishableImages]);
-
-  useEffect(() => {
-    setPublishVideoAssetId((current) => {
-      if (current && publishableVideos.some((item) => item.id === current)) return current;
-      return publishableVideos[0]?.id ?? "";
-    });
-  }, [publishableVideos]);
-
-  useEffect(() => {
-    if (publishMediaType === "video" && !publishableVideos.length && publishableImages.length) {
-      setPublishMediaType("image");
-    }
-    if (publishMediaType === "image" && !publishableImages.length && publishableVideos.length) {
-      setPublishMediaType("video");
-    }
-  }, [publishMediaType, publishableImages.length, publishableVideos.length]);
-
-  useEffect(() => {
-    if (!selectedMetaAccount) {
+    const campaignId = selectedCampaign?.id;
+    if (!campaignId) {
+      const latest = activeView === "videos" ? loadLatestVideoStoryboardDraftCache() : null;
+      if (latest && !videoStoryboardText.trim()) {
+        setVideoAspectRatio(latest.aspectRatio || "9:16");
+        setVideoDurationSeconds(latest.durationSeconds || 12);
+        setVideoInstructions(latest.instructions || "");
+        setSelectedCreativeIds(latest.selectedCreativeIds || []);
+        setVideoStoryboard(latest.storyboard || []);
+        setVideoStoryboardText(latest.storyboardText || "");
+        setVideoStoryboardDirty(latest.storyboardDirty);
+        setVideoStoryboardFeedback(latest.storyboardFeedback || "");
+      }
+      setVideoStoryboardCacheReadyCampaignId(null);
       return;
     }
-    const pageIds = new Set((selectedMetaIdentity?.pages ?? []).map((item) => item.id));
-    const adAccountIds = new Set((selectedMetaIdentity?.adAccounts ?? []).map((item) => item.id));
-    setPublishPageId((current) => {
-      if (current && pageIds.has(current)) return current;
-      return selectedMetaAccount.page_id || selectedMetaIdentity?.pages[0]?.id || current;
-    });
-    setPublishAdAccountId((current) => {
-      const normalizedCurrent = current ? normalizeMetaAdAccountId(current) : "";
-      if (normalizedCurrent && adAccountIds.has(normalizedCurrent)) return normalizedCurrent;
-      return (
-        normalizeMetaAdAccountId(selectedMetaAccount.ad_account_id) ||
-        selectedMetaIdentity?.adAccounts[0]?.id ||
-        current
-      );
-    });
-  }, [selectedMetaAccount, selectedMetaIdentity]);
-
-  useEffect(() => {
-    if (!publishAdAccountId) {
-      setMetaPixels([]);
-      setMetaPixelError("");
-      return;
+    const cached = loadVideoStoryboardDraftCache(campaignId);
+    if (cached) {
+      setVideoAspectRatio(cached.aspectRatio || "9:16");
+      setVideoDurationSeconds(cached.durationSeconds || 12);
+      setVideoInstructions(cached.instructions || "");
+      setSelectedCreativeIds(cached.selectedCreativeIds || []);
+      setVideoStoryboard(cached.storyboard || []);
+      setVideoStoryboardText(cached.storyboardText || "");
+      setVideoStoryboardDirty(cached.storyboardDirty);
+      setVideoStoryboardFeedback(cached.storyboardFeedback || "");
+    } else {
+      setVideoAspectRatio("9:16");
+      setVideoDurationSeconds(12);
+      setVideoInstructions("");
+      setVideoStoryboard([]);
+      setVideoStoryboardText("");
+      setVideoStoryboardDirty(false);
+      setVideoStoryboardFeedback("");
     }
-    void refreshMetaPixels({ silent: true });
-  }, [publishAdAccountId, selectedMetaAccountId]);
+    setVideoStoryboardCacheReadyCampaignId(campaignId);
+  }, [activeView, selectedCampaign?.id]);
 
   useEffect(() => {
-    if (!isCreativeGenerationActive(creativeGeneration)) {
+    const campaignId = selectedCampaign?.id;
+    if (!campaignId || videoStoryboardCacheReadyCampaignId !== campaignId) return;
+    saveVideoStoryboardDraftCache(campaignId, {
+      campaignId,
+      aspectRatio: videoAspectRatio,
+      durationSeconds: videoDurationSeconds,
+      instructions: videoInstructions,
+      selectedCreativeIds,
+      storyboard: videoStoryboard,
+      storyboardText: videoStoryboardText,
+      storyboardDirty: videoStoryboardDirty,
+      storyboardFeedback: videoStoryboardFeedback,
+      savedAt: new Date().toISOString(),
+    });
+  }, [
+    selectedCampaign?.id,
+    videoStoryboardCacheReadyCampaignId,
+    videoAspectRatio,
+    videoDurationSeconds,
+    videoInstructions,
+    selectedCreativeIds,
+    videoStoryboard,
+    videoStoryboardText,
+    videoStoryboardDirty,
+    videoStoryboardFeedback,
+  ]);
+
+  useEffect(() => {
+    if (
+      activeView !== "workflow" ||
+      !selectedJobId ||
+      !["queued", "processing"].includes(selectedJob?.status ?? "")
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
-      setCreativeGeneration((current) => {
-        if (!current || !isCreativeGenerationActive(current)) {
-          return current;
-        }
-        return {
-          ...current,
-          elapsedSeconds: Math.max(0, Math.floor((Date.now() - current.startedAt) / 1000)),
-        };
-      });
-    }, 1000);
+      void refreshJob(selectedJobId);
+    }, 2000);
     return () => window.clearInterval(timer);
-  }, [creativeGeneration?.phase, creativeGeneration?.startedAt]);
+  }, [activeView, selectedJobId, selectedJob?.status]);
 
   useEffect(() => {
-    setCreativeGeneration(null);
-    setCurrentCreativeBatchIds([]);
-    setVideoStoryboard([]);
-    setVideoStoryboardText("");
-    setVideoStoryboardDirty(false);
-    setAdCreativeDraft(null);
-    setAdsPlanDraft(null);
-    setMetaAdsDraftResult(null);
-  }, [selectedCampaign?.id]);
+    if (!loading) {
+      setOperationElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setOperationElapsedSeconds(0);
+    const timer = window.setInterval(() => {
+      setOperationElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loading]);
+
+  useEffect(() => {
+    const generatingIds = videos
+      .filter((video) => isVideoGeneratingStatus(video.status) && video.provider_job_id)
+      .map((video) => video.id);
+    if (!generatingIds.length) return;
+
+    let cancelled = false;
+    let inFlight = false;
+    const refreshGeneratingVideos = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const refreshed = await Promise.all(
+          generatingIds.map(async (videoId) => {
+            try {
+              return await api.refreshVideoGeneration(videoId);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (cancelled) return;
+        refreshed.forEach((video) => {
+          if (video) {
+            setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
+          }
+        });
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refreshGeneratingVideos();
+    const timer = window.setInterval(refreshGeneratingVideos, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [videos.map((video) => `${video.id}:${video.status}:${video.provider_job_id ?? ""}`).join("|")]);
 
   async function run<T>(key: string, task: () => Promise<T>, success?: string): Promise<T | null> {
     setLoading(key);
@@ -400,9 +379,7 @@ function App() {
     setNotice(null);
     try {
       const result = await task();
-      if (success) {
-        setNotice(success);
-      }
+      if (success) setNotice(success);
       return result;
     } catch (caught) {
       const message =
@@ -414,162 +391,143 @@ function App() {
     }
   }
 
+  function clearCampaignWorkflowState() {
+    setTopics([]);
+    setTopicGenerationSlots([]);
+    setSelectedTopicId(null);
+    setDrafts([]);
+    setSelectedDraftId(null);
+    setCreatives([]);
+    setCreativeGenerationSlots([]);
+    setSelectedCreativeIds([]);
+    setCreativeRewriteFeedbacks({});
+    setVideos([]);
+    setSelectedVideoId(null);
+    setVideoStoryboard([]);
+    setVideoStoryboardText("");
+    setVideoStoryboardDirty(false);
+    setVideoStoryboardFeedback("");
+    setVideoStoryboardCacheReadyCampaignId(null);
+    setFinalPayloadDraft("");
+    setFinalReviewNotes("");
+  }
+
   async function refreshBaseData() {
     await run("refresh", async () => {
-      const [
-        nextWorkOrders,
-        nextCampaigns,
-        nextPublishJobs,
-        nextFacebookConfig,
-        nextMetaAccounts,
-      ] = await Promise.all([
-        api.listWorkOrders(100),
+      const [nextJobs, nextCampaigns] = await Promise.all([
+        api.listAdGenerationJobs(100),
         api.listCampaigns(100),
-        api.listPublishJobs(),
-        api.getMetaPublishConfig(),
-        api.listMetaAccounts(),
       ]);
-      setWorkOrders(nextWorkOrders);
+      setJobs(nextJobs);
       setCampaigns(nextCampaigns);
-      setPublishJobs(nextPublishJobs);
-      setFacebookConfig(nextFacebookConfig);
-      setMetaAccounts(nextMetaAccounts);
-      const defaultMetaAccount = nextMetaAccounts[0] ?? null;
-      const activeMetaAccount =
-        (selectedMetaAccountId
-          ? nextMetaAccounts.find((item) => item.id === selectedMetaAccountId)
-          : null) ?? defaultMetaAccount;
-      if (!selectedMetaAccountId && activeMetaAccount) {
-        setSelectedMetaAccountId(activeMetaAccount.id);
-      }
-      if (activeMetaAccount?.page_id) {
-        setPublishPageId(activeMetaAccount.page_id);
-      } else if (nextFacebookConfig.page.id) {
-        setPublishPageId(nextFacebookConfig.page.id);
-      }
-      if (activeMetaAccount?.ad_account_id) {
-        setPublishAdAccountId(normalizeMetaAdAccountId(activeMetaAccount.ad_account_id));
-      } else if (nextFacebookConfig.ads.ad_account_id) {
-        setPublishAdAccountId(normalizeMetaAdAccountId(nextFacebookConfig.ads.ad_account_id));
-      }
-      if (!selectedWorkOrderId && nextWorkOrders[0]) {
-        setSelectedWorkOrderId(nextWorkOrders[0].id);
-      }
-      if (!selectedCampaignId && nextCampaigns[0]) {
-        setSelectedCampaignId(nextCampaigns[0].id);
+      setSelectedJobId((current) =>
+        current && nextJobs.some((item) => item.id === current) ? current : nextJobs[0]?.id ?? null,
+      );
+      setSelectedCampaignId((current) =>
+        current && nextCampaigns.some((item) => item.id === current)
+          ? current
+          : nextCampaigns[0]?.id ?? null,
+      );
+      if (!selectedCampaignId || !nextCampaigns.some((item) => item.id === selectedCampaignId)) {
+        clearCampaignWorkflowState();
       }
     });
+  }
+
+  async function refreshJob(jobId: string) {
+    const job = await run("ad-generation-refresh", () => api.getAdGenerationJob(jobId));
+    if (!job) return;
+    setJobs((current) => upsertById(current, job));
+    setSelectedJobId(job.id);
+    const campaignId = adGenerationCampaignId(job);
+    if (campaignId) {
+      try {
+        const campaign = await api.getCampaign(campaignId);
+        setCampaigns((current) => upsertById(current, campaign));
+        setSelectedCampaignId(campaign.id);
+        await refreshCampaignData(campaign.id);
+      } catch {
+        // The background task may still be linking the campaign.
+      }
+    }
   }
 
   async function refreshCampaignData(campaignId: string) {
     await run("campaign-refresh", async () => {
-      const [nextSnapshots, nextTopics, nextDrafts, nextCreatives, nextVideos, nextPublishJobs] =
-        await Promise.all([
-          api.listLandingPageSnapshots(campaignId),
-          api.listTopics(campaignId),
-          api.listDrafts(campaignId),
-          api.listCreatives(campaignId),
-          api.listVideos(campaignId),
-          api.listPublishJobs(campaignId),
-        ]);
-      setSnapshots(nextSnapshots);
+      const [nextTopics, nextDrafts, nextCreatives, nextVideos] = await Promise.all([
+        api.listTopics(campaignId),
+        api.listDrafts(campaignId),
+        api.listCreatives(campaignId),
+        api.listVideos(campaignId),
+      ]);
       setTopics(nextTopics);
       setDrafts(nextDrafts);
       setCreatives(nextCreatives);
       setVideos(nextVideos);
-      setPublishJobs(nextPublishJobs);
-      const availableIds = new Set(nextCreatives.map((item) => item.id));
-      setHiddenCreativeIds((current) => current.filter((id) => availableIds.has(id)));
-      setCurrentCreativeBatchIds((current) => {
-        const retainedIds = current.filter((id) => availableIds.has(id));
-        if (retainedIds.length) return retainedIds;
-        return nextCreatives.filter((item) => Boolean(item.url)).slice(0, 3).map((item) => item.id);
-      });
       setSelectedTopicId((current) =>
-        current && nextTopics.some((item) => item.id === current) ? current : nextTopics[0]?.id ?? null,
+        current && nextTopics.some((item) => item.id === current)
+          ? current
+          : nextTopics.find((item) => item.status === "selected")?.id ?? nextTopics[0]?.id ?? null,
       );
       setSelectedDraftId((current) =>
-        current && nextDrafts.some((item) => item.id === current) ? current : nextDrafts[0]?.id ?? null,
+        current && nextDrafts.some((item) => item.id === current)
+          ? current
+          : nextDrafts[0]?.id ?? null,
       );
       setSelectedCreativeIds((current) => {
-        const retainedIds = current.filter((id) => availableIds.has(id));
-        return retainedIds.length ? retainedIds : nextCreatives.slice(0, 3).map((item) => item.id);
+        const valid = current.filter((id) => nextCreatives.some((item) => item.id === id));
+        if (valid.length) return valid;
+        return nextCreatives.filter((item) => item.status === "approved").slice(0, 2).map((item) => item.id);
       });
+      setSelectedVideoId((current) =>
+        current && nextVideos.some((item) => item.id === current)
+          ? current
+          : nextVideos.find((item) => item.status === "approved")?.id ?? nextVideos[0]?.id ?? null,
+      );
     });
   }
-
-  async function refreshMetaPixels(options: { silent?: boolean } = {}) {
-    if (!publishAdAccountId) {
-      setMetaPixels([]);
-      setMetaPixelError("请先选择广告账户 Ad Account。");
-      return;
-    }
-    if (!options.silent) {
-      setLoading("meta-pixels");
-      setError(null);
-      setNotice(null);
-    }
-    setMetaPixelError("");
-    try {
-      const pixels = await api.listAdPixels(selectedMetaAccountId || null, publishAdAccountId);
-      setMetaPixels(pixels);
-      if (!options.silent) {
-        setNotice(pixels.length ? "Meta Pixel 列表已刷新" : "当前广告账户没有返回 Pixel。");
-      }
-      setMetaPixelId((current) => {
-        if (current && pixels.some((pixel) => pixel.id === current)) return current;
-        return current || pixels[0]?.id || "";
-      });
-    } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "Pixel 列表获取失败";
-      const friendlyMessage = formatMetaPixelError(message);
-      setMetaPixels([]);
-      setMetaPixelError(friendlyMessage);
-      if (!options.silent) setError(friendlyMessage);
-    } finally {
-      if (!options.silent) setLoading(null);
-    }
-  }
-
-  function handleCreativeImageInvalid(assetId: string) {
-    setHiddenCreativeIds((current) => (current.includes(assetId) ? current : [...current, assetId]));
-  }
-
-  useEffect(() => {
-    setSelectedCreativeIds((current) => {
-      const next = current.filter((id) => !hiddenCreativeIds.includes(id));
-      return next.length === current.length ? current : next;
-    });
-  }, [hiddenCreativeIds]);
 
   async function handleCreateWorkOrder() {
     const content = rawWorkOrder.trim();
     if (!content) {
       setError("请先粘贴工单内容。");
-      setNotice(null);
+      return;
+    }
+    if (deliveryExtraction && deliveryConfirmRawContent === content) {
+      openDeliveryConfirmation(deliveryExtraction, content);
+      setNotice("已使用上次识别结果，请确认投放参数");
+      return;
+    }
+
+    const cached = loadDeliveryExtractionCache(content);
+    if (cached) {
+      setDeliveryExtractionCache(cached);
+      openDeliveryConfirmation(cached.extraction, content);
+      setNotice("已使用上次识别结果，请确认投放参数");
       return;
     }
 
     const extracted = await run(
       "extract-work-order",
       () => api.extractWorkOrderDeliveryFields(content),
-      "请确认投放信息",
+      "请确认投放参数",
     );
     if (extracted) {
-      setDeliveryExtraction(extracted);
-      setDeliveryConfirmForm(buildDeliveryConfirmForm(extracted));
-      setDeliveryConfirmRawContent(content);
-      setDeliveryConfirmOpen(true);
+      setDeliveryExtractionCache(saveDeliveryExtractionCache(content, extracted));
+      openDeliveryConfirmation(extracted, content);
     }
   }
 
-  function handleDeliveryConfirmChange(key: keyof ReviewedDeliveryFields, value: string) {
-    setDeliveryConfirmForm((current) => ({ ...current, [key]: value }));
+  function openDeliveryConfirmation(extraction: WorkOrderDeliveryExtraction, rawContent: string) {
+    setDeliveryExtraction(extraction);
+    setDeliveryConfirmForm(buildDeliveryConfirmForm(extraction));
+    setDeliveryConfirmRawContent(rawContent);
+    setDeliveryConfirmOpen(true);
   }
 
   function handleCancelDeliveryConfirm() {
     setDeliveryConfirmOpen(false);
+    setNotice("识别结果已保留，再次点击可直接确认");
   }
 
   async function handleConfirmCreateWorkOrder() {
@@ -577,67 +535,253 @@ function App() {
     const validationError = validateDeliveryConfirmForm(deliveryConfirmForm);
     if (validationError) {
       setError(validationError);
-      setNotice(null);
       return;
     }
-
     const reviewedFields = normalizeReviewedDeliveryFields(deliveryConfirmForm);
-    const created = await run(
-      "create-work-order",
+    const accepted = await run(
+      "create-ad-generation",
       () =>
-        api.createWorkOrder(
-          deliveryConfirmRawContent || rawWorkOrder.trim(),
-          reviewedFields,
+        api.createAdGenerationJob({
+          externalOrderId: publishingEntry.externalOrderId,
+          returnUrl: publishingEntry.returnUrl,
+          rawContent: deliveryConfirmRawContent || rawWorkOrder.trim(),
+          structuredFields: { ...reviewedFields },
           deliveryExtraction,
-        ),
-      "工单已创建",
+        }),
+      "AI 工单已创建，正在进入 AI 生产",
     );
-    if (created) {
-      setWorkOrders((current) => [created, ...current]);
-      setSelectedWorkOrderId(created.id);
-      setActiveView("work-orders");
-      setDeliveryConfirmOpen(false);
-      setDeliveryExtraction(null);
-      setDeliveryConfirmRawContent("");
-    }
+    if (!accepted) return;
+    setSelectedJobId(accepted.job_id);
+    setActiveView("workflow");
+    setDeliveryConfirmOpen(false);
+    setDeliveryExtraction(null);
+    setDeliveryConfirmRawContent("");
+    setDeliveryExtractionCache(null);
+    removeDeliveryExtractionCache(deliveryConfirmRawContent || rawWorkOrder.trim());
+    window.history.replaceState(null, "", `/review/ad-generation/${accepted.job_id}`);
+    window.setTimeout(() => void refreshJob(accepted.job_id), 900);
   }
 
-  async function handleCreateCampaign(workOrderId: string) {
-    const campaign = await run(
-      "create-campaign",
-      () => api.createCampaignFromWorkOrder(workOrderId),
-      "广告项目已创建",
+  async function handleDeleteJob(jobId: string) {
+    const job = jobs.find((item) => item.id === jobId);
+    const title = job ? adGenerationJobTitle(job) : shortId(jobId);
+    const confirmed = window.confirm(
+      `确认删除 AI 工单「${title}」吗？删除后将同时清理该工单生成的活动、文案、图片、视频和生产记录。`,
     );
-    if (campaign) {
-      setCampaigns((current) => [campaign, ...current]);
-      setSelectedCampaignId(campaign.id);
-      setActiveView("campaign");
-    }
+    if (!confirmed) return;
+
+    const deleted = await run(
+      `delete-job-${jobId}`,
+      () => api.deleteAdGenerationJob(jobId),
+      "AI 工单已删除",
+    );
+    if (deleted === null) return;
+
+    setJobs((current) => {
+      const nextJobs = current.filter((item) => item.id !== jobId);
+      if (selectedJobId === jobId) {
+        setSelectedJobId(nextJobs[0]?.id ?? null);
+      }
+      return nextJobs;
+    });
+    await refreshBaseData();
+    setNotice("AI 工单及关联生产数据已删除");
   }
 
-  async function handleAnalyzeLandingPage(forceRefresh = true) {
+  function buildTopicGenerationSignals(
+    feedback?: string,
+    mode: "revise_from_operator_feedback" | "retry_failed_topic_slot" = "revise_from_operator_feedback",
+  ): Record<string, unknown> {
+    const revisionFeedback = feedback?.trim();
+    const signals: Record<string, unknown> = {
+      integration: "publishing_jump_workflow",
+    };
+    if (revisionFeedback) {
+      signals.topic_revision_feedback = revisionFeedback;
+      signals.topic_generation_mode = mode;
+    } else if (mode === "retry_failed_topic_slot") {
+      signals.topic_generation_mode = mode;
+    }
+    if (revisionFeedback || mode === "retry_failed_topic_slot") {
+      signals.previous_topics = topics.map((topic) => ({
+        title: topic.title,
+        angle: topic.angle,
+        status: topic.status,
+        risk_notes: topic.risk_notes,
+      }));
+    }
+    return signals;
+  }
+
+  function updateTopicGenerationSlot(index: number, update: Partial<TopicGenerationSlot>) {
+    setTopicGenerationSlots((current) => {
+      const slots = current.length ? current : initialTopicSlots(TOPIC_GENERATION_LIMIT);
+      return slots.map((slot) => (slot.index === index ? { ...slot, ...update } : slot));
+    });
+  }
+
+  function markLoadingTopicSlotsFailed(message: string, targetIndex?: number) {
+    setTopicGenerationSlots((current) =>
+      current.map((slot) =>
+        slot.status === "loading" && (targetIndex === undefined || slot.index === targetIndex)
+          ? { ...slot, status: "error", message }
+          : slot,
+      ),
+    );
+  }
+
+  async function handleGenerateTopics(feedback?: string) {
     if (!selectedCampaign) return;
-    const snapshot = await run(
-      "landing",
-      () => api.analyzeLandingPage(selectedCampaign.id, forceRefresh),
-      "落地页分析已完成",
-    );
-    if (snapshot) {
-      setSnapshots((current) => [snapshot, ...current]);
+    if (topicGenerationSlots.some((slot) => slot.status === "loading")) return;
+    setActiveView("topics");
+    setLoading("topics");
+    setError(null);
+    setNotice(null);
+    setTopics([]);
+    setSelectedTopicId(null);
+    setTopicGenerationSlots(initialTopicSlots(TOPIC_GENERATION_LIMIT));
+
+    const revisionFeedback = feedback?.trim();
+    const signals = buildTopicGenerationSignals(revisionFeedback);
+    const streamedTopics: Topic[] = [];
+
+    try {
+      await api.generateTopicsStream(
+        selectedCampaign.id,
+        TOPIC_GENERATION_LIMIT,
+        signals,
+        (event: TopicStreamEvent) => {
+          if (event.type === "start") {
+            setTopicGenerationSlots(initialTopicSlots(event.limit));
+            return;
+          }
+          if (event.type === "slot") {
+            updateTopicGenerationSlot(event.index, {
+              status: "loading",
+              topic: undefined,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "topic") {
+            streamedTopics.push(event.topic);
+            setTopics((current) => appendOrReplaceById(current, event.topic));
+            setSelectedTopicId((current) => current ?? event.topic.id);
+            updateTopicGenerationSlot(event.index, {
+              status: "done",
+              topic: event.topic,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "error") {
+            markLoadingTopicSlotsFailed(event.message, event.index);
+            return;
+          }
+          if (event.type === "done") {
+            setTopicGenerationSlots((current) => {
+              const next = current.map((slot) =>
+                slot.status === "loading"
+                  ? { ...slot, status: "error" as const, message: "模型未返回此候选，请重试此候选。" }
+                  : slot,
+              );
+              return next.every((slot) => slot.status === "done") ? [] : next;
+            });
+          }
+        },
+      );
+
+      if (!streamedTopics.length) {
+        setError("选题生成失败，请稍后重试。");
+        markLoadingTopicSlotsFailed("模型未返回候选，请重新生成。");
+        return;
+      }
+
+      if (revisionFeedback) setTopicFeedback("");
+      setNotice(
+        streamedTopics.length === TOPIC_GENERATION_LIMIT
+          ? revisionFeedback
+            ? "已按修改意见重新生成选题"
+            : "选题已生成"
+          : `已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`,
+      );
+      void saveWorkflowStage("topic_review");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "选题生成失败";
+      setError(message);
+      markLoadingTopicSlotsFailed(message || "选题生成中断，请重试。");
+      if (streamedTopics.length) {
+        setNotice(`已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`);
+        void saveWorkflowStage("topic_review");
+      }
+    } finally {
+      setLoading((current) => (current === "topics" ? null : current));
     }
   }
 
-  async function handleGenerateTopics(signals: Record<string, unknown> = {}) {
+  async function handleRetryTopicSlot(slotIndex: number) {
     if (!selectedCampaign) return;
-    const generated = await run(
-      "topics",
-      () => api.generateTopics(selectedCampaign.id, 3, signals),
-      "选题已生成",
-    );
-    if (generated) {
-      setTopics(generated);
-      setSelectedTopicId(generated[0]?.id ?? null);
-      setActiveView("topics");
+    if (loading?.startsWith("topic-retry-")) return;
+    const revisionFeedback = topicFeedback.trim();
+    setLoading(`topic-retry-${slotIndex}`);
+    setError(null);
+    setNotice(null);
+    updateTopicGenerationSlot(slotIndex, {
+      status: "loading",
+      topic: undefined,
+      message: undefined,
+    });
+
+    let retriedTopic: Topic | null = null;
+    try {
+      await api.generateTopicsStream(
+        selectedCampaign.id,
+        1,
+        buildTopicGenerationSignals(revisionFeedback, "retry_failed_topic_slot"),
+        (event: TopicStreamEvent) => {
+          if (event.type === "topic") {
+            retriedTopic = event.topic;
+            setTopics((current) => appendOrReplaceById(current, event.topic));
+            setSelectedTopicId((current) => current ?? event.topic.id);
+            updateTopicGenerationSlot(slotIndex, {
+              status: "done",
+              topic: event.topic,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "error") {
+            updateTopicGenerationSlot(slotIndex, {
+              status: "error",
+              message: event.message || "此候选生成失败，请重试。",
+            });
+          }
+        },
+      );
+
+      if (!retriedTopic) {
+        updateTopicGenerationSlot(slotIndex, {
+          status: "error",
+          message: "模型未返回此候选，请再试一次。",
+        });
+        return;
+      }
+
+      setNotice(`候选 ${slotIndex} 已重新生成`);
+      setTopicGenerationSlots((current) =>
+        current.length && current.every((slot) => slot.status === "done") ? [] : current,
+      );
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "此候选生成失败";
+      setError(message);
+      updateTopicGenerationSlot(slotIndex, {
+        status: "error",
+        message,
+      });
+    } finally {
+      setLoading((current) => (current === `topic-retry-${slotIndex}` ? null : current));
     }
   }
 
@@ -645,30 +789,32 @@ function App() {
     const topic = await run("select-topic", () => api.selectTopic(topicId), "选题已选择");
     if (topic) {
       setTopics((current) =>
-        current.map((item) => {
-          if (item.id === topic.id) return topic;
-          if (item.campaign_id === topic.campaign_id && item.status === "selected") {
-            return { ...item, status: "proposed" };
-          }
-          return item;
-        }),
+        current.map((item) =>
+          item.id === topic.id
+            ? topic
+            : item.campaign_id === topic.campaign_id && item.status === "selected"
+              ? { ...item, status: "proposed" }
+              : item,
+        ),
       );
       setSelectedTopicId(topic.id);
+      setActiveView("copy");
+      void saveWorkflowStage("copy_review");
     }
   }
 
   async function handleGenerateCopy() {
-    if (!selectedTopic) return;
-    const draft = await run(
-      "copy",
-      () => api.generateCopy(selectedTopic.id, "Learn More"),
-      "文案已生成",
-    );
+    const topic = topics.find((item) => item.status === "selected") ?? selectedTopic;
+    if (!topic) {
+      setError("请先选择一个选题。");
+      return;
+    }
+    const draft = await run("copy", () => api.generateCopy(topic.id, "Learn More"), "文案已生成");
     if (draft) {
       setDrafts((current) => [draft, ...current]);
       setSelectedDraftId(draft.id);
-      setPublishMessage(draft.primary_text || draft.body);
       setActiveView("copy");
+      void saveWorkflowStage("copy_review");
     }
   }
 
@@ -686,489 +832,567 @@ function App() {
     }
   }
 
-  async function handleReview(entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") {
+  async function handleReview(
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) {
     if (!selectedCampaign) return;
     const review = await run(
       `review-${entityType}-${decision}`,
       () => api.submitReview(entityType, entityId, decision, selectedCampaign.id, copyFeedback || undefined),
       "审核结果已提交",
     );
-    if (review && selectedCampaign.id) {
+    if (review) {
       await refreshCampaignData(selectedCampaign.id);
+      if (entityType === "copy_draft" && decision === "approved") void saveWorkflowStage("image_review");
+      if (entityType === "creative_asset" && decision === "approved") void saveWorkflowStage("video_review");
+      if (entityType === "video_asset" && decision === "approved") void saveWorkflowStage("final_review");
     }
+  }
+
+  function updateCreativeGenerationSlot(index: number, update: Partial<CreativeGenerationSlot>) {
+    setCreativeGenerationSlots((current) => {
+      const fallbackSlots = buildCreativeSlots(creatives, []);
+      const slots = current.length
+        ? current
+        : fallbackSlots.length
+          ? fallbackSlots
+          : initialCreativeSlots(CREATIVE_GENERATION_LIMIT);
+      return slots.map((slot) => (slot.index === index ? { ...slot, ...update } : slot));
+    });
+  }
+
+  function markLoadingCreativeSlotsFailed(message: string, targetIndex?: number) {
+    setCreativeGenerationSlots((current) =>
+      current.map((slot) =>
+        slot.status === "loading" && (targetIndex === undefined || slot.index === targetIndex)
+          ? { ...slot, status: "error", message }
+          : slot,
+      ),
+    );
   }
 
   async function handleGenerateCreatives() {
-    if (!selectedDraft) return;
-    const expectedCount = 3;
-    const startedAt = Date.now();
-    const draftId = selectedDraft.id;
+    const draft = approvedDraft ?? selectedDraft;
+    if (!draft) {
+      setError("请先生成并审核通过一条文案。");
+      return;
+    }
+    if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
     setActiveView("creatives");
-    setCreativeGeneration({
-      phase: "submitting",
-      draftId,
-      expectedCount,
-      completedCount: 0,
-      startedAt,
-      elapsedSeconds: 0,
-      message: "正在提交图片生成请求",
-      detail: "准备把当前文案发送给图片生成服务。",
-    });
-    const generated = await run(
-      "creatives",
-      async () => {
-        setCreativeGeneration((current) =>
-          current?.startedAt === startedAt
-            ? {
-                ...current,
-                phase: "generating",
-                message: "火山引擎正在生成图片",
-                detail: "通常需要几十秒，请保持后端服务运行，完成后会自动刷新到图片列表。",
-                elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-              }
-            : current,
-        );
-        const result = await api.generateCreatives(draftId, expectedCount, "1:1");
-        setCreativeGeneration((current) =>
-          current?.startedAt === startedAt
-            ? {
-                ...current,
-                phase: "saving",
-                completedCount: result.length,
-                message: "正在更新图片列表",
-                detail: "图片已经生成并写入本地存储，正在同步到当前页面。",
-                elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-              }
-            : current,
-        );
-        return result;
-      },
-      "图片已生成",
-    );
-    if (generated) {
-      setCreatives((current) => [...generated, ...current]);
-      const generatedIds = generated.slice(0, 3).map((item) => item.id);
-      setCurrentCreativeBatchIds(generatedIds);
-      setSelectedCreativeIds(generatedIds);
-      setActiveView("creatives");
-      setCreativeGeneration({
-        phase: "done",
-        draftId,
-        expectedCount,
-        completedCount: generated.length,
-        startedAt,
-        elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-        message: `本次已生成 ${generated.length} 张图片`,
-        detail: "新图片已经放在列表顶部，可以直接审核或选择用于视频。",
-      });
-    } else {
-      setCreativeGeneration((current) =>
-        current?.startedAt === startedAt
-          ? {
-              ...current,
-              phase: "failed",
-              message: "图片生成失败",
-              detail: "请查看页面顶部的错误提示，修正后可以重新生成。",
-              elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-            }
-          : current,
+    setLoading("creatives");
+    setError(null);
+    setNotice(null);
+    setCreativeGenerationSlots(initialCreativeSlots(CREATIVE_GENERATION_LIMIT));
+
+    const streamedAssets: CreativeAsset[] = [];
+    try {
+      await api.generateCreativesStream(
+        draft.id,
+        CREATIVE_GENERATION_LIMIT,
+        "1:1",
+        (event: CreativeStreamEvent) => {
+          if (event.type === "start") {
+            setCreativeGenerationSlots(initialCreativeSlots(CREATIVE_GENERATION_LIMIT));
+            return;
+          }
+          if (event.type === "slot") {
+            updateCreativeGenerationSlot(event.index, {
+              status: "loading",
+              asset: undefined,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "asset") {
+            streamedAssets.push(event.asset);
+            setCreatives((current) => prependOrReplaceById(current, event.asset));
+            setSelectedCreativeIds((current) =>
+              current.includes(event.asset.id) ? current : [...current, event.asset.id],
+            );
+            updateCreativeGenerationSlot(event.index, {
+              status: "done",
+              asset: event.asset,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "error") {
+            markLoadingCreativeSlotsFailed(event.message, event.index);
+            return;
+          }
+          if (event.type === "done") {
+            setCreativeGenerationSlots((current) =>
+              current.map((slot) =>
+                slot.status === "loading"
+                  ? { ...slot, status: "error" as const, message: "此图片未生成完成，请重试此候选。" }
+                  : slot,
+              ),
+            );
+          }
+        },
       );
+
+      if (!streamedAssets.length) {
+        setError("图片生成失败，请稍后重试。");
+        markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
+        return;
+      }
+
+      setNotice(
+        streamedAssets.length === CREATIVE_GENERATION_LIMIT
+          ? "3 张图片已生成"
+          : `已生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`,
+      );
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "图片生成失败";
+      setError(message);
+      markLoadingCreativeSlotsFailed(message || "图片生成中断，请重试。");
+      if (streamedAssets.length) {
+        setNotice(`已生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`);
+        void saveWorkflowStage("image_review");
+      }
+    } finally {
+      setLoading((current) => (current === "creatives" ? null : current));
     }
   }
 
-  function requestGenerateCreatives() {
-    setError(null);
-    setNotice(null);
-    if (!selectedDraft) {
-      setError("请先生成或选择一条文案，再生成图片");
+  async function handleRetryCreativeSlot(slotIndex: number) {
+    const draft = approvedDraft ?? selectedDraft;
+    if (!draft) {
+      setError("请先生成并审核通过一条文案。");
       return;
     }
-    setCreativeConfirmOpen(true);
-  }
-
-  async function confirmGenerateCreatives() {
-    setCreativeConfirmOpen(false);
-    await handleGenerateCreatives();
-  }
-
-  function handleOpenVideoConfig() {
+    if (loading?.startsWith("creative-retry-")) return;
+    setLoading(`creative-retry-${slotIndex}`);
     setError(null);
     setNotice(null);
-    if (selectedVisibleCreativeIds.length === 0) {
-      setError("请先选择至少一张图片，再创建视频任务");
+    updateCreativeGenerationSlot(slotIndex, {
+      status: "loading",
+      asset: undefined,
+      message: undefined,
+    });
+
+    let retriedAsset: CreativeAsset | null = null;
+    try {
+      await api.generateCreativesStream(
+        draft.id,
+        1,
+        "1:1",
+        (event: CreativeStreamEvent) => {
+          if (event.type === "asset") {
+            retriedAsset = event.asset;
+            setCreatives((current) => prependOrReplaceById(current, event.asset));
+            setSelectedCreativeIds((current) =>
+              current.includes(event.asset.id) ? current : [...current, event.asset.id],
+            );
+            updateCreativeGenerationSlot(slotIndex, {
+              status: "done",
+              asset: event.asset,
+              message: undefined,
+            });
+            return;
+          }
+          if (event.type === "error") {
+            updateCreativeGenerationSlot(slotIndex, {
+              status: "error",
+              message: event.message || "此图片生成失败，请重试。",
+            });
+          }
+        },
+        slotIndex,
+      );
+
+      if (!retriedAsset) {
+        updateCreativeGenerationSlot(slotIndex, {
+          status: "error",
+          message: "模型未返回此图片，请再试一次。",
+        });
+        return;
+      }
+      setNotice(`图片 ${slotIndex} 已重新生成`);
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "此图片生成失败";
+      setError(message);
+      updateCreativeGenerationSlot(slotIndex, {
+        status: "error",
+        message,
+      });
+    } finally {
+      setLoading((current) => (current === `creative-retry-${slotIndex}` ? null : current));
+    }
+  }
+
+  async function handleRegenerateCreative(asset: CreativeAsset) {
+    const feedback = creativeRewriteFeedbacks[asset.id]?.trim();
+    if (!feedback) {
+      setError("请先填写这张图片的改写要求。");
       return;
     }
-    setActiveView("videos");
+    const slotIndex = creativeImageIndex(asset, 1);
+    setLoading(`creative-regenerate-${asset.id}`);
+    setError(null);
+    setNotice(null);
+    updateCreativeGenerationSlot(slotIndex, {
+      status: "loading",
+      asset,
+      message: undefined,
+    });
+
+    try {
+      const regenerated = await api.regenerateCreative(asset.id, feedback, asset.size);
+      setCreatives((current) => prependOrReplaceById(current, regenerated));
+      setSelectedCreativeIds((current) =>
+        current.includes(regenerated.id)
+          ? current.filter((id) => id !== asset.id)
+          : [...current.filter((id) => id !== asset.id), regenerated.id],
+      );
+      updateCreativeGenerationSlot(slotIndex, {
+        status: "done",
+        asset: regenerated,
+        message: undefined,
+      });
+      setCreativeRewriteFeedbacks((current) => {
+        const next = { ...current };
+        delete next[asset.id];
+        return next;
+      });
+      setNotice(`图片 ${slotIndex} 已生成新版本`);
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "图片改写失败";
+      setError(message);
+      updateCreativeGenerationSlot(slotIndex, {
+        status: "error",
+        asset,
+        message,
+      });
+    }
+    setLoading((current) => (current === `creative-regenerate-${asset.id}` ? null : current));
   }
 
   async function handleGenerateVideoStoryboard() {
     if (!selectedCampaign) return;
-    if (selectedVisibleCreativeIds.length === 0) {
-      setError("请先选择至少一张图片，再生成视频脚本");
+    const sourceIds = selectedCreativeIdsForVideo();
+    if (!sourceIds.length) {
+      setError("请先审核通过并选择至少一张图片。");
       return;
     }
-    if (selectedVisibleCreativeIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`Seedance 1.5 pro 当前最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张首尾帧图片，请减少选择后再生成视频脚本`);
+    if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
+      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`);
       return;
     }
-    const generated = await run(
-      "video-storyboard",
-      () =>
-        api.generateVideoStoryboard(
-          selectedCampaign.id,
-          selectedVisibleCreativeIds,
-          selectedDraft?.id ?? null,
-          videoDurationSeconds,
-          videoAspectRatio,
-          videoInstructions,
-        ),
-      "视频脚本已生成",
-    );
-    if (generated) {
-      setVideoAspectRatio(generated.aspect_ratio);
-      setVideoDurationSeconds(generated.duration_seconds);
-      setVideoStoryboard(generated.storyboard);
-      setVideoStoryboardText(formatStoryboard(generated.storyboard));
-      setVideoStoryboardDirty(false);
-    }
-  }
-
-  function handleStoryboardTextChange(value: string) {
-    setVideoStoryboardText(value);
+    const previousText = videoStoryboardText;
+    let streamedText = "";
+    setLoading("video-storyboard");
+    setError(null);
+    setNotice(null);
+    setVideoStoryboard([]);
+    setVideoStoryboardText("");
     setVideoStoryboardDirty(true);
+    try {
+      await api.streamVideoStoryboard(
+        selectedCampaign.id,
+        sourceIds,
+        approvedDraft?.id ?? selectedDraft?.id ?? null,
+        videoDurationSeconds,
+        videoAspectRatio,
+        videoInstructions,
+        (event: VideoStoryboardTextStreamEvent) => {
+          if (event.type === "start") {
+            setVideoAspectRatio(event.aspect_ratio);
+            setVideoDurationSeconds(event.duration_seconds);
+            return;
+          }
+          if (event.type === "delta") {
+            streamedText += event.text;
+            setVideoStoryboardText(streamedText);
+            return;
+          }
+          if (event.type === "done") {
+            streamedText = event.text ?? streamedText;
+            setVideoStoryboardText(streamedText);
+            setVideoAspectRatio(event.aspect_ratio);
+            setVideoDurationSeconds(event.duration_seconds);
+            return;
+          }
+          if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        },
+      );
+      if (!streamedText.trim()) {
+        throw new Error("模型未返回视频脚本，请重试。");
+      }
+      setNotice("视频脚本已生成");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频脚本生成失败";
+      setError(message);
+      if (!streamedText.trim() && previousText.trim()) {
+        setVideoStoryboardText(previousText);
+      }
+    } finally {
+      setLoading((current) => (current === "video-storyboard" ? null : current));
+    }
   }
 
-  async function handleCreateVideo() {
-    if (!selectedCampaign || selectedVisibleCreativeIds.length === 0) return;
-    if (selectedVisibleCreativeIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`Seedance 1.5 pro 当前最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张首尾帧图片，请减少选择后再创建视频任务`);
+  async function handleRewriteVideoStoryboard() {
+    if (!selectedCampaign) return;
+    const sourceIds = selectedCreativeIdsForVideo();
+    const feedback = videoStoryboardFeedback.trim();
+    if (!sourceIds.length) {
+      setError("请先审核通过并选择至少一张图片。");
+      return;
+    }
+    if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
+      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`);
       return;
     }
     if (!videoStoryboardText.trim()) {
-      setError("请先使用 AI 生成视频脚本，或手动填写 storyboard");
+      setError("请先生成或填写视频脚本。");
+      return;
+    }
+    if (!feedback) {
+      setError("请先填写脚本修改意见。");
       return;
     }
     const storyboardPayload = videoStoryboardDirty
       ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
       : videoStoryboard;
-    const video = await run(
-      "video",
-      () =>
-        api.createVideoFromImages({
+    const previousText = videoStoryboardText;
+    let streamedText = "";
+    setLoading("video-storyboard-rewrite");
+    setError(null);
+    setNotice(null);
+    setVideoStoryboard([]);
+    setVideoStoryboardText("");
+    setVideoStoryboardDirty(true);
+    try {
+      await api.streamRewriteVideoStoryboard(
+        {
           campaignId: selectedCampaign.id,
-          creativeAssetIds: selectedVisibleCreativeIds,
-          draftId: selectedDraft?.id ?? null,
-          prompt: videoStoryboardText,
+          creativeAssetIds: sourceIds,
+          draftId: approvedDraft?.id ?? selectedDraft?.id ?? null,
           durationSeconds: videoDurationSeconds,
           aspectRatio: videoAspectRatio,
           storyboard: storyboardPayload,
-        }),
-      "视频任务已创建",
-    );
-    if (video) {
-      setVideos((current) => [video, ...current]);
+          storyboardText: previousText,
+          feedback,
+        },
+        (event: VideoStoryboardTextStreamEvent) => {
+          if (event.type === "start") {
+            setVideoAspectRatio(event.aspect_ratio);
+            setVideoDurationSeconds(event.duration_seconds);
+            return;
+          }
+          if (event.type === "delta") {
+            streamedText += event.text;
+            setVideoStoryboardText(streamedText);
+            return;
+          }
+          if (event.type === "done") {
+            streamedText = event.text ?? streamedText;
+            setVideoStoryboardText(streamedText);
+            setVideoAspectRatio(event.aspect_ratio);
+            setVideoDurationSeconds(event.duration_seconds);
+            return;
+          }
+          if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        },
+      );
+      if (!streamedText.trim()) {
+        throw new Error("模型未返回改写脚本，请重试。");
+      }
+      setVideoStoryboardFeedback("");
+      setNotice("脚本已按意见改写");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频脚本改写失败";
+      setError(message);
+      if (!streamedText.trim()) {
+        setVideoStoryboardText(previousText);
+      }
+    } finally {
+      setLoading((current) => (current === "video-storyboard-rewrite" ? null : current));
+    }
+  }
+
+  async function handleCreateVideo() {
+    if (!selectedCampaign) return;
+    const sourceIds = selectedCreativeIdsForVideo();
+    if (!sourceIds.length) {
+      setError("请先选择审核通过的图片。");
+      return;
+    }
+    if (!videoStoryboardText.trim()) {
+      setError("请先生成或填写视频脚本。");
+      return;
+    }
+    const storyboardPayload = videoStoryboardDirty
+      ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
+      : videoStoryboard;
+    setLoading("video");
+    setError(null);
+    setNotice(null);
+    try {
+      const created = await api.createVideoFromImages({
+        campaignId: selectedCampaign.id,
+        creativeAssetIds: sourceIds,
+        draftId: approvedDraft?.id ?? selectedDraft?.id ?? null,
+        prompt: videoStoryboardText,
+        durationSeconds: videoDurationSeconds,
+        aspectRatio: videoAspectRatio,
+        storyboard: storyboardPayload,
+      });
+      setVideos((current) => prependOrReplaceById(current, created));
+      setSelectedVideoId(created.id);
       setActiveView("videos");
+      void saveWorkflowStage("video_review");
+      const started = await api.startVideoGeneration(created.id);
+      setVideos((current) => current.map((item) => (item.id === started.id ? started : item)));
+      setSelectedVideoId(started.id);
+      setNotice("视频任务已创建，正在生成成片");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频任务创建或生成失败";
+      setError(message);
+    } finally {
+      setLoading((current) => (current === "video" ? null : current));
     }
   }
 
-  function requestStartVideoGeneration(videoId: string) {
-    setError(null);
-    setNotice(null);
-    setVideoConfirmId(videoId);
-  }
-
-  async function confirmStartVideoGeneration() {
-    if (!videoConfirmId) return;
-    const targetId = videoConfirmId;
+  async function handleStartVideoGeneration(videoId: string) {
     const video = await run(
-      `video-generate-${targetId}`,
-      () => api.startVideoGeneration(targetId),
-      "视频生成任务已提交",
+      `video-generate-${videoId}`,
+      () => api.startVideoGeneration(videoId),
+      "视频生成任务已重新提交",
     );
-    if (video) {
-      setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
-    }
-    setVideoConfirmId(null);
+    if (video) setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
   }
 
-  async function handleRefreshVideoGeneration(videoId: string) {
-    const video = await run(
-      `video-refresh-${videoId}`,
-      () => api.refreshVideoGeneration(videoId),
-      "视频状态已刷新",
+  function selectedCreativeIdsForVideo(): string[] {
+    const approvedIds = new Set(approvedCreatives.map((item) => item.id));
+    const selected = selectedCreativeIds.filter((id) => approvedIds.has(id));
+    return (selected.length ? selected : approvedCreatives.slice(0, VIDEO_MAX_REFERENCE_IMAGES).map((item) => item.id)).slice(
+      0,
+      VIDEO_MAX_REFERENCE_IMAGES,
     );
-    if (video) {
-      setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
-    }
   }
 
-  async function handleCreatePublishJob() {
-    if (!selectedCampaign) return;
-    const message = publishMessage || selectedDraft?.primary_text || selectedDraft?.body || "";
-    if (publishMediaType === "image" && !selectedPublishableImage) {
-      setError("请选择一张可发布图片，或切换为视频发布。");
-      return;
-    }
-    if (publishMediaType === "video" && !publishVideoAssetId) {
-      setError("请选择一个已生成的视频，或切换为图片发布。");
-      return;
-    }
-    const accessTokenRef =
-      publishChannel === "facebook_page"
-        ? facebookConfig?.page.access_token_ref
-        : facebookConfig?.ads.access_token_ref;
-    const job = await run(
-      "publish-create",
-      () =>
-        api.createPublishJob({
-          campaignId: selectedCampaign.id,
-          facebookAccountId: selectedMetaAccountId || null,
-          draftId: selectedDraft?.id ?? null,
-          channel: publishChannel,
-          mediaType: publishMediaType,
-          message,
-          pageId: publishPageId,
-          adAccountId: publishAdAccountId,
-          accessTokenRef,
-          imageUrl: publishMediaType === "image" ? selectedPublishableImage?.url ?? undefined : undefined,
-          videoAssetId: publishMediaType === "video" ? publishVideoAssetId : undefined,
-        }),
-      "发布任务已创建",
-    );
-    if (job) {
-      setPublishJobs((current) => [job, ...current]);
-      setActiveView("publishing");
-    }
+  function applyStoryboard(generated: VideoStoryboardResponse) {
+    setVideoAspectRatio(generated.aspect_ratio);
+    setVideoDurationSeconds(generated.duration_seconds);
+    setVideoStoryboard(generated.storyboard);
+    setVideoStoryboardText(formatStoryboard(generated.storyboard));
+    setVideoStoryboardDirty(false);
   }
 
-  async function handleBuildAdCreativeDraft() {
-    if (!selectedCampaign) return;
-    const draft = await run(
-      "ad-creative-draft",
-      () =>
-        api.buildAdCreativeDraft({
-          campaignId: selectedCampaign.id,
-          facebookAccountId: selectedMetaAccountId || null,
-          draftId: selectedDraft?.id ?? null,
-          topicId: selectedTopic?.id ?? null,
-          creativeAssetId: publishCreativeAssetId,
-          videoAssetId: publishMediaType === "video" ? publishVideoAssetId : null,
-          pageId: publishPageId,
-          adAccountId: publishAdAccountId,
-          ctaType: "LEARN_MORE",
-        }),
-      "广告创意草稿已生成",
-    );
-    if (draft) {
-      setAdCreativeDraft(draft);
-    }
-  }
-
-  async function handleBuildAdsPlanDraft() {
-    if (!selectedCampaign) return;
-    const draft = await run(
-      "ads-plan-draft",
-      () =>
-        api.buildAdsPlanDraft({
-          campaignId: selectedCampaign.id,
-          facebookAccountId: selectedMetaAccountId || null,
-          draftId: selectedDraft?.id ?? null,
-          topicId: selectedTopic?.id ?? null,
-          creativeAssetId: publishCreativeAssetId,
-          videoAssetId: publishMediaType === "video" ? publishVideoAssetId || null : null,
-          pageId: publishPageId,
-          adAccountId: publishAdAccountId,
-          dailyBudget: parseOptionalInteger(metaDailyBudget),
-          pixelId: metaPixelId.trim() || null,
-        }),
-      "投放计划草稿已生成",
-    );
-    if (draft) {
-      setAdsPlanDraft(draft);
-    }
-  }
-
-  function requestPrepareMetaAdsPackage(preflightItems: PreflightChecklistItem[] = []) {
-    setError(null);
-    setNotice(null);
-    if (!selectedCampaign || !selectedDraft) {
-      setError("请先选择广告项目和文案。");
-      return;
-    }
-    if (!parseOptionalInteger(metaDailyBudget)) {
-      setError("请填写 Meta daily_budget，必须是大于 0 的整数。");
-      return;
-    }
-    const blockingItems = preflightItems.filter((item) => item.status === "error");
-    if (blockingItems.length) {
-      setError(`投放前检查未通过：${blockingItems.map((item) => item.label).join("、")}。请先修正红色项。`);
-      return;
-    }
-    const warningItems = preflightItems.filter((item) => item.status === "warning");
-    if (warningItems.length) {
-      setPendingPreflightAction({ kind: "prepare_meta_ads", warnings: warningItems });
-      return;
-    }
-    setMetaAdsConfirmOpen(true);
-  }
-
-  async function confirmPrepareMetaAdsPackage() {
-    if (!selectedCampaign || !selectedDraft) return;
-    const dailyBudget = parseOptionalInteger(metaDailyBudget);
-    if (!dailyBudget) return;
-    setMetaAdsConfirmOpen(false);
-    const job = await run(
-      "meta-ads-prepare",
-      () =>
-        api.prepareMetaAdsPackage({
-          campaignId: selectedCampaign.id,
-          facebookAccountId: selectedMetaAccountId || null,
-          draftId: selectedDraft.id,
-          topicId: selectedTopic?.id ?? null,
-          creativeAssetId: publishCreativeAssetId,
-          videoAssetId: publishMediaType === "video" ? publishVideoAssetId || null : null,
-          pageId: publishPageId,
-          adAccountId: publishAdAccountId,
-          dailyBudget,
-          pixelId: metaPixelId.trim() || null,
-        }),
-      "Meta 投流包已准备，等待人工审核",
-    );
-    if (job) {
-      setPublishJobs((current) => [job, ...current]);
-      setMetaAdsDraftResult(null);
-      await refreshCampaignData(selectedCampaign.id);
-    }
-  }
-
-  function confirmPreflightAction() {
-    const action = pendingPreflightAction;
-    if (!action) return;
-    setPendingPreflightAction(null);
-    if (action.kind === "prepare_meta_ads") {
-      void confirmPrepareMetaAdsPackage();
-      return;
-    }
-    void executePublishJob(action.jobId);
-  }
-
-  async function handleConnectMetaAccount() {
-    const result = await run("meta-oauth", async () => {
-      const returnUrl = `${window.location.origin}${window.location.pathname}?view=publishing`;
-      return await api.getMetaOAuthAuthorizeUrl(returnUrl);
+  function prepareFinalPayload(): Record<string, unknown> | null {
+    const result = buildFinalPayload({
+      job: selectedJob,
+      campaign: selectedCampaign,
+      topic: topics.find((item) => item.status === "selected") ?? selectedTopic,
+      draft: approvedDraft,
+      creatives: approvedCreatives,
+      videos: approvedVideos,
+      selectedCreativeIds,
+      selectedVideoId,
     });
-    if (result) {
-      window.location.href = result.authorization_url;
+    if (!result.ok) {
+      setError(result.message);
+      setNotice(null);
+      return null;
     }
-  }
-
-  function handlePublish(jobId: string) {
+    setFinalPayloadDraft(JSON.stringify(result.value, null, 2));
     setError(null);
-    setNotice(null);
-    const publishJob = publishJobs.find((item) => item.id === jobId);
-    if (!publishJob) {
-      setError("未找到发布任务，请刷新后重试。");
-      return;
-    }
-    const blockingItems = publishJobBlockingPreflightItems(publishJob);
-    if (blockingItems.length) {
-      setError(`一键发布已阻止：${blockingItems.map((item) => item.label).join("、")} 未通过。`);
-      return;
-    }
-    const warningItems = publishJobWarningPreflightItems(publishJob);
-    if (warningItems.length) {
-      setPendingPreflightAction({ kind: "publish_job", jobId, warnings: warningItems });
-      return;
-    }
-    void executePublishJob(jobId);
+    setNotice("最终预审包已生成，请检查后确认回传。");
+    return result.value;
   }
 
-  async function executePublishJob(jobId: string) {
-    const job = await run("publish", () => api.publishJob(jobId), "dry-run 发布已完成");
-    if (job) {
-      setPublishJobs((current) => current.map((item) => (item.id === job.id ? job : item)));
-    }
-  }
-
-  async function handleSyncMetaStatus(jobId: string) {
+  async function handleSaveFinalPayload() {
+    if (!selectedJob) return;
+    const parsed = parseFinalPayload();
+    if (!parsed) return;
     const job = await run(
-      `meta-status-${jobId}`,
-      () => api.syncMetaAdsStatus(jobId),
-      "Meta 审核状态已同步",
+      "save-final-payload",
+      () => api.updateAdGenerationReview(selectedJob.id, parsed, finalReviewNotes),
+      "最终预审包已保存",
     );
-    if (job) {
-      setPublishJobs((current) => current.map((item) => (item.id === job.id ? job : item)));
-    }
+    if (job) setJobs((current) => upsertById(current, job));
   }
 
-  async function handleSyncMetaInsights(jobId: string) {
+  async function handleConfirmReturn() {
+    if (!selectedJob) return;
+    const parsed = finalPayloadDraft.trim() ? parseFinalPayload() : prepareFinalPayload();
+    if (!parsed) return;
     const job = await run(
-      `meta-insights-${jobId}`,
-      () => api.syncMetaAdsInsights(jobId),
-      "Meta 广告数据已同步",
+      "confirm-return",
+      () => api.confirmAdGenerationReview(selectedJob.id, parsed, finalReviewNotes),
+      "已确认回传",
     );
-    if (job) {
-      setPublishJobs((current) => current.map((item) => (item.id === job.id ? job : item)));
+    if (!job) return;
+    setJobs((current) => upsertById(current, job));
+    if (job.return_url) {
+      const target = new URL(job.return_url);
+      target.searchParams.set("job_id", job.id);
+      target.searchParams.set("status", job.status);
+      if (job.external_order_id) target.searchParams.set("external_order_id", job.external_order_id);
+      window.location.href = target.toString();
     }
   }
 
-  function requestActivateMetaAds(jobId: string) {
-    setError(null);
-    setNotice(null);
-    setActivateConfirmText("");
-    setActivateConfirmJobId(jobId);
-  }
-
-  async function confirmActivateMetaAds() {
-    if (!activateConfirmJobId || activateConfirmText !== "ACTIVE") return;
-    const jobId = activateConfirmJobId;
-    const job = await run(
-      "meta-ads-activate",
-      () => api.activateMetaAdsJob(jobId, activateConfirmText),
-      "Meta ads are now ACTIVE",
-    );
-    if (job) {
-      setPublishJobs((current) => current.map((item) => (item.id === job.id ? job : item)));
-      setActivateConfirmJobId(null);
-      setActivateConfirmText("");
+  function parseFinalPayload(): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(finalPayloadDraft || "{}");
+      if (!isRecord(parsed)) {
+        setError("最终预审包必须是 JSON 对象。");
+        return null;
+      }
+      return parsed;
+    } catch {
+      setError("最终预审包不是有效 JSON，请检查逗号和引号。");
+      return null;
     }
   }
 
-  function requestPauseMetaAds(jobId: string) {
-    setError(null);
-    setNotice(null);
-    setPauseConfirmText("");
-    setPauseConfirmJobId(jobId);
+  async function saveWorkflowStage(stage: string) {
+    if (!selectedJob) return;
+    const current = selectedJob.result_payload ?? {};
+    const metadata = isRecord(current.metadata_json) ? current.metadata_json : {};
+    const job = await api.updateAdGenerationReview(selectedJob.id, {
+      ...current,
+      status: stage,
+      metadata_json: { ...metadata, workflow_stage: stage },
+    });
+    setJobs((items) => upsertById(items, job));
   }
 
-  async function confirmPauseMetaAds() {
-    if (!pauseConfirmJobId || pauseConfirmText !== "PAUSE") return;
-    const jobId = pauseConfirmJobId;
-    const job = await run(
-      "meta-ads-pause",
-      () => api.pauseMetaAdsJob(jobId, pauseConfirmText),
-      "Meta 投放已暂停",
-    );
-    if (job) {
-      setPublishJobs((current) => current.map((item) => (item.id === job.id ? job : item)));
-      setPauseConfirmJobId(null);
-      setPauseConfirmText("");
-    }
-  }
-
-  const todayWorkOrders = workOrders.filter((item) => isToday(item.created_at)).length;
-  const pendingCopy = drafts.filter((item) => !["approved", "rejected"].includes(item.status)).length;
-  const pendingCreatives = creatives.filter((item) => !["approved", "rejected"].includes(item.status)).length;
-  const latestSnapshot = snapshots[0] ?? null;
+  const workflowSummary = buildWorkflowSummary({
+    job: selectedJob,
+    campaign: selectedCampaign,
+    topic: topics.find((item) => item.status === "selected") ?? selectedTopic,
+    draft: approvedDraft,
+    creatives: approvedCreatives,
+    videos: approvedVideos,
+  });
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark">AA</div>
+          <div className="brand-mark">AI</div>
           <div>
-            <div className="brand-name">广告自动化</div>
-            <div className="brand-meta">运营后台</div>
+            <div className="brand-name">AI 投放生产</div>
+            <div className="brand-meta">内容审核工作台</div>
           </div>
         </div>
 
@@ -1177,10 +1401,9 @@ function App() {
             const Icon = item.icon;
             return (
               <button
-                key={item.key}
                 className={`nav-button ${activeView === item.key ? "active" : ""}`}
+                key={item.key}
                 onClick={() => setActiveView(item.key)}
-                title={item.label}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
@@ -1203,24 +1426,6 @@ function App() {
             <p>{viewSubtitles[activeView]}</p>
           </div>
           <div className="topbar-actions">
-            <div className="project-control">
-              <span>当前项目</span>
-              {selectedCampaign ? (
-                <select
-                  value={selectedCampaign.id}
-                  onChange={(event) => setSelectedCampaignId(event.target.value)}
-                  className="select project-select"
-                >
-                  {campaigns.map((campaign, index) => (
-                    <option value={campaign.id} key={campaign.id}>
-                      {campaignOptionLabel(campaign, index)}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <strong>未选择</strong>
-              )}
-            </div>
             <button className="icon-button" onClick={() => void refreshBaseData()} title="刷新">
               {loading === "refresh" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
             </button>
@@ -1236,11 +1441,10 @@ function App() {
 
         {activeView === "dashboard" && (
           <DashboardView
-            todayWorkOrders={todayWorkOrders}
-            pendingCopy={pendingCopy}
-            pendingCreatives={pendingCreatives}
-            publishJobs={publishJobs}
-            selectedCampaign={selectedCampaign}
+            jobs={jobs}
+            selectedJob={selectedJob}
+            summary={workflowSummary}
+            setSelectedJobId={setSelectedJobId}
             setActiveView={setActiveView}
           />
         )}
@@ -1249,34 +1453,59 @@ function App() {
           <WorkOrdersView
             rawWorkOrder={rawWorkOrder}
             setRawWorkOrder={setRawWorkOrder}
-            workOrders={workOrders}
-            selectedWorkOrder={selectedWorkOrder}
-            setSelectedWorkOrderId={setSelectedWorkOrderId}
+            jobs={jobs}
+            selectedJob={selectedJob}
+            setSelectedJobId={setSelectedJobId}
             onCreateWorkOrder={handleCreateWorkOrder}
-            onCreateCampaign={handleCreateCampaign}
+            onDeleteJob={(jobId) => void handleDeleteJob(jobId)}
+            onOpenWorkflow={() => setActiveView("workflow")}
             loading={loading}
+            hasCachedDeliveryExtraction={
+              Boolean(deliveryExtractionCache) ||
+              Boolean(deliveryExtraction && deliveryConfirmRawContent === rawWorkOrder.trim())
+            }
           />
         )}
 
-        {activeView === "campaign" && (
-          <CampaignView
+        {activeView === "workflow" && (
+          <WorkflowView
+            jobs={jobs}
+            selectedJob={selectedJob}
+            setSelectedJobId={setSelectedJobId}
             campaign={selectedCampaign}
-            workOrder={campaignWorkOrder}
-            snapshot={latestSnapshot}
-            snapshots={snapshots}
-            onAnalyze={() => void handleAnalyzeLandingPage(true)}
-            onGenerateTopics={handleGenerateTopics}
+            summary={workflowSummary}
+            topics={topics}
+            drafts={drafts}
+            creatives={creatives}
+            videos={videos}
+            finalPayloadDraft={finalPayloadDraft}
+            setFinalPayloadDraft={setFinalPayloadDraft}
+            finalReviewNotes={finalReviewNotes}
+            setFinalReviewNotes={setFinalReviewNotes}
+            onRefresh={() => (selectedJob ? void refreshJob(selectedJob.id) : void refreshBaseData())}
+            onGenerateTopics={() => void handleGenerateTopics()}
+            onGenerateCopy={() => void handleGenerateCopy()}
+            onGenerateCreatives={() => void handleGenerateCreatives()}
+            onGoToView={setActiveView}
+            onPrepareFinal={prepareFinalPayload}
+            onSaveFinal={() => void handleSaveFinalPayload()}
+            onConfirmReturn={() => void handleConfirmReturn()}
             loading={loading}
+            operationElapsedSeconds={operationElapsedSeconds}
           />
         )}
 
         {activeView === "topics" && (
           <TopicsView
             topics={topics}
+            topicGenerationSlots={topicGenerationSlots}
             selectedTopic={selectedTopic}
-            onGenerate={handleGenerateTopics}
-            onSelect={handleSelectTopic}
-            onGenerateCopy={handleGenerateCopy}
+            setSelectedTopicId={setSelectedTopicId}
+            topicFeedback={topicFeedback}
+            setTopicFeedback={setTopicFeedback}
+            onGenerate={(feedback) => void handleGenerateTopics(feedback)}
+            onRetryTopicSlot={(index) => void handleRetryTopicSlot(index)}
+            onSelect={(id) => void handleSelectTopic(id)}
             loading={loading}
           />
         )}
@@ -1286,39 +1515,48 @@ function App() {
             drafts={drafts}
             selectedDraft={selectedDraft}
             setSelectedDraftId={setSelectedDraftId}
-            selectedTopic={selectedTopic}
-            selectedCampaign={selectedCampaign}
-            creatives={visibleCreatives}
+            selectedTopic={topics.find((item) => item.status === "selected") ?? selectedTopic}
+            campaign={selectedCampaign}
+            creatives={creatives}
             feedback={copyFeedback}
             setFeedback={setCopyFeedback}
-            onGenerateCopy={handleGenerateCopy}
-            onReviseCopy={handleReviseCopy}
+            onGenerateCopy={() => void handleGenerateCopy()}
+            onReviseCopy={() => void handleReviseCopy()}
             onReview={handleReview}
-            onGenerateCreatives={requestGenerateCreatives}
+            onOpenCreatives={() => setActiveView("creatives")}
             loading={loading}
           />
         )}
 
         {activeView === "creatives" && (
           <CreativesView
-            currentCreatives={currentBatchCreatives}
-            historicalCreatives={historicalCreatives}
-            selectedCreativeIds={selectedVisibleCreativeIds}
+            creatives={creatives}
+            creativeGenerationSlots={creativeGenerationSlots}
+            selectedCreativeIds={selectedCreativeIds}
             setSelectedCreativeIds={setSelectedCreativeIds}
-            onGenerate={requestGenerateCreatives}
+            rewriteFeedbacks={creativeRewriteFeedbacks}
+            setRewriteFeedback={(assetId, value) =>
+              setCreativeRewriteFeedbacks((current) => ({ ...current, [assetId]: value }))
+            }
+            onGenerate={() => void handleGenerateCreatives()}
+            onRetrySlot={(index) => void handleRetryCreativeSlot(index)}
+            onRegenerate={(asset) => void handleRegenerateCreative(asset)}
             onReview={handleReview}
-            onCreateVideo={handleOpenVideoConfig}
-            onInvalidImage={handleCreativeImageInvalid}
-            generation={creativeGeneration}
+            onCreateVideo={() => setActiveView("videos")}
+            loading={loading}
           />
         )}
 
         {activeView === "videos" && (
           <VideosView
+            campaign={selectedCampaign}
+            draft={approvedDraft ?? selectedDraft}
             videos={videos}
-            creatives={visibleCreatives}
-            selectedCreativeIds={selectedVisibleCreativeIds}
+            approvedCreatives={approvedCreatives}
+            selectedCreativeIds={selectedCreativeIdsForVideo()}
             setSelectedCreativeIds={setSelectedCreativeIds}
+            selectedVideoId={selectedVideoId}
+            setSelectedVideoId={setSelectedVideoId}
             aspectRatio={videoAspectRatio}
             setAspectRatio={setVideoAspectRatio}
             durationSeconds={videoDurationSeconds}
@@ -1326,63 +1564,17 @@ function App() {
             instructions={videoInstructions}
             setInstructions={setVideoInstructions}
             storyboardText={videoStoryboardText}
-            setStoryboardText={handleStoryboardTextChange}
-            onGenerateStoryboard={handleGenerateVideoStoryboard}
-            onCreateVideo={handleCreateVideo}
-            onStartGeneration={requestStartVideoGeneration}
-            onRefreshGeneration={handleRefreshVideoGeneration}
+            setStoryboardText={(value) => {
+              setVideoStoryboardText(value);
+              setVideoStoryboardDirty(true);
+            }}
+            storyboardFeedback={videoStoryboardFeedback}
+            setStoryboardFeedback={setVideoStoryboardFeedback}
+            onGenerateStoryboard={() => void handleGenerateVideoStoryboard()}
+            onRewriteStoryboard={() => void handleRewriteVideoStoryboard()}
+            onCreateVideo={() => void handleCreateVideo()}
+            onStartGeneration={(id) => void handleStartVideoGeneration(id)}
             onReview={handleReview}
-            loading={loading}
-          />
-        )}
-
-        {activeView === "publishing" && (
-          <PublishingView
-            publishJobs={publishJobs}
-            facebookConfig={facebookConfig}
-            metaAccounts={metaAccounts}
-            selectedMetaAccountId={selectedMetaAccountId}
-            setSelectedMetaAccountId={setSelectedMetaAccountId}
-            adCreativeDraft={adCreativeDraft}
-            adsPlanDraft={adsPlanDraft}
-            metaAdsDraftResult={metaAdsDraftResult}
-            selectedCampaign={selectedCampaign}
-            selectedDraft={selectedDraft}
-            publishMessage={publishMessage}
-            setPublishMessage={setPublishMessage}
-            publishImageUrl={publishImageUrl}
-            setPublishImageUrl={setPublishImageUrl}
-            publishVideoAssetId={publishVideoAssetId}
-            setPublishVideoAssetId={setPublishVideoAssetId}
-            publishChannel={publishChannel}
-            setPublishChannel={setPublishChannel}
-            publishMediaType={publishMediaType}
-            setPublishMediaType={setPublishMediaType}
-            publishPageId={publishPageId}
-            setPublishPageId={setPublishPageId}
-            publishAdAccountId={publishAdAccountId}
-            setPublishAdAccountId={setPublishAdAccountId}
-        metaDailyBudget={metaDailyBudget}
-        setMetaDailyBudget={setMetaDailyBudget}
-        metaPixelId={metaPixelId}
-        setMetaPixelId={setMetaPixelId}
-        metaPixels={metaPixels}
-        metaPixelError={metaPixelError}
-        creatives={publishableImages}
-        videos={publishableVideos}
-            onCreateJob={handleCreatePublishJob}
-        onConnectMetaAccount={handleConnectMetaAccount}
-        onRefreshMetaAccounts={() => void refreshBaseData()}
-        onRefreshMetaPixels={() => void refreshMetaPixels()}
-        onBuildAdCreativeDraft={handleBuildAdCreativeDraft}
-            onBuildAdsPlanDraft={handleBuildAdsPlanDraft}
-            onPrepareMetaAdsPackage={requestPrepareMetaAdsPackage}
-            onReview={handleReview}
-            onPublish={handlePublish}
-            onSyncMetaStatus={handleSyncMetaStatus}
-            onSyncMetaInsights={handleSyncMetaInsights}
-            onActivateMetaAds={requestActivateMetaAds}
-            onPauseMetaAds={requestPauseMetaAds}
             loading={loading}
           />
         )}
@@ -1391,72 +1583,10 @@ function App() {
           open={deliveryConfirmOpen}
           extraction={deliveryExtraction}
           form={deliveryConfirmForm}
-          loading={loading === "create-work-order"}
-          onChange={handleDeliveryConfirmChange}
+          loading={loading === "create-ad-generation"}
+          onChange={(key, value) => setDeliveryConfirmForm((current) => ({ ...current, [key]: value }))}
           onConfirm={() => void handleConfirmCreateWorkOrder()}
           onCancel={handleCancelDeliveryConfirm}
-        />
-
-        <ConfirmDialog
-          open={creativeConfirmOpen}
-          icon="image"
-          title="确认生成图片？"
-          description="这一步会调用真实图片生成 API，一次生成 3 张图片，可能消耗额度。确认后才会开始生成。"
-          confirmLabel="确认生成"
-          cancelLabel="取消"
-          loading={loading === "creatives"}
-          onConfirm={() => void confirmGenerateCreatives()}
-          onCancel={() => setCreativeConfirmOpen(false)}
-        />
-        <ConfirmDialog
-          open={Boolean(videoConfirmId)}
-          icon="video"
-          title="开始生成视频？"
-          description="确认后会调用火山方舟 Doubao-Seedance-1.5-pro 视频生成 API，可能消耗额度。任务会进入生成中，需要稍后刷新状态获取视频。"
-          confirmLabel="开始生成"
-          cancelLabel="取消"
-          loading={videoConfirmId ? loading === `video-generate-${videoConfirmId}` : false}
-          onConfirm={() => void confirmStartVideoGeneration()}
-          onCancel={() => setVideoConfirmId(null)}
-        />
-        <ConfirmDialog
-          open={metaAdsConfirmOpen}
-          icon="publish"
-          title="确认准备 Meta 投流包？"
-          description="系统会把 Campaign、Ad Set、Ad Creative 和 Ad 所需字段保存为待审核投流包。此步骤不会调用 Facebook Marketing API。"
-          confirmLabel="确认准备"
-          cancelLabel="取消"
-          loading={loading === "meta-ads-prepare"}
-          onConfirm={() => void confirmPrepareMetaAdsPackage()}
-          onCancel={() => setMetaAdsConfirmOpen(false)}
-        />
-        <PreflightRiskDialog
-          action={pendingPreflightAction}
-          loading={loading === "meta-ads-prepare" || loading === "publish"}
-          onConfirm={confirmPreflightAction}
-          onCancel={() => setPendingPreflightAction(null)}
-        />
-        <ActivateAdsDialog
-          open={Boolean(activateConfirmJobId)}
-          value={activateConfirmText}
-          loading={loading === "meta-ads-activate"}
-          onChange={setActivateConfirmText}
-          onConfirm={() => void confirmActivateMetaAds()}
-          onCancel={() => {
-            setActivateConfirmJobId(null);
-            setActivateConfirmText("");
-          }}
-        />
-        <PauseAdsDialog
-          open={Boolean(pauseConfirmJobId)}
-          value={pauseConfirmText}
-          loading={loading === "meta-ads-pause"}
-          onChange={setPauseConfirmText}
-          onConfirm={() => void confirmPauseMetaAds()}
-          onCancel={() => {
-            setPauseConfirmJobId(null);
-            setPauseConfirmText("");
-          }}
         />
       </main>
     </div>
@@ -1464,59 +1594,129 @@ function App() {
 }
 
 function DashboardView({
-  todayWorkOrders,
-  pendingCopy,
-  pendingCreatives,
-  publishJobs,
-  selectedCampaign,
+  jobs,
+  selectedJob,
+  summary,
+  setSelectedJobId,
   setActiveView,
 }: {
-  todayWorkOrders: number;
-  pendingCopy: number;
-  pendingCreatives: number;
-  publishJobs: PublishJob[];
-  selectedCampaign: Campaign | null;
+  jobs: AdGenerationJob[];
+  selectedJob: AdGenerationJob | null;
+  summary: WorkflowSummary;
+  setSelectedJobId: (id: string) => void;
   setActiveView: (view: ViewKey) => void;
 }) {
+  const pending = jobs.filter((item) => ["queued", "processing"].includes(item.status)).length;
+  const inReview = jobs.filter((item) =>
+    ["fields_review", "topic_review", "copy_review", "image_review", "video_review", "final_review"].includes(
+      item.status,
+    ),
+  ).length;
+  const returned = jobs.filter((item) => item.status === "returned").length;
+  const summarySteps = workflowSummarySteps(summary);
+  const currentStep = currentWorkflowStep(summary);
+  const currentStepIndex = summarySteps.findIndex((step) => step.key === currentStep.key);
+  const completedCount = summarySteps.filter((step) => step.done).length;
+  const progressPercent = workflowProgressPercent(summary);
+  const activeJob = selectedJob ?? jobs[0] ?? null;
+  const reviewQueue = jobs
+    .filter((item) =>
+      ["fields_review", "topic_review", "copy_review", "image_review", "video_review", "final_review"].includes(
+        item.status,
+      ),
+    )
+    .slice(0, 5);
+
   return (
-    <section className="view-stack">
+    <section className="view-stack dashboard-view">
+      <section className="dashboard-command-center">
+        <div className="dashboard-command-copy">
+          <span className="section-eyebrow">Current production</span>
+          <h2>{activeJob ? adGenerationJobTitle(activeJob) : "等待创建 AI 工单"}</h2>
+          <p>
+            {activeJob
+              ? `${workflowStepStatusLabel(currentStep.status)}：${currentStep.title} / ${currentStep.label}`
+              : "粘贴投放工单后，系统会进入参数确认、选题、文案、图片、视频和最终预审。"}
+          </p>
+          <div className="dashboard-command-actions">
+            <button
+              className="primary-button"
+              onClick={() => setActiveView(activeJob ? "workflow" : "work-orders")}
+            >
+              <Check size={16} />
+              <span>{activeJob ? "继续生产" : "创建工单"}</span>
+            </button>
+            {activeJob && (
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  setSelectedJobId(activeJob.id);
+                  setActiveView("workflow");
+                }}
+              >
+                <RefreshCw size={16} />
+                <span>查看任务</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="dashboard-stage-card">
+          <div className="stage-meter" style={{ "--progress": `${progressPercent}%` } as React.CSSProperties}>
+            <strong>{progressPercent}%</strong>
+            <span>完成度</span>
+          </div>
+          <div className="stage-meter-copy">
+            <span>生产轨道</span>
+            <strong>{currentStepIndex + 1}. {currentStep.title}</strong>
+            <p>{completedCount} / {summarySteps.length} 个步骤已完成</p>
+          </div>
+        </div>
+      </section>
+
       <div className="metrics-grid">
-        <Metric label="今日工单" value={todayWorkOrders} accent="blue" hint="今日新增" icon={ClipboardList} />
-        <Metric label="待审核文案" value={pendingCopy} accent="amber" hint="需要人工确认" icon={FileText} />
-        <Metric label="待审核图片" value={pendingCreatives} accent="violet" hint="等待素材审核" icon={Image} />
-        <Metric label="最近发布任务" value={publishJobs.length} accent="rose" hint="近期待发布/已发布" icon={Megaphone} />
+        <Metric label="AI 工单" value={jobs.length} accent="blue" hint="全部任务" icon={ClipboardList} />
+        <Metric label="生成中" value={pending} accent="amber" hint="等待参数识别" icon={Clock3} />
+        <Metric label="审核中" value={inReview} accent="violet" hint="人工流程推进" icon={Check} />
+        <Metric label="已回传" value={returned} accent="rose" hint="投放系统可拉取" icon={Send} />
       </div>
 
-      <div className="two-column">
+      <div className="dashboard-grid">
         <section className="panel workflow-panel">
           <div className="panel-header">
-            <h2>当前流程</h2>
-            <span className="panel-note">按顺序推进</span>
+            <h2>当前生产进度</h2>
+            <button className="primary-button" onClick={() => setActiveView("workflow")} disabled={!activeJob}>
+              <Check size={16} />
+              <span>进入 AI 生产</span>
+            </button>
           </div>
-          <div className="flow-actions">
-            <StepButton index={1} label="工单" onClick={() => setActiveView("work-orders")} />
-            <StepButton index={2} label="广告项目" onClick={() => setActiveView("campaign")} disabled={!selectedCampaign} />
-            <StepButton index={3} label="选题" onClick={() => setActiveView("topics")} disabled={!selectedCampaign} />
-            <StepButton index={4} label="文案" onClick={() => setActiveView("copy")} disabled={!selectedCampaign} />
-            <StepButton index={5} label="图片" onClick={() => setActiveView("creatives")} disabled={!selectedCampaign} />
-            <StepButton index={6} label="视频" onClick={() => setActiveView("videos")} disabled={!selectedCampaign} />
-            <StepButton index={7} label="发布" onClick={() => setActiveView("publishing")} disabled={!selectedCampaign} />
-          </div>
+          <WorkflowProgress summary={summary} />
         </section>
 
-        <section className="panel">
+        <section className="panel dashboard-queue-panel">
           <div className="panel-header">
-            <h2>最近发布</h2>
+            <h2>待处理队列</h2>
+            <button className="secondary-button" onClick={() => setActiveView("work-orders")}>
+              <Sparkles size={16} />
+              <span>创建工单</span>
+            </button>
           </div>
-          <DataList emptyText="暂无发布任务">
-            {publishJobs.slice(0, 5).map((job) => (
-              <div className="list-row" key={job.id}>
+          <DataList emptyText="暂无待处理工单">
+            {(reviewQueue.length ? reviewQueue : jobs.slice(0, 5)).map((job) => (
+              <button
+                className="list-row-button dashboard-job-row"
+                key={job.id}
+                onClick={() => {
+                  setSelectedJobId(job.id);
+                  setActiveView("workflow");
+                }}
+              >
                 <div>
-                  <strong>{job.channel}</strong>
-                  <span>{job.external_id || job.id}</span>
+                  <strong>{adGenerationJobTitle(job)}</strong>
+                  <span>{formatDate(job.created_at)} / {job.external_order_id || shortId(job.id)}</span>
                 </div>
                 <StatusPill status={job.status} />
-              </div>
+              </button>
             ))}
           </DataList>
         </section>
@@ -1528,32 +1728,41 @@ function DashboardView({
 function WorkOrdersView({
   rawWorkOrder,
   setRawWorkOrder,
-  workOrders,
-  selectedWorkOrder,
-  setSelectedWorkOrderId,
+  jobs,
+  selectedJob,
+  setSelectedJobId,
   onCreateWorkOrder,
-  onCreateCampaign,
+  onDeleteJob,
+  onOpenWorkflow,
   loading,
+  hasCachedDeliveryExtraction,
 }: {
   rawWorkOrder: string;
   setRawWorkOrder: (value: string) => void;
-  workOrders: WorkOrder[];
-  selectedWorkOrder: WorkOrder | null;
-  setSelectedWorkOrderId: (id: string) => void;
+  jobs: AdGenerationJob[];
+  selectedJob: AdGenerationJob | null;
+  setSelectedJobId: (id: string | null) => void;
   onCreateWorkOrder: () => void;
-  onCreateCampaign: (id: string) => void;
+  onDeleteJob: (jobId: string) => void;
+  onOpenWorkflow: () => void;
   loading: string | null;
+  hasCachedDeliveryExtraction: boolean;
 }) {
-  const createLoading = loading === "extract-work-order" || loading === "create-work-order";
-
+  const createLoading = loading === "extract-work-order" || loading === "create-ad-generation";
+  const createButtonLabel =
+    loading === "extract-work-order"
+      ? "识别中"
+      : hasCachedDeliveryExtraction
+        ? "使用上次识别"
+        : "识别参数";
   return (
-    <section className="three-column">
+    <section className="two-column work-order-layout">
       <section className="panel wide">
         <div className="panel-header">
-          <h2>创建工单</h2>
+          <h2>创建 AI 工单</h2>
           <button className="primary-button" onClick={onCreateWorkOrder} disabled={createLoading}>
             {createLoading ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-            <span>{loading === "extract-work-order" ? "解析中" : "解析并创建"}</span>
+            <span>{createButtonLabel}</span>
           </button>
         </div>
         <textarea
@@ -1561,126 +1770,384 @@ function WorkOrdersView({
           value={rawWorkOrder}
           onChange={(event) => setRawWorkOrder(event.target.value)}
         />
+        {hasCachedDeliveryExtraction && (
+          <div className="work-order-cache-note">这段工单的识别结果已缓存，确认前不会创建 AI 工单。</div>
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-header">
-          <h2>工单列表</h2>
-        </div>
-        <DataList emptyText="暂无工单">
-          {workOrders.map((order) => (
-            <button
-              className={`list-button ${selectedWorkOrder?.id === order.id ? "active" : ""}`}
-              key={order.id}
-              onClick={() => setSelectedWorkOrderId(order.id)}
-            >
-              <strong>{order.project_name || "未命名工单"}</strong>
-              <span>{formatDate(order.created_at)}</span>
-            </button>
-          ))}
-        </DataList>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <h2>解析字段</h2>
-          {selectedWorkOrder && (
-            <button
-              className="secondary-button"
-              onClick={() => onCreateCampaign(selectedWorkOrder.id)}
-              disabled={loading === "create-campaign"}
-            >
-              <Layers3 size={16} />
-              <span>创建项目</span>
+          <h2>AI 工单列表</h2>
+          {selectedJob && (
+            <button className="secondary-button" onClick={onOpenWorkflow}>
+              <Check size={16} />
+              <span>进入生产</span>
             </button>
           )}
         </div>
-        {selectedWorkOrder ? <KeyValueTable data={workOrderFields(selectedWorkOrder)} /> : <EmptyState text="暂无工单" />}
+        <DataList emptyText="暂无 AI 工单">
+          {jobs.map((job) => (
+            <div className={`job-list-row ${selectedJob?.id === job.id ? "active" : ""}`} key={job.id}>
+              <button className="list-button job-select-button" onClick={() => setSelectedJobId(job.id)}>
+                <strong>{adGenerationJobTitle(job)}</strong>
+                <span>{job.external_order_id || shortId(job.id)}</span>
+                <StatusPill status={job.status} />
+              </button>
+              <button
+                className="icon-button danger job-delete-button"
+                onClick={() => onDeleteJob(job.id)}
+                title="删除 AI 工单及关联素材"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </DataList>
       </section>
     </section>
   );
 }
 
-function CampaignView({
+function WorkflowView({
+  jobs,
+  selectedJob,
+  setSelectedJobId,
   campaign,
-  workOrder,
-  snapshot,
-  snapshots,
-  onAnalyze,
+  summary,
+  topics,
+  drafts,
+  creatives,
+  videos,
+  finalPayloadDraft,
+  setFinalPayloadDraft,
+  finalReviewNotes,
+  setFinalReviewNotes,
+  onRefresh,
   onGenerateTopics,
+  onGenerateCopy,
+  onGenerateCreatives,
+  onGoToView,
+  onPrepareFinal,
+  onSaveFinal,
+  onConfirmReturn,
   loading,
+  operationElapsedSeconds,
 }: {
+  jobs: AdGenerationJob[];
+  selectedJob: AdGenerationJob | null;
+  setSelectedJobId: (id: string) => void;
   campaign: Campaign | null;
-  workOrder: WorkOrder | null;
-  snapshot: LandingPageSnapshot | null;
-  snapshots: LandingPageSnapshot[];
-  onAnalyze: () => void;
-  onGenerateTopics: (signals?: Record<string, unknown>) => void;
+  summary: WorkflowSummary;
+  topics: Topic[];
+  drafts: CopyDraft[];
+  creatives: CreativeAsset[];
+  videos: VideoAsset[];
+  finalPayloadDraft: string;
+  setFinalPayloadDraft: (value: string) => void;
+  finalReviewNotes: string;
+  setFinalReviewNotes: (value: string) => void;
+  onRefresh: () => void;
+  onGenerateTopics: () => void;
+  onGenerateCopy: () => void;
+  onGenerateCreatives: () => void;
+  onGoToView: (view: ViewKey) => void;
+  onPrepareFinal: () => Record<string, unknown> | null;
+  onSaveFinal: () => void;
+  onConfirmReturn: () => void;
   loading: string | null;
+  operationElapsedSeconds: number;
 }) {
-  if (!campaign) return <EmptyState text="暂无广告项目" />;
+  const result = selectedJob?.result_payload ?? {};
+  const review = isRecord(result.review) ? result.review : {};
+  const warnings = Array.isArray(review.warnings) ? review.warnings.map(String) : [];
+  const missingFields = Array.isArray(review.missing_fields) ? review.missing_fields.map(String) : [];
+  const hasRisks = warnings.length > 0 || missingFields.length > 0;
+  const approvedImageCount = creatives.filter((item) => item.status === "approved").length;
+  const approvedVideoCount = videos.filter((item) => item.status === "approved").length;
+  const productionOverview = [
+    { label: "选题", value: summary.topic.label, status: workflowStepStatusLabel(summary.topic.status) },
+    { label: "文案", value: summary.copy.label, status: workflowStepStatusLabel(summary.copy.status) },
+    { label: "图片", value: approvedImageCount ? `${approvedImageCount} 张已通过` : "未通过图片", status: workflowStepStatusLabel(summary.image.status) },
+    { label: "视频", value: approvedVideoCount ? `${approvedVideoCount} 个已通过` : "未通过视频", status: workflowStepStatusLabel(summary.video.status) },
+  ];
+
+  const steps = [
+    {
+      key: "fields",
+      label: "参数确认",
+      detail: summary.fields.done ? "投放参数已确认" : "等待 LLM 识别工单参数",
+      status: summary.fields.status,
+      action: "刷新",
+      loadingKey: "ad-generation-refresh",
+      onAction: onRefresh,
+      disabled: !selectedJob,
+    },
+    {
+      key: "topic",
+      label: "人工选题",
+      detail: summary.topic.done ? "已选择选题" : topics.length ? "请选择选题" : "根据投放链接生成选题",
+      status: summary.topic.status,
+      action: topics.length ? "进入选题" : "生成选题",
+      loadingKey: topics.length ? null : "topics",
+      onAction: topics.length ? () => onGoToView("topics") : onGenerateTopics,
+      disabled: !summary.fields.done,
+    },
+    {
+      key: "copy",
+      label: "审核文案",
+      detail: summary.copy.done ? "文案已通过" : drafts.length ? "请审核文案" : "根据选题生成文案",
+      status: summary.copy.status,
+      action: drafts.length ? "进入文案" : "生成文案",
+      loadingKey: drafts.length ? null : "copy",
+      onAction: drafts.length ? () => onGoToView("copy") : onGenerateCopy,
+      disabled: !summary.topic.done,
+    },
+    {
+      key: "image",
+      label: "审核图片",
+      detail: summary.image.done ? "图片已通过" : creatives.length ? "请审核图片" : "根据文案生成图片",
+      status: summary.image.status,
+      action: creatives.length ? "进入图片" : "生成图片",
+      loadingKey: creatives.length ? null : "creatives",
+      onAction: creatives.length ? () => onGoToView("creatives") : onGenerateCreatives,
+      disabled: !summary.copy.done,
+    },
+    {
+      key: "video",
+      label: "审核视频",
+      detail: summary.video.done ? "视频已通过" : videos.length ? "请审核视频" : "根据图片创建视频",
+      status: summary.video.status,
+      action: "进入视频",
+      loadingKey: null,
+      onAction: () => onGoToView("videos"),
+      disabled: !summary.image.done,
+    },
+    {
+      key: "final",
+      label: "最终预审",
+      detail: summary.final.done ? "可回传投放系统" : "完成前面步骤后生成最终包",
+      status: summary.final.status,
+      action: "生成预审包",
+      loadingKey: null,
+      onAction: onPrepareFinal,
+      disabled: !summary.final.done,
+    },
+  ];
+  const activeStepIndex = steps.findIndex((step) => step.status === "active");
+  const currentStepIndex = activeStepIndex >= 0 ? activeStepIndex : steps.findIndex((step) => step.key === "final");
+  const currentStep = steps[currentStepIndex] ?? steps[0];
+  const currentStepLoading = Boolean(loading) && currentStep.loadingKey === loading;
+  const activeOperation = operationProgressText(loading, operationElapsedSeconds);
+  const progressPercent = workflowProgressPercent(summary);
+  const completedCount = workflowSummarySteps(summary).filter((step) => step.done).length;
 
   return (
-    <section className="view-stack">
-      <div className="two-column">
-        <section className="panel">
-          <div className="panel-header">
-            <h2>广告项目</h2>
-          </div>
-          <KeyValueTable
-            data={{
-              项目名称: campaign.name,
-              投放事件: campaign.objective,
-              产品名称: campaign.product_name,
-              投放人群: campaign.audience_description,
-              状态: campaign.status,
-            }}
-          />
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <h2>工单信息</h2>
-          </div>
-          {workOrder ? (
-            <KeyValueTable data={workOrderFields(workOrder)} />
-          ) : (
-            <JsonBlock value={campaign.metadata_json.work_order} />
-          )}
-        </section>
-      </div>
-
-      <section className="panel">
+    <section className="review-layout workflow-command-layout">
+      <section className="panel review-task-panel">
         <div className="panel-header">
-          <h2>落地页分析</h2>
-          <div className="button-row">
-            <button className="secondary-button" onClick={onAnalyze} disabled={loading === "landing"}>
-              {loading === "landing" ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
-              <span>分析落地页</span>
-            </button>
-            <button className="primary-button" onClick={() => onGenerateTopics()} disabled={loading === "topics"}>
-              {loading === "topics" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>生成选题</span>
-            </button>
-          </div>
+          <h2>任务</h2>
+          <button className="icon-button" onClick={onRefresh} title="刷新">
+            {loading === "ad-generation-refresh" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
+          </button>
         </div>
-        {snapshot ? (
-          <div className="snapshot-layout">
-            <KeyValueTable
-              data={{
-                URL: snapshot.url,
-                状态: snapshot.status,
-                HTTP: snapshot.http_status,
-                标题: snapshot.title,
-                描述: snapshot.description,
-              }}
-            />
-            <div className="excerpt">{snapshot.text_content?.slice(0, 900)}</div>
+        <DataList emptyText="暂无任务">
+          {jobs.map((job) => (
+            <button
+              className={`list-button ${selectedJob?.id === job.id ? "active" : ""}`}
+              key={job.id}
+              onClick={() => setSelectedJobId(job.id)}
+            >
+              <strong>{adGenerationJobTitle(job)}</strong>
+              <span>{job.external_order_id || shortId(job.id)}</span>
+              <StatusPill status={job.status} />
+            </button>
+          ))}
+        </DataList>
+      </section>
+
+      <section className="panel review-editor-panel">
+        <div className="panel-header">
+          <h2>AI 生产流程</h2>
+          {selectedJob && <StatusPill status={selectedJob.status} />}
+        </div>
+        {selectedJob ? (
+          <>
+            <div className="workflow-brief">
+              <div>
+                <span className="section-eyebrow">Production brief</span>
+                <h3>{adGenerationJobTitle(selectedJob)}</h3>
+                <p>{campaign?.name || selectedJob.external_order_id || shortId(selectedJob.id)}</p>
+              </div>
+              <div className="workflow-brief-stat">
+                <strong>{progressPercent}%</strong>
+                <span>{completedCount} 个步骤完成</span>
+              </div>
+            </div>
+
+            <div className={`current-production-card ${currentStep.status}`}>
+              <div className="current-production-index">{currentStepIndex + 1}</div>
+              <div className="current-production-body">
+                <span>当前步骤</span>
+                <strong>{currentStep.label}</strong>
+                <p>{currentStep.detail}</p>
+                {activeOperation && (
+                  <div className="operation-progress">
+                    <Loader2 size={14} className="spin" />
+                    <span>{activeOperation.title}</span>
+                    <em>
+                      {activeOperation.estimate} / 已等待 {formatDuration(operationElapsedSeconds)}
+                    </em>
+                  </div>
+                )}
+              </div>
+              <button
+                className="primary-button"
+                onClick={currentStep.onAction}
+                disabled={currentStep.disabled || Boolean(loading)}
+              >
+                {currentStepLoading ? (
+                  <Loader2 size={16} className="spin" />
+                ) : currentStep.key === "fields" ? (
+                  <RefreshCw size={16} />
+                ) : (
+                  <Sparkles size={16} />
+                )}
+                <span>{currentStep.action}</span>
+              </button>
+            </div>
+
+            <div className="workflow-signal-grid">
+              <div>
+                <span>选题</span>
+                <strong>{summary.topic.label}</strong>
+              </div>
+              <div>
+                <span>已审素材</span>
+                <strong>{approvedImageCount} 图 / {approvedVideoCount} 视频</strong>
+              </div>
+              <div className={hasRisks ? "warning" : "ready"}>
+                <span>预审状态</span>
+                <strong>{hasRisks ? "需要核对" : "暂无风险"}</strong>
+              </div>
+            </div>
+
+            {hasRisks && (
+              <div className="review-warning-box">
+                <strong>风险提示</strong>
+                <ul>
+                  {missingFields.map((item) => (
+                    <li key={`missing-${item}`}>缺失字段：{item}</li>
+                  ))}
+                  {warnings.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="workflow-steps">
+              {steps.map((step, index) => (
+                <div className={`workflow-step ${step.status}`} key={step.key}>
+                  <div className="workflow-step-index">{index + 1}</div>
+                  <div className="workflow-step-body">
+                    <div className="workflow-step-title">
+                      <strong>{step.label}</strong>
+                      <span>{workflowStepStatusLabel(step.status)}</span>
+                    </div>
+                    <p>{step.detail}</p>
+                  </div>
+                  <button
+                    className="secondary-button"
+                    onClick={step.onAction}
+                    disabled={step.disabled || Boolean(loading)}
+                  >
+                    {loading && loading === step.loadingKey ? (
+                      <Loader2 size={16} className="spin" />
+                    ) : (
+                      <Sparkles size={16} />
+                    )}
+                    <span>{step.action}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <details className="final-package-panel" open={summary.final.done || Boolean(finalPayloadDraft.trim())}>
+              <summary>
+                <span>最终预审包</span>
+                <em>{finalPayloadDraft.trim() ? "已生成" : "待生成"}</em>
+              </summary>
+              <label className="editor-label" htmlFor="final-payload">
+                JSON
+              </label>
+              <textarea
+                id="final-payload"
+                className="json-editor"
+                value={finalPayloadDraft}
+                onChange={(event) => setFinalPayloadDraft(event.target.value)}
+                spellCheck={false}
+              />
+              <label className="editor-label" htmlFor="final-notes">
+                预审备注
+              </label>
+              <textarea
+                id="final-notes"
+                className="review-notes-input"
+                value={finalReviewNotes}
+                onChange={(event) => setFinalReviewNotes(event.target.value)}
+                placeholder="记录人工审核意见、素材选择和需要投放系统注意的事项"
+              />
+              <div className="button-row">
+                <button className="secondary-button" onClick={onPrepareFinal} disabled={!summary.final.done}>
+                  <Sparkles size={16} />
+                  <span>生成预审包</span>
+                </button>
+                <button className="secondary-button" onClick={onSaveFinal} disabled={!finalPayloadDraft.trim()}>
+                  <Check size={16} />
+                  <span>保存预审包</span>
+                </button>
+                <button className="primary-button" onClick={onConfirmReturn} disabled={!summary.final.done}>
+                  <Send size={16} />
+                  <span>确认并回传</span>
+                </button>
+              </div>
+            </details>
+          </>
+        ) : (
+          <EmptyState text="请选择或创建一个 AI 工单" />
+        )}
+      </section>
+
+      <section className="panel review-preview-panel">
+        <div className="panel-header">
+          <h2>任务上下文</h2>
+        </div>
+        {selectedJob ? (
+          <div className="review-preview-stack">
+            <section className="context-section">
+              <h3>投放参数</h3>
+              <KeyValueTable data={adGenerationJobFields(selectedJob, campaign)} />
+            </section>
+            <section className="context-section">
+              <h3>生产结果</h3>
+              <div className="production-overview-list">
+                {productionOverview.map((item) => (
+                  <div className="production-overview-row" key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                    <em>{item.status}</em>
+                  </div>
+                ))}
+              </div>
+            </section>
+            <details className="raw-work-order-details">
+              <summary>工单原文</summary>
+              <pre className="raw-work-order-preview">{adGenerationRawContent(selectedJob.request_payload)}</pre>
+            </details>
           </div>
         ) : (
-          <EmptyState text="暂无落地页快照" />
+          <EmptyState text="暂无预览" />
         )}
-        {snapshots.length > 1 && <div className="muted-line">历史快照：{snapshots.length} 条</div>}
       </section>
     </section>
   );
@@ -1688,389 +2155,215 @@ function CampaignView({
 
 function TopicsView({
   topics,
+  topicGenerationSlots,
   selectedTopic,
+  setSelectedTopicId,
+  topicFeedback,
+  setTopicFeedback,
   onGenerate,
+  onRetryTopicSlot,
   onSelect,
-  onGenerateCopy,
   loading,
 }: {
   topics: Topic[];
+  topicGenerationSlots: TopicGenerationSlot[];
   selectedTopic: Topic | null;
-  onGenerate: (signals?: Record<string, unknown>) => void;
-  onSelect: (id: string) => void;
-  onGenerateCopy: () => void;
+  setSelectedTopicId: (id: string) => void;
+  topicFeedback: string;
+  setTopicFeedback: (value: string) => void;
+  onGenerate: (feedback?: string) => void;
+  onRetryTopicSlot: (index: number) => void;
+  onSelect: (topicId: string) => void;
   loading: string | null;
 }) {
-  const [directionText, setDirectionText] = useState("");
-  const [selectedDirections, setSelectedDirections] = useState<string[]>([]);
-  const currentBatch = topics.slice(0, Math.min(3, topics.length));
-  const confirmedSelectedTopic =
-    topics.find((topic) => topic.status === "selected") ??
-    (selectedTopic?.status === "selected" ? selectedTopic : null);
-  const mainTopic = confirmedSelectedTopic ?? selectedTopic ?? currentBatch[0] ?? null;
-  const isMainTopicSelected = Boolean(confirmedSelectedTopic && mainTopic?.id === confirmedSelectedTopic.id);
-  const alternativeTopics = currentBatch.filter((topic) => topic.id !== mainTopic?.id);
-  const historyTopics = topics.filter(
-    (topic) => !currentBatch.some((item) => item.id === topic.id) && topic.id !== mainTopic?.id,
-  );
-  const directionOptions = [
-    { label: "更本地化", value: "localization" },
-    { label: "突出价格", value: "price_value" },
-    { label: "降低风险", value: "lower_policy_risk" },
-    { label: "换痛点", value: "new_pain_point" },
-    { label: "更强转化", value: "conversion_focus" },
-  ];
-
-  function toggleDirection(value: string) {
-    setSelectedDirections((current) =>
-      current.includes(value) ? current.filter((item) => item !== value) : [...current, value],
-    );
-  }
-
-  function handleRegenerateTopics() {
-    onGenerate({
-      operator_direction: {
-        presets: selectedDirections,
-        notes: directionText.trim(),
-      },
-      requested_output: {
-        topic_count: 3,
-        include_recommendation_reason: true,
-        include_policy_risk: true,
-        include_image_direction: true,
-      },
-    });
-  }
+  const activeTopic = selectedTopic ?? topics[0] ?? null;
+  const visibleSlots =
+    topicGenerationSlots.length > 0
+      ? topicGenerationSlots
+      : topics.map((topic, index) => ({
+          index: index + 1,
+          status: "done" as const,
+          topic,
+        }));
+  const activeIndex = activeTopic
+    ? visibleSlots.findIndex((slot) => slot.topic?.id === activeTopic.id)
+    : -1;
+  const generatedSlotCount = visibleSlots.filter((slot) => slot.status === "done").length;
+  const hasGeneratingSlots = topicGenerationSlots.some((slot) => slot.status === "loading");
+  const isGeneratingTopics = loading === "topics" || hasGeneratingSlots;
+  const canRegenerateWithFeedback = topicFeedback.trim().length > 0 && !isGeneratingTopics;
+  const panelNote = visibleSlots.length
+    ? isGeneratingTopics
+      ? `${generatedSlotCount}/${visibleSlots.length} 个方向已生成`
+      : `${generatedSlotCount} 个方向待选择`
+    : "还没有生成选题";
 
   return (
-    <section className="view-stack topic-workbench">
-      <section className="topic-main-grid">
-        <section className="panel topic-decision-panel">
-          <div className="panel-header">
-            <div>
-              <h2>{confirmedSelectedTopic ? "当前已选题" : "AI 推荐选题"}</h2>
-              <span className="panel-note">
-                {mainTopic
-                  ? `${topicRecommendationLabel(mainTopic, topics.indexOf(mainTopic), isMainTopicSelected)} · ${statusLabel(topicEffectiveStatus(mainTopic, isMainTopicSelected))}`
-                  : "等待生成"}
-              </span>
-            </div>
-            <button className="primary-button" onClick={() => onGenerate()} disabled={loading === "topics"}>
-              {loading === "topics" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>生成 1-3 个</span>
-            </button>
+    <section className="topic-review-layout">
+      <section className="panel topic-list-panel">
+        <div className="panel-header">
+          <div>
+            <h2>候选选题</h2>
+            <span className="panel-note">{panelNote}</span>
           </div>
-
-          {mainTopic ? (
-            <TopicDecisionCard
-              topic={mainTopic}
-              isSelected={isMainTopicSelected}
-              index={Math.max(0, topics.indexOf(mainTopic))}
-              onSelect={onSelect}
-              onGenerateCopy={onGenerateCopy}
-              loading={loading}
-              featured
-            />
-          ) : (
-            <EmptyState text="暂无选题，请先生成 1-3 个广告选题" />
+          {!topics.length && !topicGenerationSlots.length && (
+            <button className="primary-button" onClick={() => onGenerate()} disabled={isGeneratingTopics}>
+              {isGeneratingTopics ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+              <span>生成选题</span>
+            </button>
           )}
-        </section>
-
-        <section className="topic-side-stack">
-          <section className="panel">
-            <div className="panel-header">
+        </div>
+        {topics.length > 0 && !hasGeneratingSlots && (
+          <section className="topic-feedback-panel topic-batch-regenerate">
+            <div className="topic-feedback-head">
               <div>
-                <h2>重新生成方向</h2>
-                <span className="panel-note">让下一批选题更贴近运营判断</span>
+                <strong>整体调整选题方向</strong>
+                <span>这里会重新生成 3 个候选方向，并参考当前这组选题避开不满意的表达。</span>
               </div>
             </div>
-            <div className="topic-regenerate-box">
-              <div className="copy-feedback-tags">
-                {directionOptions.map((option) => (
-                  <button
-                    className={`copy-feedback-tag ${selectedDirections.includes(option.value) ? "active" : ""}`}
-                    key={option.value}
-                    type="button"
-                    onClick={() => toggleDirection(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <textarea
-                className="feedback-input topic-direction-input"
-                value={directionText}
-                onChange={(event) => setDirectionText(event.target.value)}
-                placeholder="例如：更适合印度男性 25-45 岁，少用夸张承诺，突出免费看球和频道丰富。"
-              />
+            <textarea
+              className="topic-feedback-input"
+              value={topicFeedback}
+              onChange={(event) => setTopicFeedback(event.target.value)}
+              disabled={isGeneratingTopics}
+              placeholder="例如：减少价格卖点，突出印度家庭客厅观影和上门安装，不要体育赛事素材。"
+            />
+            <div className="topic-feedback-actions">
               <button
                 className="secondary-button"
-                onClick={handleRegenerateTopics}
-                disabled={loading === "topics"}
+                onClick={() => onGenerate(topicFeedback)}
+                disabled={!canRegenerateWithFeedback}
               >
-                {loading === "topics" ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
-                <span>按方向重新生成</span>
+                {isGeneratingTopics ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+                <span>重新生成 3 个候选</span>
               </button>
             </div>
           </section>
+        )}
+        {visibleSlots.length ? (
+          <div className="topic-option-list">
+            {visibleSlots.map((slot) => {
+              if (slot.status === "done" && slot.topic) {
+                const topic = slot.topic;
+                return (
+                  <button
+                    className={`topic-option ${activeTopic?.id === topic.id ? "active" : ""}`}
+                    key={topic.id}
+                    onClick={() => setSelectedTopicId(topic.id)}
+                  >
+                    <span className="topic-option-index">{slot.index}</span>
+                    <span className="topic-option-main">
+                      <strong>{topic.title}</strong>
+                      <em>{topic.angle}</em>
+                    </span>
+                    <StatusPill status={topic.status} />
+                  </button>
+                );
+              }
 
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <h2>备选选题</h2>
-                <span className="panel-note">{alternativeTopics.length ? `${alternativeTopics.length} 个备选` : "暂无备选"}</span>
-              </div>
-            </div>
-            <DataList emptyText="暂无备选选题">
-              {alternativeTopics.map((topic) => (
-                <TopicCompactCard
-                  topic={topic}
-                  key={topic.id}
-                  isSelected={confirmedSelectedTopic?.id === topic.id}
-                  confirmedSelectedTopicId={confirmedSelectedTopic?.id ?? null}
-                  index={Math.max(0, topics.indexOf(topic))}
-                  onSelect={onSelect}
-                />
-              ))}
-            </DataList>
-          </section>
-        </section>
+              if (slot.status === "error") {
+                const isRetrying = loading === `topic-retry-${slot.index}`;
+                return (
+                  <div className="topic-option error" key={`topic-slot-${slot.index}`}>
+                    <span className="topic-option-index">{slot.index}</span>
+                    <span className="topic-option-main">
+                      <strong>候选 {slot.index} 生成失败</strong>
+                      <em>{slot.message || "模型没有返回此候选。"}</em>
+                    </span>
+                    <button
+                      className="secondary-button topic-slot-retry"
+                      onClick={() => onRetryTopicSlot(slot.index)}
+                      disabled={Boolean(loading)}
+                    >
+                      {isRetrying ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                      <span>重试</span>
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="topic-option loading" key={`topic-slot-${slot.index}`} aria-live="polite">
+                  <span className="topic-option-index">{slot.index}</span>
+                  <span className="topic-option-main">
+                    <strong>候选 {slot.index} 生成中</strong>
+                    <em>完成后会自动显示在这里，可先采用已出现的选题。</em>
+                  </span>
+                  <span className="topic-slot-state">
+                    <Loader2 size={14} className="spin" />
+                    生成中
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState text="暂无选题，请先生成" />
+        )}
       </section>
 
-      <details className="topic-history-details">
-        <summary>
-          <span>历史批次</span>
-          <small>{historyTopics.length ? `${historyTopics.length} 个历史选题` : "暂无历史"}</small>
-        </summary>
-        <DataList emptyText="暂无历史选题">
-          {historyTopics.map((topic) => (
-            <TopicCompactCard
-              topic={topic}
-              key={topic.id}
-              isSelected={confirmedSelectedTopic?.id === topic.id}
-              confirmedSelectedTopicId={confirmedSelectedTopic?.id ?? null}
-              index={Math.max(0, topics.indexOf(topic))}
-              onSelect={onSelect}
-            />
-          ))}
-        </DataList>
-      </details>
+      <section className="panel topic-detail-panel">
+        <div className="panel-header">
+          <div>
+            <h2>选题详情</h2>
+            <span className="panel-note">
+              {activeIndex >= 0 ? `候选方向 ${activeIndex + 1}` : "等待选择一个方向"}
+            </span>
+          </div>
+          {activeTopic && <StatusPill status={activeTopic.status} />}
+        </div>
+        {activeTopic ? (
+          <article className="topic-detail-card">
+            <div className="topic-detail-hero">
+              <span className="topic-kicker">Topic Direction</span>
+              <h3>{activeTopic.title}</h3>
+              <p>{activeTopic.angle}</p>
+            </div>
 
-      {confirmedSelectedTopic && (
-        <NextStep
-          title="下一步：生成文案"
-          actionLabel="生成文案"
-          onAction={onGenerateCopy}
-          loading={loading === "copy"}
-        />
-      )}
+            <div className="topic-insight-grid">
+              <section>
+                <span>目标人群</span>
+                <strong>{activeTopic.audience || "未单独标注"}</strong>
+              </section>
+              <section>
+                <span>评分</span>
+                <strong>{activeTopic.score == null ? "未评分" : `${Math.round(activeTopic.score * 100)}%`}</strong>
+              </section>
+            </div>
+
+            <section className="topic-selling-section">
+              <h4>核心卖点</h4>
+              <div className="topic-selling-list">
+                {activeTopic.selling_points.length ? (
+                  activeTopic.selling_points.map((item) => (
+                    <span key={item}>{item}</span>
+                  ))
+                ) : (
+                  <em>暂无卖点摘要</em>
+                )}
+              </div>
+            </section>
+
+            {activeTopic.rationale && (
+              <section className="topic-rationale">
+                <h4>推荐理由</h4>
+                <p>{activeTopic.rationale}</p>
+              </section>
+            )}
+
+            <div className="topic-detail-actions">
+              <button className="primary-button" onClick={() => onSelect(activeTopic.id)}>
+                <Check size={16} />
+                <span>{activeTopic.status === "selected" ? "已采用此选题" : "采用此选题"}</span>
+              </button>
+            </div>
+          </article>
+        ) : (
+          <EmptyState text="请选择或生成一个选题" />
+        )}
+      </section>
     </section>
   );
-}
-
-function TopicDecisionCard({
-  topic,
-  isSelected,
-  index,
-  onSelect,
-  onGenerateCopy,
-  loading,
-  featured = false,
-}: {
-  topic: Topic;
-  isSelected: boolean;
-  index: number;
-  onSelect: (id: string) => void;
-  onGenerateCopy: () => void;
-  loading: string | null;
-  featured?: boolean;
-}) {
-  const risk = topicRiskLevel(topic);
-  const match = topicLandingMatch(topic);
-  const effectiveStatus = topicEffectiveStatus(topic, isSelected);
-  return (
-    <article className={`topic-decision-card ${featured ? "featured" : ""} ${isSelected ? "active" : ""}`}>
-      <div className="item-head">
-        <div>
-          <span className="topic-kicker">{topicRecommendationLabel(topic, index, isSelected)}</span>
-          <h3>{topic.title}</h3>
-        </div>
-        <StatusPill status={effectiveStatus} />
-      </div>
-      <p className="topic-angle">{topic.angle}</p>
-
-      <div className="topic-metric-grid">
-        <TopicMetric label="目标人群" value={topic.audience || "按工单人群"} />
-        <TopicMetric label="推荐度" value={topicScoreLabel(topic.score)} tone={topic.score && topic.score >= 0.8 ? "ready" : "warning"} />
-        <TopicMetric label="风险等级" value={risk.label} tone={risk.tone} />
-        <TopicMetric label="落地页匹配" value={match.label} tone={match.tone} />
-      </div>
-
-      <div className="tag-row">
-        {topic.selling_points.slice(0, 5).map((point) => (
-          <span className="tag" key={point}>
-            {point}
-          </span>
-        ))}
-      </div>
-
-      <div className="topic-detail-grid">
-        <div>
-          <span>推荐理由</span>
-          <p>{topic.rationale || "结合工单、落地页和目标人群生成，可作为当前广告切入角度。"}</p>
-        </div>
-        <div>
-          <span>风险提示</span>
-          <p>{topic.risk_notes || "暂无明显风险，发布前仍建议检查夸张承诺和平台政策。"}</p>
-        </div>
-        <div>
-          <span>图片方向</span>
-          <p>{topicImageDirection(topic)}</p>
-        </div>
-        <div>
-          <span>文案预览方向</span>
-          <p>{topicCopyDirection(topic)}</p>
-        </div>
-      </div>
-
-      <div className="button-row topic-card-actions">
-        {!isSelected ? (
-          <button className="primary-button" onClick={() => onSelect(topic.id)}>
-            <Check size={16} />
-            <span>选择这个选题</span>
-          </button>
-        ) : (
-          <div className="review-complete topic-selected-note">
-            <Check size={16} />
-            <span>已作为当前选题</span>
-          </div>
-        )}
-        <button className="secondary-button" onClick={onGenerateCopy} disabled={!isSelected || loading === "copy"}>
-          {loading === "copy" ? <Loader2 size={16} className="spin" /> : <FileText size={16} />}
-          <span>生成文案</span>
-        </button>
-      </div>
-    </article>
-  );
-}
-
-function TopicCompactCard({
-  topic,
-  isSelected,
-  confirmedSelectedTopicId,
-  index,
-  onSelect,
-}: {
-  topic: Topic;
-  isSelected: boolean;
-  confirmedSelectedTopicId: string | null;
-  index: number;
-  onSelect: (id: string) => void;
-}) {
-  const risk = topicRiskLevel(topic);
-  const effectiveStatus = topicEffectiveStatus(topic, isSelected);
-  return (
-    <article className={`topic-item topic-compact-card ${isSelected ? "active" : ""}`}>
-      <div className="item-head">
-        <div>
-          <span className="topic-kicker">{topicRecommendationLabel(topic, index, isSelected)}</span>
-          <h3>{topic.title}</h3>
-        </div>
-        <StatusPill status={effectiveStatus} />
-      </div>
-      <p>{topic.angle}</p>
-      <div className="topic-compact-meta">
-        <span>{topic.audience || "按工单人群"}</span>
-        <span>{topicScoreLabel(topic.score)}</span>
-        <span className={`topic-risk-${risk.tone}`}>{risk.label}</span>
-      </div>
-      <div className="tag-row">
-        {topic.selling_points.slice(0, 3).map((point) => (
-          <span className="tag" key={point}>
-            {point}
-          </span>
-        ))}
-      </div>
-      <div className="button-row">
-        <button className="secondary-button" onClick={() => onSelect(topic.id)} disabled={isSelected}>
-          <Check size={16} />
-          <span>{isSelected ? "已选择" : "选择"}</span>
-        </button>
-        {!isSelected && topic.status === "selected" && confirmedSelectedTopicId && (
-          <span className="topic-stale-note">旧选择记录，重新选择会自动修正</span>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function TopicMetric({
-  label,
-  value,
-  tone = "ready",
-}: {
-  label: string;
-  value: string;
-  tone?: PreflightStatus;
-}) {
-  return (
-    <div className={`topic-metric topic-metric-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function topicRecommendationLabel(topic: Topic, index: number, isSelected = false): string {
-  if (isSelected) return "当前选题";
-  if ((topic.score ?? 0) >= 0.85 || index === 0) return "AI 推荐";
-  if (index === 1) return "备选角度";
-  return "差异化角度";
-}
-
-function topicEffectiveStatus(topic: Topic, isSelected: boolean): string {
-  if (isSelected) return "selected";
-  return topic.status === "selected" ? "proposed" : topic.status;
-}
-
-function topicScoreLabel(score: number | null): string {
-  if (score == null) return "待判断";
-  if (score >= 0.85) return "高";
-  if (score >= 0.68) return "中";
-  return "低";
-}
-
-function topicRiskLevel(topic: Topic): { label: string; tone: PreflightStatus } {
-  const text = `${topic.risk_notes || ""} ${topic.angle || ""}`.toLowerCase();
-  if (/(guarantee|unsupported|敏感|违规|封号|绝对|100%|治愈|保证|暴富)/i.test(text)) {
-    return { label: "较高", tone: "error" };
-  }
-  if (/(validate|avoid|claim|risk|注意|审核|承诺|免费|夸张)/i.test(text)) {
-    return { label: "中", tone: "warning" };
-  }
-  return { label: "低", tone: "ready" };
-}
-
-function topicLandingMatch(topic: Topic): { label: string; tone: PreflightStatus } {
-  const signals = topic.source_data?.signals;
-  if (!isRecord(signals)) return { label: "待确认", tone: "warning" };
-  const hasLandingPage = isRecord(signals.landing_page);
-  const hasWorkOrder = isRecord(signals.work_order);
-  if (hasLandingPage && hasWorkOrder) return { label: "高", tone: "ready" };
-  if (hasLandingPage || hasWorkOrder) return { label: "中", tone: "warning" };
-  return { label: "低", tone: "error" };
-}
-
-function topicImageDirection(topic: Topic): string {
-  const points = topic.selling_points.slice(0, 2).join("、");
-  if (points) return `围绕「${points}」做主视觉，画面文字短、对比强，适合信息流快速扫读。`;
-  return `围绕「${topic.title}」做主视觉，突出核心利益点和清晰行动引导。`;
-}
-
-function topicCopyDirection(topic: Topic): string {
-  const audience = topic.audience || "目标人群";
-  const point = topic.selling_points[0] || topic.angle;
-  return `先抓住${audience}的痛点，再突出「${point}」，结尾给出明确点击理由。`;
 }
 
 function CopyView({
@@ -2078,503 +2371,643 @@ function CopyView({
   selectedDraft,
   setSelectedDraftId,
   selectedTopic,
-  selectedCampaign,
+  campaign,
   creatives,
   feedback,
   setFeedback,
   onGenerateCopy,
   onReviseCopy,
   onReview,
-  onGenerateCreatives,
+  onOpenCreatives,
   loading,
 }: {
   drafts: CopyDraft[];
   selectedDraft: CopyDraft | null;
   setSelectedDraftId: (id: string) => void;
   selectedTopic: Topic | null;
-  selectedCampaign: Campaign | null;
+  campaign: Campaign | null;
   creatives: CreativeAsset[];
   feedback: string;
   setFeedback: (value: string) => void;
   onGenerateCopy: () => void;
   onReviseCopy: () => void;
-  onReview: (entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") => void;
-  onGenerateCreatives: () => void;
+  onReview: (
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
+  onOpenCreatives: () => void;
   loading: string | null;
 }) {
-  const landingUrl = landingUrlFromCampaign(selectedCampaign);
-  const previewImage =
-    (selectedDraft
-      ? creatives.find((asset) => asset.draft_id === selectedDraft.id && asset.url)
-      : null) ??
-    creatives.find((asset) => asset.url) ??
+  const [selectedPreviewCreativeId, setSelectedPreviewCreativeId] = useState<string | null>(null);
+  const approved = selectedDraft?.status === "approved";
+  const targetLanguage = selectedDraft ? draftTargetLanguageLabel(selectedDraft) : "-";
+  const landingUrl = draftLandingUrl(selectedDraft, campaign);
+  const previewCreatives = useMemo(
+    () => copyPreviewCreatives(creatives, selectedDraft),
+    [creatives, selectedDraft],
+  );
+  const selectedPreviewCreative =
+    previewCreatives.find((asset) => asset.id === selectedPreviewCreativeId) ??
+    previewCreatives[0] ??
     null;
-  const primaryText = selectedDraft?.primary_text || selectedDraft?.body || "";
-  const fullBody = selectedDraft?.body || "";
-  const hasSeparateFullBody =
-    Boolean(selectedDraft?.primary_text) &&
-    Boolean(fullBody) &&
-    selectedDraft?.primary_text?.trim() !== fullBody.trim();
-  const headline = selectedDraft?.headline || selectedTopic?.title || "广告标题";
-  const description = selectedDraft?.description || landingUrl || "落地页描述";
-  const cta = copyCtaLabel(selectedDraft?.cta);
-  const isReviewed = selectedDraft ? ["approved", "rejected"].includes(selectedDraft.status) : false;
-  const canGenerateImages = selectedDraft?.status === "approved";
-  const hasFeedback = feedback.trim().length > 0;
-  const feedbackSuggestions = ["语气更本地化", "缩短正文", "突出优惠", "CTA 更明确", "降低夸张承诺"];
+  const selectedPreviewAspectClass = mediaPreviewAspectClass(selectedPreviewCreative?.size);
+  const feedbackTags = ["更短", "更本地化", "少用符号", "突出优惠", "更合规"];
+  const appendFeedback = (value: string) => {
+    setFeedback(feedback.trim() ? `${feedback.trim()}，${value}` : value);
+  };
+
+  useEffect(() => {
+    if (!previewCreatives.length) {
+      if (selectedPreviewCreativeId) setSelectedPreviewCreativeId(null);
+      return;
+    }
+    if (!selectedPreviewCreativeId || !previewCreatives.some((asset) => asset.id === selectedPreviewCreativeId)) {
+      setSelectedPreviewCreativeId(previewCreatives[0].id);
+    }
+  }, [previewCreatives, selectedPreviewCreativeId]);
 
   return (
-    <section className="view-stack copy-workbench">
-      <section className="copy-main-grid">
-        <section className="panel copy-editor-panel">
-          <div className="panel-header">
-            <div>
-              <h2>当前文案</h2>
-              <span className="panel-note">
-                {selectedDraft ? `v${selectedDraft.version} · ${statusLabel(selectedDraft.status)}` : "等待生成"}
-              </span>
-            </div>
-            <button
-              className="primary-button"
-              onClick={onGenerateCopy}
-              disabled={!selectedTopic || loading === "copy"}
-            >
-              {loading === "copy" ? <Loader2 size={16} className="spin" /> : <FileText size={16} />}
-              <span>生成文案</span>
-            </button>
+    <section className="copy-layout two-column">
+      <section className="panel copy-list-panel">
+        <div className="panel-header">
+          <div>
+            <h2>文案版本</h2>
+            <span className="panel-note">
+              {drafts.length ? `${drafts.length} 个版本可审核` : "等待生成第一版文案"}
+            </span>
           </div>
-
-          {selectedDraft ? (
-            <div className="copy-current">
-              <div className="copy-field-grid">
-                <div>
-                  <span>广告标题</span>
-                  <strong>{headline}</strong>
-                </div>
-                <div>
-                  <span>CTA</span>
-                  <strong>{cta}</strong>
-                </div>
-                <div>
-                  <span>描述</span>
-                  <strong>{description || "-"}</strong>
-                </div>
-              </div>
-
-              <article className="copy-body-card">
-                <div className="copy-body-head">
-                  <span>Facebook 正文</span>
-                  <StatusPill status={selectedDraft.status} />
-                </div>
-                <p className="copy-body-main">{primaryText}</p>
-                {hasSeparateFullBody && (
-                  <details className="copy-source-details">
-                    <summary>查看完整文案</summary>
-                    <pre className="copy-source-text">{fullBody}</pre>
-                  </details>
-                )}
-              </article>
-
-              <section className="copy-feedback-card">
-                <div className="copy-section-title">
-                  <strong>修改意见</strong>
-                  <span>需要调整时填写，系统会按意见重新生成新版本</span>
-                </div>
-                <div className="copy-feedback-tags">
-                  {feedbackSuggestions.map((suggestion) => (
-                    <button
-                      className="copy-feedback-tag"
-                      key={suggestion}
-                      type="button"
-                      onClick={() =>
-                        setFeedback(feedback.trim() ? `${feedback.trim()}；${suggestion}` : suggestion)
-                      }
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  className="feedback-input copy-feedback-input"
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                  placeholder="例如：语气更自然一些，突出价格优势，避免过度承诺。"
-                />
-              </section>
-
-              <div className="copy-actions">
-                {!isReviewed ? (
-                  <>
-                    <button
-                      className="primary-button"
-                      onClick={() => onReview("copy_draft", selectedDraft.id, "approved")}
-                      disabled={loading?.startsWith("review-copy_draft") ?? false}
-                    >
-                      <Check size={16} />
-                      <span>通过文案</span>
-                    </button>
-                    <button
-                      className="secondary-button"
-                      onClick={() => onReview("copy_draft", selectedDraft.id, "needs_revision")}
-                      disabled={!hasFeedback || (loading?.startsWith("review-copy_draft") ?? false)}
-                    >
-                      <RefreshCw size={16} />
-                      <span>提交修改意见</span>
-                    </button>
-                    <button
-                      className="secondary-button danger"
-                      onClick={() => onReview("copy_draft", selectedDraft.id, "rejected")}
-                      disabled={loading?.startsWith("review-copy_draft") ?? false}
-                    >
-                      <X size={16} />
-                      <span>拒绝</span>
-                    </button>
-                  </>
-                ) : (
-                  <div className={`review-complete copy-review-complete ${selectedDraft.status === "rejected" ? "rejected" : ""}`}>
-                    {selectedDraft.status === "approved" ? <Check size={16} /> : <X size={16} />}
-                    <span>{selectedDraft.status === "approved" ? "文案已通过审核" : "文案已拒绝"}</span>
-                  </div>
-                )}
-                <button
-                  className="secondary-button"
-                  onClick={onReviseCopy}
-                  disabled={!hasFeedback || loading === "revise-copy"}
-                >
-                  {loading === "revise-copy" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                  <span>按意见重新生成</span>
-                </button>
-                <button
-                  className="primary-button"
-                  onClick={onGenerateCreatives}
-                  disabled={!canGenerateImages}
-                  title={canGenerateImages ? "生成图片" : "文案通过后再生成图片"}
-                >
-                  <Image size={16} />
-                  <span>生成图片</span>
-                </button>
-              </div>
-            </div>
-          ) : (
-            <EmptyState text="暂无文案，请先选择选题并生成文案" />
-          )}
-        </section>
-
-        <section className="panel copy-preview-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Facebook 预览</h2>
-              <span className="panel-note">模拟 Feed 广告展示</span>
-            </div>
-          </div>
-          <div className="facebook-preview-shell">
-            <article className="facebook-preview-card">
-              <div className="facebook-preview-head">
-                <div className="facebook-page-avatar">Ad</div>
-                <div>
-                  <strong>{selectedCampaign?.product_name || selectedCampaign?.name || "广告主页"}</strong>
-                  <span>Sponsored</span>
-                </div>
-              </div>
-              <p className="facebook-preview-text">
-                {primaryText || "生成文案后，这里会展示广告正文预览。"}
-              </p>
-              {previewImage?.url ? (
-                <img
-                  className="facebook-preview-image"
-                  src={previewImage.url}
-                  alt={previewImage.alt_text || "广告素材预览"}
-                />
-              ) : (
-                <div className="facebook-preview-empty">
-                  <Image size={26} />
-                  <span>图片生成后会出现在这里</span>
-                </div>
-              )}
-              <div className="facebook-preview-footer">
-                <div>
-                  <span>{landingUrl ? safeHostname(landingUrl) : "landing page"}</span>
-                  <strong>{headline}</strong>
-                  <p>{description}</p>
-                </div>
-                <button type="button">{cta}</button>
-              </div>
-            </article>
-          </div>
-        </section>
-      </section>
-
-      <details className="copy-history-details">
-        <summary>
-          <span>版本记录</span>
-          <small>{drafts.length ? `${drafts.length} 个版本` : "暂无版本"}</small>
-        </summary>
-        <DataList emptyText="暂无文案版本">
+          <button className="primary-button" onClick={onGenerateCopy} disabled={!selectedTopic || loading === "copy"}>
+            {loading === "copy" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+            <span>生成文案</span>
+          </button>
+        </div>
+        <DataList emptyText="暂无文案">
           {drafts.map((draft) => (
             <button
               className={`list-button copy-version-button ${selectedDraft?.id === draft.id ? "active" : ""}`}
               key={draft.id}
               onClick={() => setSelectedDraftId(draft.id)}
             >
-              <strong>{draft.headline || `版本 ${draft.version}`}</strong>
-              <span>{statusLabel(draft.status)} · v{draft.version} · {formatDate(draft.created_at)}</span>
+              <div className="copy-version-head">
+                <strong>{draft.headline || `文案 v${draft.version}`}</strong>
+                <StatusPill status={draft.status} />
+              </div>
+              <span>v{draft.version} / {draftTargetLanguageLabel(draft)} / {formatDate(draft.created_at)}</span>
+              <em>{copySnippet(draft)}</em>
             </button>
           ))}
         </DataList>
-      </details>
+      </section>
+
+      <section className="copy-workbench">
+        {selectedDraft ? (
+          <div className="copy-main-grid">
+            <section className="panel copy-editor-panel">
+              <div className="panel-header">
+                <div>
+                  <h2>文案审核</h2>
+                  <span className="panel-note">按广告字段检查内容，确认后进入图片生成</span>
+                </div>
+                <StatusPill status={selectedDraft.status} />
+              </div>
+
+              <div className="copy-current">
+                <div className="copy-field-grid">
+                  <div>
+                    <span>语言</span>
+                    <strong>{targetLanguage}</strong>
+                  </div>
+                  <div>
+                    <span>CTA</span>
+                    <strong>{selectedDraft.cta || "Learn More"}</strong>
+                  </div>
+                  <div>
+                    <span>选题</span>
+                    <strong>{selectedTopic?.title || "未关联选题"}</strong>
+                  </div>
+                </div>
+
+                <section className="copy-body-card">
+                  <div className="copy-body-head">
+                    <span>Primary Text</span>
+                    <strong>{copyLengthLabel(selectedDraft.primary_text || selectedDraft.body)}</strong>
+                  </div>
+                  <pre className="copy-body-main">{selectedDraft.primary_text || selectedDraft.body}</pre>
+                  {selectedDraft.body !== selectedDraft.primary_text && (
+                    <details className="copy-source-details">
+                      <summary>查看完整生成原文</summary>
+                      <pre className="copy-source-text">{selectedDraft.body}</pre>
+                    </details>
+                  )}
+                </section>
+
+                <div className="copy-field-grid">
+                  <div>
+                    <span>Headline</span>
+                    <strong>{selectedDraft.headline || "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Description</span>
+                    <strong>{selectedDraft.description || "-"}</strong>
+                  </div>
+                  <div>
+                    <span>落地页</span>
+                    <strong>{landingUrl || "-"}</strong>
+                  </div>
+                </div>
+
+                <section className="copy-feedback-card">
+                  <div className="copy-section-title">
+                    <strong>不满意？写修改意见再生成</strong>
+                    <span>会基于当前版本重写，并保留新旧版本供比较</span>
+                  </div>
+                  <div className="copy-feedback-tags">
+                    {feedbackTags.map((tag) => (
+                      <button className="copy-feedback-tag" key={tag} onClick={() => appendFeedback(tag)}>
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea
+                    className="feedback-input copy-feedback-input"
+                    value={feedback}
+                    onChange={(event) => setFeedback(event.target.value)}
+                    placeholder="例如：文案更短一些，少用符号，更像印度本地用户会看到的广告。"
+                  />
+                  <div className="copy-actions">
+                    {!approved ? (
+                      <button
+                        className="primary-button"
+                        onClick={() => onReview("copy_draft", selectedDraft.id, "approved")}
+                      >
+                        <Check size={16} />
+                        <span>通过文案</span>
+                      </button>
+                    ) : (
+                      <div className="review-complete copy-review-complete">
+                        <Check size={16} />
+                        <span>文案已通过</span>
+                      </div>
+                    )}
+                    <button
+                      className="secondary-button"
+                      onClick={onReviseCopy}
+                      disabled={!feedback.trim() || loading === "revise-copy"}
+                    >
+                      {loading === "revise-copy" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                      <span>按意见重写</span>
+                    </button>
+                  </div>
+                </section>
+
+                {approved && (
+                  <div className="next-step">
+                    <strong>文案已通过，可以进入图片生成</strong>
+                    <button className="primary-button" onClick={onOpenCreatives}>
+                      <Image size={16} />
+                      <span>进入图片生成</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="panel copy-preview-panel">
+              <div className="panel-header">
+                <div>
+                  <h2>广告预览</h2>
+                  <span className="panel-note">模拟 Facebook 信息流展示</span>
+                </div>
+              </div>
+              <div className="facebook-preview-shell">
+                {previewCreatives.length > 0 && (
+                  <div className="preview-asset-picker">
+                    <div className="preview-asset-picker-head">
+                      <span>预览图片</span>
+                      <strong>{selectedPreviewCreative ? imagePromptTitle(selectedPreviewCreative.prompt) : "-"}</strong>
+                    </div>
+                    <div className="preview-asset-options">
+                      {previewCreatives.map((asset, index) => (
+                        <button
+                          className={`preview-asset-option ${selectedPreviewCreative?.id === asset.id ? "active" : ""}`}
+                          key={asset.id}
+                          onClick={() => setSelectedPreviewCreativeId(asset.id)}
+                          title={asset.alt_text || imagePromptTitle(asset.prompt)}
+                          type="button"
+                        >
+                          <img src={asset.url || ""} alt={asset.alt_text || `预览图片 ${index + 1}`} />
+                          <span>{asset.status === "approved" ? "已通过" : `图 ${index + 1}`}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="facebook-preview-card">
+                  <div className="facebook-preview-head">
+                    <div className="facebook-page-avatar">AD</div>
+                    <div>
+                      <strong>{campaign?.name || "Campaign"}</strong>
+                      <span>Sponsored</span>
+                    </div>
+                  </div>
+                  <pre className="facebook-preview-text">{selectedDraft.primary_text || selectedDraft.body}</pre>
+                  {selectedPreviewCreative?.url ? (
+                    <img
+                      className={`facebook-preview-image ${selectedPreviewAspectClass}`}
+                      src={selectedPreviewCreative.url}
+                      alt={selectedPreviewCreative.alt_text || "广告预览图片"}
+                    />
+                  ) : (
+                    <div className={`facebook-preview-empty ${selectedPreviewAspectClass}`}>
+                      <Image size={28} />
+                      <span>图片生成后显示素材预览</span>
+                    </div>
+                  )}
+                  <div className="facebook-preview-footer">
+                    <div>
+                      <span>{domainFromUrl(landingUrl) || "landing page"}</span>
+                      <strong>{selectedDraft.headline || selectedTopic?.title || "Ad headline"}</strong>
+                      <p>{selectedDraft.description || "Ad description"}</p>
+                    </div>
+                    <button>{selectedDraft.cta || "Learn More"}</button>
+                  </div>
+                </div>
+              </div>
+
+              <section className="context-section copy-context-section">
+                <h3>投放上下文</h3>
+                <KeyValueTable
+                  data={{
+                    项目: campaign?.name,
+                    语言: targetLanguage,
+                    落地页: landingUrl,
+                    选题: selectedTopic?.title,
+                    版本: `v${selectedDraft.version}`,
+                  }}
+                />
+              </section>
+            </section>
+          </div>
+        ) : (
+          <section className="panel wide">
+            <EmptyState text="请选择或生成一条文案" />
+          </section>
+        )}
+      </section>
     </section>
   );
 }
 
-function copyCtaLabel(value: string | null | undefined): string {
-  const normalized = (value || "LEARN_MORE").trim();
-  const labels: Record<string, string> = {
-    LEARN_MORE: "了解更多",
-    SHOP_NOW: "立即购买",
-    SIGN_UP: "立即注册",
-    CONTACT_US: "联系我们",
-    DOWNLOAD: "下载",
-    SUBSCRIBE: "订阅",
-    APPLY_NOW: "立即申请",
-    GET_OFFER: "领取优惠",
-  };
-  return labels[normalized.toUpperCase()] ?? normalized;
-}
-
-function safeHostname(value: string): string {
-  try {
-    return new URL(value).hostname;
-  } catch {
-    return value;
-  }
-}
-
 function CreativesView({
-  currentCreatives,
-  historicalCreatives,
+  creatives,
+  creativeGenerationSlots,
   selectedCreativeIds,
   setSelectedCreativeIds,
+  rewriteFeedbacks,
+  setRewriteFeedback,
   onGenerate,
+  onRetrySlot,
+  onRegenerate,
   onReview,
   onCreateVideo,
-  onInvalidImage,
-  generation,
+  loading,
 }: {
-  currentCreatives: CreativeAsset[];
-  historicalCreatives: CreativeAsset[];
+  creatives: CreativeAsset[];
+  creativeGenerationSlots: CreativeGenerationSlot[];
   selectedCreativeIds: string[];
   setSelectedCreativeIds: (ids: string[]) => void;
+  rewriteFeedbacks: Record<string, string>;
+  setRewriteFeedback: (assetId: string, value: string) => void;
   onGenerate: () => void;
-  onReview: (entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") => void;
+  onRetrySlot: (index: number) => void;
+  onRegenerate: (asset: CreativeAsset) => void;
+  onReview: (
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
   onCreateVideo: () => void;
-  onInvalidImage: (assetId: string) => void;
-  generation: CreativeGenerationState | null;
+  loading: string | null;
 }) {
-  const [previewAsset, setPreviewAsset] = useState<CreativeAsset | null>(null);
-  const isGenerating = isCreativeGenerationActive(generation);
-  const hasCurrentCreativeContent = isGenerating || currentCreatives.length > 0;
-
-  function renderCreativeAsset(asset: CreativeAsset) {
-    const checked = selectedCreativeIds.includes(asset.id);
-    return (
-      <article className="asset-item" key={asset.id}>
-        <div className="asset-card-head">
-          <label className="check-row compact">
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={(event) => {
-                setSelectedCreativeIds(
-                  event.target.checked
-                    ? [...selectedCreativeIds, asset.id]
-                    : selectedCreativeIds.filter((id) => id !== asset.id),
-                );
-              }}
-            />
-            <span>用于视频</span>
-          </label>
-          <StatusPill status={asset.status} />
-        </div>
-        <ImagePreview asset={asset} onInvalid={onInvalidImage} onOpen={() => setPreviewAsset(asset)} />
-        <div className="asset-summary">
-          <strong>{asset.alt_text || imagePromptTitle(asset.prompt) || `图片 ${asset.version}`}</strong>
-          <span>{checked ? "已选为视频素材" : "未选为视频素材"}</span>
-        </div>
-        {!isReviewedStatus(asset.status) ? (
-          <div className="button-row asset-actions">
-            <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
-              <Check size={16} />
-              <span>通过</span>
-            </button>
-            <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
-              <X size={16} />
-              <span>拒绝</span>
-            </button>
-          </div>
-        ) : (
-          <div className="review-complete">
-            {asset.status === "approved" ? <Check size={16} /> : <X size={16} />}
-            <span>{asset.status === "approved" ? "已通过，可用于视频/发布" : "已拒绝"}</span>
-          </div>
-        )}
-        <details className="asset-details">
-          <summary>详情</summary>
-          <div className="asset-details-body">
-            {asset.url && (
-              <a className="asset-url" href={asset.url} target="_blank" rel="noreferrer">
-                打开图片 URL
-              </a>
-            )}
-            <div className="asset-prompt">{asset.prompt}</div>
-          </div>
-        </details>
-      </article>
-    );
-  }
+  const visibleSlots = buildCreativeSlots(creatives, creativeGenerationSlots);
+  const visibleAssetIds = new Set(
+    visibleSlots.map((slot) => slot.asset?.id).filter((id): id is string => Boolean(id)),
+  );
+  const historyCreatives = creatives.filter((asset) => !visibleAssetIds.has(asset.id));
+  const completedCount = visibleSlots.filter((slot) => slot.status === "done" && slot.asset).length;
+  const hasSlotErrors = visibleSlots.some((slot) => slot.status === "error");
+  const isGenerating =
+    loading === "creatives" || creativeGenerationSlots.some((slot) => slot.status === "loading");
+  const panelNote = visibleSlots.length
+    ? isGenerating
+      ? `${completedCount}/${CREATIVE_GENERATION_LIMIT} 张已生成`
+      : `${completedCount} 张当前候选`
+    : "还没有生成图片";
 
   return (
     <section className="view-stack">
       <section className="panel">
         <div className="panel-header">
-          <h2>图片素材</h2>
+          <div>
+            <h2>图片审核</h2>
+            <span className="panel-note">{panelNote}</span>
+          </div>
           <div className="button-row">
-            <button className="primary-button" onClick={onGenerate} disabled={isGenerating}>
-              {isGenerating ? <Loader2 size={16} className="spin" /> : <Image size={16} />}
-              <span>{isGenerating ? "生成中" : "生成图片"}</span>
+            <button className="secondary-button" onClick={onGenerate} disabled={isGenerating}>
+              {isGenerating ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+              <span>生成 3 张图片</span>
             </button>
-            <button className="secondary-button" onClick={onCreateVideo} disabled={!selectedCreativeIds.length}>
+            <button className="primary-button" onClick={onCreateVideo} disabled={!creatives.some((item) => item.status === "approved")}>
               <Film size={16} />
-              <span>创建视频任务</span>
+              <span>进入视频</span>
             </button>
           </div>
         </div>
-        {generation && <CreativeGenerationPanel generation={generation} />}
-        <section className="creative-batch-section">
-          <div className="creative-batch-head">
-            <div>
-              <h3>本次生成</h3>
-              <span>
-                {isGenerating
-                  ? "正在生成本轮 3 张图片"
-                  : currentCreatives.length
-                    ? "优先审核这组图片，满意后可直接用于视频"
-                    : "点击生成图片后，本轮结果会显示在这里"}
-              </span>
+        {visibleSlots.length > 0 && (
+          <div className={`creative-progress ${completedCount === CREATIVE_GENERATION_LIMIT ? "done" : hasSlotErrors ? "failed" : ""}`}>
+            <div className="creative-progress-head">
+              <div className="creative-progress-icon">
+                {isGenerating ? <Loader2 size={18} className="spin" /> : <Image size={18} />}
+              </div>
+              <div>
+                <strong>{isGenerating ? "正在逐张生成图片" : "当前图片候选"}</strong>
+                <span>完成的图片可立即审核、选择或继续改写。</span>
+              </div>
+              <StatusPill status={isGenerating ? "generating" : "generated"} />
             </div>
-            <span className="creative-count">{isGenerating ? "生成中" : `${currentCreatives.length} 张`}</span>
-          </div>
-          <div className="asset-grid">
-            {isGenerating &&
-              Array.from({ length: generation?.expectedCount ?? 3 }).map((_, index) => (
-                <CreativeGeneratingCard key={`creative-generating-${generation?.startedAt}-${index}`} index={index} />
+            <div className="creative-progress-steps">
+              {visibleSlots.map((slot) => (
+                <div className={`creative-progress-step ${slot.status}`} key={`creative-step-${slot.index}`}>
+                  <span>{slot.index}</span>
+                  <strong>
+                    {slot.status === "done"
+                      ? "已完成"
+                      : slot.status === "error"
+                        ? "需重试"
+                        : "生成中"}
+                  </strong>
+                </div>
               ))}
-            {currentCreatives.map(renderCreativeAsset)}
+            </div>
           </div>
-          {!hasCurrentCreativeContent && <EmptyState text="暂无本次生成图片" />}
-        </section>
-        {historicalCreatives.length > 0 && (
+        )}
+
+        {visibleSlots.length ? (
+          <div className="asset-grid creative-slot-grid">
+            {visibleSlots.map((slot) => (
+              <CreativeSlotCard
+                key={`creative-slot-${slot.index}-${slot.asset?.id ?? slot.status}`}
+                slot={slot}
+                selectedCreativeIds={selectedCreativeIds}
+                setSelectedCreativeIds={setSelectedCreativeIds}
+                rewriteFeedbacks={rewriteFeedbacks}
+                setRewriteFeedback={setRewriteFeedback}
+                onRetrySlot={onRetrySlot}
+                onRegenerate={onRegenerate}
+                onReview={onReview}
+                loading={loading}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState text="暂无图片，请先生成" />
+        )}
+
+        {historyCreatives.length > 0 && (
           <details className="creative-history-section">
             <summary>
               <div>
-                <strong>历史图片</strong>
-                <span>之前生成的素材保留在这里，可展开复用或审核。</span>
+                <strong>历史版本</strong>
+                <span>保留旧图片，方便回看和对比。</span>
               </div>
-              <span>{historicalCreatives.length} 张</span>
+              <span>{historyCreatives.length} 张</span>
             </summary>
-            <div className="asset-grid history-grid">{historicalCreatives.map(renderCreativeAsset)}</div>
+            <div className="asset-grid history-grid">
+              {historyCreatives.map((asset) => (
+                <CreativeAssetMiniCard
+                  key={asset.id}
+                  asset={asset}
+                  selectedCreativeIds={selectedCreativeIds}
+                  setSelectedCreativeIds={setSelectedCreativeIds}
+                  onReview={onReview}
+                />
+              ))}
+            </div>
           </details>
         )}
       </section>
-      <ImagePreviewDialog asset={previewAsset} onClose={() => setPreviewAsset(null)} />
     </section>
   );
 }
 
-function CreativeGenerationPanel({ generation }: { generation: CreativeGenerationState }) {
-  const steps: Array<{ phase: CreativeGenerationPhase; label: string }> = [
-    { phase: "submitting", label: "提交请求" },
-    { phase: "generating", label: "生成图片" },
-    { phase: "saving", label: "更新列表" },
-    { phase: "done", label: "完成" },
-  ];
-  const activeStepIndex = Math.max(
-    0,
-    steps.findIndex((step) => step.phase === generation.phase),
-  );
-  const status = generation.phase === "failed" ? "failed" : isCreativeGenerationActive(generation) ? "generating" : "approved";
+function CreativeSlotCard({
+  slot,
+  selectedCreativeIds,
+  setSelectedCreativeIds,
+  rewriteFeedbacks,
+  setRewriteFeedback,
+  onRetrySlot,
+  onRegenerate,
+  onReview,
+  loading,
+}: {
+  slot: CreativeGenerationSlot;
+  selectedCreativeIds: string[];
+  setSelectedCreativeIds: (ids: string[]) => void;
+  rewriteFeedbacks: Record<string, string>;
+  setRewriteFeedback: (assetId: string, value: string) => void;
+  onRetrySlot: (index: number) => void;
+  onRegenerate: (asset: CreativeAsset) => void;
+  onReview: (
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
+  loading: string | null;
+}) {
+  const asset = slot.asset;
+  const isLoading = slot.status === "loading";
+  const isRetrying = loading === `creative-retry-${slot.index}`;
+  const isRegenerating = asset ? loading === `creative-regenerate-${asset.id}` : false;
+
+  if (isLoading && !asset) {
+    return (
+      <article className="asset-card creative-skeleton-card" aria-live="polite">
+        <span className="creative-skeleton-label">候选 {slot.index}</span>
+        <div className="creative-skeleton-image">
+          <Loader2 size={24} className="spin" />
+        </div>
+        <div className="creative-skeleton-lines">
+          <span />
+          <span />
+          <span />
+        </div>
+      </article>
+    );
+  }
+
+  if (!asset) {
+    return (
+      <article className="asset-card creative-slot-error">
+        <div className="image-placeholder">
+          <Image size={28} />
+          <span>{slot.message || "图片生成失败"}</span>
+        </div>
+        <div className="asset-card-body">
+          <strong>候选 {slot.index} 生成失败</strong>
+          <button className="secondary-button" onClick={() => onRetrySlot(slot.index)} disabled={Boolean(loading)}>
+            {isRetrying ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+            <span>重试此候选</span>
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  const selected = selectedCreativeIds.includes(asset.id);
+  const feedback = rewriteFeedbacks[asset.id] ?? "";
 
   return (
-    <div className={`creative-progress ${generation.phase}`}>
-      <div className="creative-progress-head">
-        <div className="creative-progress-icon">
-          {generation.phase === "failed" ? (
-            <X size={18} />
-          ) : generation.phase === "done" ? (
-            <Check size={18} />
-          ) : (
-            <Loader2 size={18} className="spin" />
-          )}
+    <article className={`asset-card creative-slot-card ${selected ? "selected" : ""} ${slot.status === "error" ? "error" : ""}`}>
+      <div className={isLoading || isRegenerating ? "creative-image-busy" : ""}>
+        <ImagePreview asset={asset} />
+        {(isLoading || isRegenerating) && (
+          <div className="creative-image-overlay">
+            <Loader2 size={22} className="spin" />
+            <span>正在生成新版本</span>
+          </div>
+        )}
+      </div>
+      <div className="asset-card-body">
+        <div className="asset-card-head">
+          <strong>{asset.alt_text || imagePromptTitle(asset.prompt)}</strong>
+          <StatusPill status={asset.status} />
         </div>
-        <div>
-          <strong>{generation.message}</strong>
-          <span>{generation.detail}</span>
+        <div className="creative-version-row">
+          <span>候选 {creativeImageIndex(asset, slot.index)}</span>
+          <span>版本 {asset.version}</span>
         </div>
-        <StatusPill status={status} />
+        {slot.status === "error" && <p className="creative-error-text">{slot.message}</p>}
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(event) => {
+              setSelectedCreativeIds(
+                event.target.checked
+                  ? [...selectedCreativeIds.filter((id) => id !== asset.id), asset.id]
+                  : selectedCreativeIds.filter((id) => id !== asset.id),
+              );
+            }}
+          />
+          <span>用于视频</span>
+        </label>
+        <div className="creative-rewrite-box">
+          <label htmlFor={`creative-feedback-${asset.id}`}>改写要求</label>
+          <textarea
+            id={`creative-feedback-${asset.id}`}
+            value={feedback}
+            onChange={(event) => setRewriteFeedback(asset.id, event.target.value)}
+            placeholder="例如：主体更大，减少文字，背景换成家庭客厅，不要蓝色调。"
+            disabled={Boolean(loading)}
+          />
+          <button
+            className="secondary-button"
+            onClick={() => onRegenerate(asset)}
+            disabled={!feedback.trim() || Boolean(loading)}
+          >
+            {isRegenerating ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+            <span>按意见重生</span>
+          </button>
+        </div>
+        <div className="button-row">
+          <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+            <Check size={16} />
+            <span>通过</span>
+          </button>
+          <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
+            <X size={16} />
+            <span>拒绝</span>
+          </button>
+        </div>
+        <details className="asset-details">
+          <summary>提示词</summary>
+          <div className="asset-details-body">
+            <pre className="asset-prompt">{asset.prompt}</pre>
+          </div>
+        </details>
       </div>
-      <div className="creative-progress-meta">
-        <span>预计 {generation.expectedCount} 张</span>
-        <span>完成 {generation.completedCount} 张</span>
-        <span>用时 {formatElapsedSeconds(generation.elapsedSeconds)}</span>
-      </div>
-      <div className="creative-progress-steps">
-        {steps.map((step, index) => {
-          const stepState =
-            generation.phase === "failed" && index === activeStepIndex
-              ? "failed"
-              : generation.phase === "done" || index < activeStepIndex
-                ? "done"
-                : index === activeStepIndex
-                  ? "active"
-                  : "pending";
-          return (
-            <div className={`creative-progress-step ${stepState}`} key={step.phase}>
-              <span>{index + 1}</span>
-              <strong>{step.label}</strong>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    </article>
   );
 }
 
-function CreativeGeneratingCard({ index }: { index: number }) {
+function CreativeAssetMiniCard({
+  asset,
+  selectedCreativeIds,
+  setSelectedCreativeIds,
+  onReview,
+}: {
+  asset: CreativeAsset;
+  selectedCreativeIds: string[];
+  setSelectedCreativeIds: (ids: string[]) => void;
+  onReview: (
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
+}) {
+  const selected = selectedCreativeIds.includes(asset.id);
   return (
-    <article className="asset-item creative-skeleton-card" aria-busy="true">
-      <div className="asset-card-head">
-        <span className="creative-skeleton-label">第 {index + 1} 张</span>
-        <StatusPill status="generating" />
-      </div>
-      <div className="creative-skeleton-image">
-        <Loader2 size={24} className="spin" />
-      </div>
-      <div className="asset-summary">
-        <strong>图片生成中</strong>
-        <span>生成完成后会自动出现在列表顶部</span>
-      </div>
-      <div className="creative-skeleton-lines">
-        <span />
-        <span />
+    <article className={`asset-card history-asset-card ${selected ? "selected" : ""}`}>
+      <ImagePreview asset={asset} />
+      <div className="asset-card-body">
+        <div className="asset-card-head">
+          <strong>{asset.alt_text || imagePromptTitle(asset.prompt)}</strong>
+          <StatusPill status={asset.status} />
+        </div>
+        <div className="creative-version-row">
+          <span>候选 {creativeImageIndex(asset, 1)}</span>
+          <span>版本 {asset.version}</span>
+        </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(event) => {
+              setSelectedCreativeIds(
+                event.target.checked
+                  ? [...selectedCreativeIds.filter((id) => id !== asset.id), asset.id]
+                  : selectedCreativeIds.filter((id) => id !== asset.id),
+              );
+            }}
+          />
+          <span>用于视频</span>
+        </label>
+        <div className="button-row">
+          <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+            <Check size={16} />
+            <span>通过</span>
+          </button>
+          <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
+            <X size={16} />
+            <span>拒绝</span>
+          </button>
+        </div>
       </div>
     </article>
   );
 }
 
 function VideosView({
+  campaign,
+  draft,
   videos,
-  creatives,
+  approvedCreatives,
   selectedCreativeIds,
   setSelectedCreativeIds,
+  selectedVideoId,
+  setSelectedVideoId,
   aspectRatio,
   setAspectRatio,
   durationSeconds,
@@ -2583,17 +3016,23 @@ function VideosView({
   setInstructions,
   storyboardText,
   setStoryboardText,
+  storyboardFeedback,
+  setStoryboardFeedback,
   onGenerateStoryboard,
+  onRewriteStoryboard,
   onCreateVideo,
   onStartGeneration,
-  onRefreshGeneration,
   onReview,
   loading,
 }: {
+  campaign: Campaign | null;
+  draft: CopyDraft | null;
   videos: VideoAsset[];
-  creatives: CreativeAsset[];
+  approvedCreatives: CreativeAsset[];
   selectedCreativeIds: string[];
   setSelectedCreativeIds: (ids: string[]) => void;
+  selectedVideoId: string | null;
+  setSelectedVideoId: (id: string) => void;
   aspectRatio: string;
   setAspectRatio: (value: string) => void;
   durationSeconds: number;
@@ -2602,1422 +3041,436 @@ function VideosView({
   setInstructions: (value: string) => void;
   storyboardText: string;
   setStoryboardText: (value: string) => void;
+  storyboardFeedback: string;
+  setStoryboardFeedback: (value: string) => void;
   onGenerateStoryboard: () => void;
+  onRewriteStoryboard: () => void;
   onCreateVideo: () => void;
   onStartGeneration: (videoId: string) => void;
-  onRefreshGeneration: (videoId: string) => void;
-  onReview: (entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") => void;
+  onReview: (
+    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
+    entityId: string,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
   loading: string | null;
 }) {
-  const selectedTooManyImages = selectedCreativeIds.length > VIDEO_MAX_REFERENCE_IMAGES;
-  const sortedVideos = [...videos].sort(
-    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
-  );
-  const currentVideo = sortedVideos[0] ?? null;
-  const historyVideos = sortedVideos.slice(1);
-
-  useEffect(() => {
-    if (selectedCreativeIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setSelectedCreativeIds(selectedCreativeIds.slice(0, VIDEO_MAX_REFERENCE_IMAGES));
-    }
-  }, [selectedCreativeIds, setSelectedCreativeIds]);
-
-  function renderVideoTaskCard(video: VideoAsset, variant: "current" | "history" = "history") {
-    const generateKey = `video-generate-${video.id}`;
-    const refreshKey = `video-refresh-${video.id}`;
-    const providerStarted = Boolean(video.provider_job_id);
-    const durationSupported =
-      !video.duration_seconds || (video.duration_seconds >= 4 && video.duration_seconds <= 12);
-    const referenceImageCount = video.source_asset_ids.length;
-    const referenceImageCountSupported = referenceImageCount <= VIDEO_MAX_REFERENCE_IMAGES;
-    const canSubmitProvider =
-      (!providerStarted || video.status === "failed") &&
-      referenceImageCountSupported &&
-      video.status !== "rejected" &&
-      video.status !== "generating" &&
-      video.status !== "generated";
-    const canReviewVideo =
-      !isReviewedStatus(video.status) &&
-      Boolean(video.url) &&
-      video.status !== "generating";
-
-    return (
-      <article className={`video-item ${variant === "current" ? "current" : "compact"}`} key={video.id}>
-        <div className="item-head">
-          <div>
-            <strong>{variant === "current" ? "当前视频任务" : `${video.aspect_ratio} · ${video.duration_seconds ?? "-"}s`}</strong>
-            <span className="item-subtitle">
-              {video.aspect_ratio} · {video.duration_seconds ?? "-"}s · {referenceImageCount} 张图片
-            </span>
-          </div>
-          <StatusPill status={video.status} />
-        </div>
-
-        <div className="video-task-summary">
-          <div>
-            <span>生成</span>
-            <strong>{providerStarted ? "已提交 Seedance" : "未开始"}</strong>
-          </div>
-          <div>
-            <span>审核</span>
-            <strong>{videoReviewLabel(video)}</strong>
-          </div>
-          <div>
-            <span>视频</span>
-            <strong>{video.url ? "已获取链接" : videoTaskStateLabel(video)}</strong>
-          </div>
-        </div>
-
-        {!referenceImageCountSupported && (
-          <div className="inline-warning">
-            这条任务包含 {referenceImageCount} 张图片，Seedance 1.5 pro 当前最多支持{" "}
-            {VIDEO_MAX_REFERENCE_IMAGES} 张首尾帧图片。请重新选择图片并创建视频任务。
-          </div>
-        )}
-        {!durationSupported && (
-          <div className="inline-warning">
-            Doubao-Seedance-1.5-pro 当前支持 4-12 秒，请重新创建 6 秒、10 秒或 12 秒任务。
-          </div>
-        )}
-        {video.error_message && <div className="inline-error">{video.error_message}</div>}
-        {video.url && <VideoPreview url={video.url} />}
-        <div className="video-task-actions">
-          {canSubmitProvider && (
-            <button
-              className="primary-button"
-              onClick={() => onStartGeneration(video.id)}
-              disabled={!durationSupported || loading === generateKey}
-            >
-              {loading === generateKey ? <Loader2 size={16} className="spin" /> : <Film size={16} />}
-              <span>{providerStarted ? "重新生成视频" : "开始生成视频"}</span>
-            </button>
-          )}
-          {providerStarted && (
-            <button
-              className="secondary-button"
-              onClick={() => onRefreshGeneration(video.id)}
-              disabled={loading === refreshKey}
-            >
-              {loading === refreshKey ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
-              <span>刷新状态</span>
-            </button>
-          )}
-          {canReviewVideo && (
-            <>
-              <button
-                className="secondary-button"
-                onClick={() => onReview("video_asset", video.id, "approved")}
-              >
-                <Check size={16} />
-                <span>通过</span>
-              </button>
-              <button
-                className="secondary-button danger"
-                onClick={() => onReview("video_asset", video.id, "rejected")}
-              >
-                <X size={16} />
-                <span>拒绝</span>
-              </button>
-            </>
-          )}
-        </div>
-
-        <details className="video-technical-details">
-          <summary>技术详情</summary>
-          <div className="video-technical-body">
-            <div className="video-meta-grid">
-              <div>
-                <span>任务 ID</span>
-                <code>{shortId(video.id)}</code>
-              </div>
-              <div>
-                <span>上游任务 ID</span>
-                <code>{video.provider_job_id || "-"}</code>
-              </div>
-              <div>
-                <span>素材 ID</span>
-                <code>{video.source_asset_ids.length ? video.source_asset_ids.map(shortId).join(", ") : "-"}</code>
-              </div>
-            </div>
-            {video.prompt && <p className="video-prompt-muted">{video.prompt}</p>}
-            {video.storyboard.length > 0 && (
-              <pre className="video-storyboard-preview">
-                {formatStoryboard(video.storyboard as Record<string, unknown>[])}
-              </pre>
-            )}
-          </div>
-        </details>
-      </article>
-    );
-  }
+  const selectedVideo = videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null;
+  const approvedVideoCount = videos.filter((video) => video.status === "approved").length;
+  const workingVideoCount = videos.filter((video) => video.status !== "approved").length;
+  const storyboardStreaming = loading === "video-storyboard" || loading === "video-storyboard-rewrite";
+  const landingUrl = draftLandingUrl(draft, campaign);
+  const previewText =
+    draft?.primary_text ||
+    draft?.body ||
+    storyboardText.trim() ||
+    "确认脚本并生成视频后，这里会展示成片在广告里的样子。";
+  const previewHeadline = draft?.headline || campaign?.product_name || campaign?.name || "Ad headline";
+  const previewDescription = draft?.description || campaign?.audience_description || "Ad description";
+  const previewCta = draft?.cta || "Learn More";
+  const previewAspectClass = mediaPreviewAspectClass(selectedVideo?.aspect_ratio || aspectRatio);
+  const previewVideoGenerating = selectedVideo
+    ? loading === `video-generate-${selectedVideo.id}` || isVideoGeneratingStatus(selectedVideo.status)
+    : loading === "video";
+  const previewSourceCreatives = approvedCreatives
+    .filter((asset) => selectedCreativeIds.includes(asset.id) && Boolean(asset.url))
+    .slice(0, VIDEO_MAX_REFERENCE_IMAGES);
+  const previewEmptyTitle = selectedVideo
+    ? selectedVideo.status === "failed"
+      ? "视频生成失败"
+      : previewVideoGenerating
+        ? "正在生成成片"
+        : "等待成片生成"
+    : "暂无视频任务";
+  const previewEmptyHint = selectedVideo
+    ? selectedVideo.status === "failed"
+      ? selectedVideo.error_message || "可以在右侧任务里重试生成。"
+      : previewVideoGenerating
+        ? `已等待 ${formatDuration(videoWaitSeconds(selectedVideo))}，完成后会自动切换为视频预览。`
+        : "确认脚本并生成视频后，会在这里看到完整广告预览。"
+    : "先确认脚本并生成视频，预览会跟随当前任务更新。";
 
   return (
-    <section className="two-column video-layout">
-      <section className="panel wide">
-        <div className="panel-header">
-          <div>
-            <h2>视频任务配置</h2>
-            <span className="panel-note">先生成脚本，再创建任务；开始生成前会再次确认</span>
-          </div>
-          <div className="button-row">
-            <button
-              className="secondary-button"
-              onClick={onGenerateStoryboard}
-              disabled={!selectedCreativeIds.length || selectedTooManyImages || loading === "video-storyboard"}
-            >
-              {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>AI 生成视频脚本</span>
-            </button>
-            <button
-              className="primary-button"
-              onClick={onCreateVideo}
-              disabled={
-                !selectedCreativeIds.length ||
-                selectedTooManyImages ||
-                !storyboardText.trim() ||
-                loading === "video"
-              }
-            >
-              {loading === "video" ? <Loader2 size={16} className="spin" /> : <Film size={16} />}
-              <span>创建任务</span>
-            </button>
-          </div>
+    <section className="video-workbench">
+      <div className="video-overview-strip">
+        <div>
+          <span className="section-eyebrow">VIDEO REVIEW</span>
+          <strong>{selectedVideo ? `当前任务 ${shortId(selectedVideo.id)}` : "等待创建视频任务"}</strong>
         </div>
-
-        <div className="video-config">
-          <div className="config-group">
-            <label>视频比例</label>
-            <div className="segmented-control">
-              {["9:16", "1:1", "16:9"].map((value) => (
-                <button
-                  key={value}
-                  className={aspectRatio === value ? "active" : ""}
-                  onClick={() => setAspectRatio(value)}
-                >
-                  {value}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="config-group">
-            <label>视频时长</label>
-            <div className="segmented-control">
-              {[6, 10, 12].map((value) => (
-                <button
-                  key={value}
-                  className={durationSeconds === value ? "active" : ""}
-                  onClick={() => setDurationSeconds(value)}
-                >
-                  {value} 秒
-                </button>
-              ))}
-            </div>
-            <span className="field-hint">Doubao-Seedance-1.5-pro 当前支持 4-12 秒。</span>
-          </div>
-
-          <div className="config-group full">
-            <label>使用图片</label>
-            <div className="source-asset-list">
-              {creatives.map((asset) => (
-                <label className="list-check" key={asset.id}>
-                  <input
-                    type="checkbox"
-                    checked={selectedCreativeIds.includes(asset.id)}
-                    onChange={(event) => {
-                      if (event.target.checked) {
-                        if (selectedCreativeIds.length >= VIDEO_MAX_REFERENCE_IMAGES) return;
-                        setSelectedCreativeIds([...selectedCreativeIds, asset.id]);
-                        return;
-                      }
-                      setSelectedCreativeIds(selectedCreativeIds.filter((id) => id !== asset.id));
-                    }}
-                  />
-                  <span>{asset.alt_text || asset.prompt || asset.id}</span>
-                  <StatusPill status={asset.status} />
-                </label>
-              ))}
-              {!creatives.length && <EmptyState text="暂无图片" />}
-            </div>
-            <span className={selectedTooManyImages ? "field-hint warning-text" : "field-hint"}>
-              已选择 {selectedCreativeIds.length} 张，Seedance 1.5 pro 当前最多支持{" "}
-              {VIDEO_MAX_REFERENCE_IMAGES} 张首尾帧图片。
-            </span>
-          </div>
-
-          <div className="config-group full">
-            <label>补充要求</label>
-            <textarea
-              className="video-instructions"
-              value={instructions}
-              onChange={(event) => setInstructions(event.target.value)}
-              placeholder="可选，例如：节奏快一点，字幕用英文，最后 2 秒突出 Download Now"
-            />
-          </div>
-
-          <div className="config-group full">
-            <details className="storyboard-editor-details" open={!storyboardText.trim() || undefined}>
-              <summary>
-                <span>视频脚本</span>
-                <small>{storyboardText.trim() ? "已生成，可展开微调" : "先生成脚本，再创建任务"}</small>
-              </summary>
-              <textarea
-                className="storyboard-input"
-                value={storyboardText}
-                onChange={(event) => setStoryboardText(event.target.value)}
-                placeholder="点击 AI 生成视频脚本，或在这里手动填写每个镜头要展示什么。"
-              />
-            </details>
-          </div>
+        <div className="video-overview-metrics" aria-label="视频生产概览">
+          <span>{approvedCreatives.length} 张可用图片</span>
+          <span>{selectedCreativeIds.length}/{VIDEO_MAX_REFERENCE_IMAGES} 张已选</span>
+          <span>{workingVideoCount} 个待处理</span>
+          <span>{approvedVideoCount} 个已通过</span>
         </div>
-      </section>
+      </div>
 
-      <section className="panel">
-        <div className="panel-header">
-          <h2>视频任务</h2>
-        </div>
-        {!currentVideo && <EmptyState text="暂无视频任务" />}
-        {currentVideo && (
-          <div className="video-task-stack">
-            {renderVideoTaskCard(currentVideo, "current")}
-            {historyVideos.length > 0 && (
-              <details className="history-details">
-                <summary>历史视频任务（{historyVideos.length}）</summary>
-                <DataList emptyText="暂无历史任务">
-                  {historyVideos.map((video) => renderVideoTaskCard(video, "history"))}
-                </DataList>
-              </details>
-            )}
-          </div>
-        )}
-      </section>
-    </section>
-  );
-}
-
-function PublishingView({
-  publishJobs,
-  facebookConfig,
-  metaAccounts,
-  selectedMetaAccountId,
-  setSelectedMetaAccountId,
-  adCreativeDraft,
-  adsPlanDraft,
-  metaAdsDraftResult,
-  selectedCampaign,
-  selectedDraft,
-  publishMessage,
-  setPublishMessage,
-  publishImageUrl,
-  setPublishImageUrl,
-  publishVideoAssetId,
-  setPublishVideoAssetId,
-  publishChannel,
-  setPublishChannel,
-  publishMediaType,
-  setPublishMediaType,
-  publishPageId,
-  setPublishPageId,
-  publishAdAccountId,
-  setPublishAdAccountId,
-  metaDailyBudget,
-  setMetaDailyBudget,
-  metaPixelId,
-  setMetaPixelId,
-  metaPixels,
-  metaPixelError,
-  creatives,
-  videos,
-  onCreateJob,
-  onConnectMetaAccount,
-  onRefreshMetaAccounts,
-  onRefreshMetaPixels,
-  onBuildAdCreativeDraft,
-  onBuildAdsPlanDraft,
-  onPrepareMetaAdsPackage,
-  onReview,
-  onPublish,
-  onSyncMetaStatus,
-  onSyncMetaInsights,
-  onActivateMetaAds,
-  onPauseMetaAds,
-  loading,
-}: {
-  publishJobs: PublishJob[];
-  facebookConfig: FacebookPublishConfig | null;
-  metaAccounts: MetaAccount[];
-  selectedMetaAccountId: string;
-  setSelectedMetaAccountId: (value: string) => void;
-  adCreativeDraft: AdCreativeDraft | null;
-  adsPlanDraft: AdsPlanDraft | null;
-  metaAdsDraftResult: MetaAdsDraftCreateResult | null;
-  selectedCampaign: Campaign | null;
-  selectedDraft: CopyDraft | null;
-  publishMessage: string;
-  setPublishMessage: (value: string) => void;
-  publishImageUrl: string;
-  setPublishImageUrl: (value: string) => void;
-  publishVideoAssetId: string;
-  setPublishVideoAssetId: (value: string) => void;
-  publishChannel: PublishChannelKey;
-  setPublishChannel: (value: PublishChannelKey) => void;
-  publishMediaType: PublishMediaType;
-  setPublishMediaType: (value: PublishMediaType) => void;
-  publishPageId: string;
-  setPublishPageId: (value: string) => void;
-  publishAdAccountId: string;
-  setPublishAdAccountId: (value: string) => void;
-  metaDailyBudget: string;
-  setMetaDailyBudget: (value: string) => void;
-  metaPixelId: string;
-  setMetaPixelId: (value: string) => void;
-  metaPixels: AdPixel[];
-  metaPixelError: string;
-  creatives: CreativeAsset[];
-  videos: VideoAsset[];
-  onCreateJob: () => void;
-  onConnectMetaAccount: () => void;
-  onRefreshMetaAccounts: () => void;
-  onRefreshMetaPixels: () => void;
-  onBuildAdCreativeDraft: () => void;
-  onBuildAdsPlanDraft: () => void;
-  onPrepareMetaAdsPackage: (preflightItems: PreflightChecklistItem[]) => void;
-  onReview: (entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") => void;
-  onPublish: (jobId: string) => void;
-  onSyncMetaStatus: (jobId: string) => void;
-  onSyncMetaInsights: (jobId: string) => void;
-  onActivateMetaAds: (jobId: string) => void;
-  onPauseMetaAds: (jobId: string) => void;
-  loading: string | null;
-}) {
-  const [selectedPublishJobId, setSelectedPublishJobId] = useState<string | null>(null);
-  const [publishJobFilter, setPublishJobFilter] = useState<PublishJobFilter>("all");
-  const selectedVideo = videos.find((video) => video.id === publishVideoAssetId) ?? null;
-  const selectedVideoReady = Boolean(selectedVideo && isPublishableVideo(selectedVideo));
-  const selectedPublishableImage = creatives.find((asset) => asset.url === publishImageUrl) ?? null;
-  const selectedMetaAccount = metaAccounts.find((item) => item.id === selectedMetaAccountId) ?? null;
-  const metaIdentityOptions = buildMetaIdentityOptions(metaAccounts, facebookConfig);
-  const selectedMetaIdentityKey = selectedMetaAccount ? metaIdentityKey(selectedMetaAccount) : "";
-  const selectedMetaIdentity =
-    metaIdentityOptions.find((item) => item.key === selectedMetaIdentityKey) ?? null;
-  const selectedPageOption =
-    selectedMetaIdentity?.pages.find((item) => item.id === publishPageId) ?? null;
-  const selectedAdAccountOption =
-    selectedMetaIdentity?.adAccounts.find((item) => item.id === normalizeMetaAdAccountId(publishAdAccountId)) ??
-    null;
-  const identityHealth = metaAccountIdentityHealth(
-    selectedMetaAccount,
-    facebookConfig,
-    publishPageId,
-    publishAdAccountId,
-    selectedPageOption,
-    selectedAdAccountOption,
-  );
-  const identitySummary = metaAccountIdentitySummary(
-    selectedMetaAccount,
-    facebookConfig,
-    selectedPageOption,
-    selectedAdAccountOption,
-    selectedMetaIdentity,
-  );
-  const message = publishMessage || selectedDraft?.primary_text || selectedDraft?.body || "";
-  const accessTokenRef =
-    publishChannel === "facebook_page"
-      ? facebookConfig?.page.access_token_ref
-      : facebookConfig?.ads.access_token_ref;
-  const isPageDryRunMode = facebookConfig?.dry_run ?? true;
-  const isAdsDryRunMode = facebookConfig?.ads.dry_run ?? isPageDryRunMode;
-  const isDryRunMode = publishChannel === "facebook_ad" ? isAdsDryRunMode : isPageDryRunMode;
-  const selectedMetaAccountReady = Boolean(
-    selectedMetaAccount &&
-      publishAdAccountId &&
-      publishPageId &&
-      selectedMetaAccount.access_token_configured,
-  );
-  const activeCredentialReady =
-    publishChannel === "facebook_page"
-      ? Boolean(
-          (selectedMetaAccount && publishPageId && selectedMetaAccount.page_access_token_configured) ||
-            (facebookConfig?.page.id_configured && facebookConfig.page.access_token_configured),
-        )
-      : Boolean(
-          selectedMetaAccountReady ||
-            (facebookConfig?.ads.ad_account_configured && facebookConfig.ads.access_token_configured),
-        );
-  const mediaReady =
-    (publishMediaType === "image" && Boolean(selectedPublishableImage)) ||
-    (publishMediaType === "video" && selectedVideoReady);
-  const credentialReadyForMode = isDryRunMode ? true : activeCredentialReady;
-  const canCreate = Boolean(selectedCampaign && message.trim() && mediaReady && credentialReadyForMode);
-  const metaDailyBudgetValue = parseOptionalInteger(metaDailyBudget);
-  const metaAdsCredentialReady = Boolean(
-    selectedMetaAccountReady ||
-      (facebookConfig?.ads.ad_account_configured &&
-        facebookConfig.ads.access_token_configured &&
-        facebookConfig.page.id_configured),
-  );
-  const canCreateMetaAds = Boolean(
-    selectedCampaign &&
-      selectedDraft &&
-      mediaReady &&
-      metaDailyBudgetValue &&
-      metaAdsCredentialReady,
-  );
-  const filteredPublishJobs = publishJobs.filter(
-    (job) => publishJobFilter === "all" || publishJobBucket(job) === publishJobFilter,
-  );
-  const selectedPublishJob =
-    publishJobs.find((job) => job.id === selectedPublishJobId) ?? filteredPublishJobs[0] ?? publishJobs[0] ?? null;
-  const latestMetaAdsJob =
-    publishJobs
-      .filter((job) => job.campaign_id === selectedCampaign?.id && isMetaAdsPackageJob(job))
-      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0] ?? null;
-  const landingUrl =
-    landingUrlFromCampaign(selectedCampaign) || adCreativeDraft?.destination_url || adsPlanDraft?.destination_url || "";
-  const preflightItems = buildPreflightChecklist({
-    landingUrl,
-    selectedCampaign,
-    selectedDraft,
-    message,
-    publishChannel,
-    publishMediaType,
-    pageId: publishPageId || selectedMetaAccount?.page_id || facebookConfig?.page.id || "",
-    adAccountId: publishAdAccountId || selectedMetaAccount?.ad_account_id || facebookConfig?.ads.ad_account_id || "",
-    mediaReady,
-    selectedImage: selectedPublishableImage,
-    selectedVideo,
-    selectedVideoReady,
-    metaDailyBudgetValue,
-    metaAdsCredentialReady,
-    latestMetaAdsJob,
-    metaAdsDraftResult,
-    isDryRunMode,
-  });
-  const hasBlockingPreflightItems = preflightItems.some((item) => item.status === "error");
-  const canPrepareMetaAdsPackage = canCreateMetaAds && !hasBlockingPreflightItems;
-
-  function handleMetaIdentityChange(identityKey: string) {
-    if (!identityKey) {
-      setSelectedMetaAccountId("");
-      if (facebookConfig?.page.id) setPublishPageId(facebookConfig.page.id);
-      if (facebookConfig?.ads.ad_account_id) {
-        setPublishAdAccountId(normalizeMetaAdAccountId(facebookConfig.ads.ad_account_id));
-      }
-      return;
-    }
-    const identity = metaIdentityOptions.find((item) => item.key === identityKey);
-    const account = identity?.accounts[0];
-    if (!identity || !account) return;
-    setSelectedMetaAccountId(account.id);
-    setPublishPageId(identity.pages[0]?.id || account.page_id || "");
-    setPublishAdAccountId(identity.adAccounts[0]?.id || normalizeMetaAdAccountId(account.ad_account_id) || "");
-  }
-
-  function handleMetaPageChange(pageId: string) {
-    setPublishPageId(pageId);
-  }
-
-  function handleMetaAdAccountChange(adAccountId: string) {
-    const normalizedAdAccountId = normalizeMetaAdAccountId(adAccountId);
-    const option = selectedMetaIdentity?.adAccounts.find((item) => item.id === normalizedAdAccountId);
-    if (option?.accountId) {
-      setSelectedMetaAccountId(option.accountId);
-    }
-    setPublishAdAccountId(normalizedAdAccountId);
-  }
-
-  useEffect(() => {
-    if (!publishJobs.length) {
-      if (selectedPublishJobId) setSelectedPublishJobId(null);
-      return;
-    }
-    if (!selectedPublishJobId || !publishJobs.some((job) => job.id === selectedPublishJobId)) {
-      setSelectedPublishJobId(filteredPublishJobs[0]?.id ?? publishJobs[0].id);
-    }
-  }, [filteredPublishJobs, publishJobs, selectedPublishJobId]);
-
-  const previewPayload = {
-    campaign_id: selectedCampaign?.id ?? null,
-    facebook_account_id: selectedMetaAccountId || null,
-    draft_id: selectedDraft?.id ?? null,
-    channel: publishChannel,
-    payload: {
-      media_type: publishMediaType,
-      page_id: publishPageId || "dry-run-page",
-      ad_account_id: publishAdAccountId || "dry-run-ad-account",
-      message,
-      access_token_ref: accessTokenRef ?? null,
-      ...(publishMediaType === "image" && selectedPublishableImage
-        ? { image_url: selectedPublishableImage.url ?? undefined }
-        : {}),
-      ...(publishMediaType === "video" && publishVideoAssetId
-        ? {
-            video_asset_id: publishVideoAssetId,
-            video_url_preview: selectedVideo?.url ?? null,
-            video_upload_mode: metaVideoId(selectedVideo) ? "meta_video_id" : "local_file",
-          }
-        : {}),
-    },
-  };
-
-  return (
-    <section className="two-column publishing-layout">
-      <section className="panel wide">
-        <div className="panel-header">
-          <div>
-            <h2>创建发布任务</h2>
-            <span className="panel-note">先准备 dry-run payload，不会真实发布到 Meta</span>
-          </div>
-          <button className="primary-button" onClick={onCreateJob} disabled={!canCreate || loading === "publish-create"}>
-            {loading === "publish-create" ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
-            <span>创建任务</span>
-          </button>
-        </div>
-
-        <div className="publish-form">
-          <div className={isDryRunMode ? "meta-config-card dry-run" : "meta-config-card live"}>
+      <section className="video-layout">
+        <section className="panel video-builder-panel">
+          <div className="panel-header video-panel-header">
             <div>
-              <strong>{isDryRunMode ? "当前为 dry-run 模式" : "当前为真实发布模式"}</strong>
-              <span>
-                Graph API {facebookConfig?.graph_api_version ?? "-"} /{" "}
-                {activeCredentialReady ? "当前渠道配置完整" : "当前渠道配置未完整"}
-              </span>
+              <span className="section-eyebrow">SETUP</span>
+              <h2>视频配置</h2>
             </div>
-            <div className="meta-config-grid">
-              <span>App ID：{facebookConfig?.app.app_id_configured ? "已配置" : "未配置"}</span>
-              <span>
-                App Secret：{facebookConfig?.app.app_secret_configured ? "已配置" : "未配置"}
-              </span>
-              <span>Page ID：{facebookConfig?.page.id_configured ? "已配置" : "未配置"}</span>
-              <span>Page Token：{facebookConfig?.page.access_token_configured ? "已配置" : "未配置"}</span>
-              <span>
-                Ad Account：{facebookConfig?.ads.ad_account_configured ? "已配置" : "未配置"}
-              </span>
-              <span>Ad Token：{facebookConfig?.ads.access_token_configured ? "已配置" : "未配置"}</span>
-            </div>
+            <span className="panel-note">最多选择 {VIDEO_MAX_REFERENCE_IMAGES} 张参考图</span>
           </div>
-
-          <div className={`oauth-account-panel identity-card state-${identityHealth.status}`}>
-            <div className="identity-card-head">
-              <div>
-                <strong>Meta 投放身份</strong>
-                <span>{identitySummary.subtitle}</span>
-              </div>
-              <span className={`identity-status state-${identityHealth.status}`}>{identityHealth.label}</span>
-            </div>
-
-            <div className="identity-details-grid">
-              <div>
-                <span>Meta 账号</span>
-                <strong>{identitySummary.accountName}</strong>
-              </div>
-              <div>
-                <span>公共主页 Page</span>
-                <strong>{identitySummary.pageLabel}</strong>
-              </div>
-              <div>
-                <span>广告账户 Ad Account</span>
-                <strong>{identitySummary.adAccountLabel}</strong>
-              </div>
-              <div>
-                <span>Business / BM</span>
-                <strong>{identitySummary.businessLabel}</strong>
-              </div>
-              <div>
-                <span>Token</span>
-                <strong>{identitySummary.tokenLabel}</strong>
-              </div>
-              <div>
-                <span>有效期</span>
-                <strong>{identitySummary.expiryLabel}</strong>
-              </div>
-            </div>
-
-            {identityHealth.notes.length > 0 && (
-              <div className="identity-note-list">
-                {identityHealth.notes.map((note) => (
-                  <span key={note}>{note}</span>
-                ))}
-              </div>
-            )}
-
-            <div className="identity-picker-grid">
-              <label>
-                <span>授权身份</span>
-                <select
-                  className="select publish-select"
-                  value={selectedMetaIdentityKey}
-                  onChange={(event) => handleMetaIdentityChange(event.target.value)}
-                >
-                  <option value="">使用 .env 默认账号 / {metaAccountEnvOptionLabel(facebookConfig)}</option>
-                  {metaIdentityOptions.map((identity) => (
-                    <option key={identity.key} value={identity.key}>
-                      {identity.label} / {identity.subtitle}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                <span>公共主页 Page</span>
-                <select
-                  className="select publish-select"
-                  value={publishPageId}
-                  onChange={(event) => handleMetaPageChange(event.target.value)}
-                  disabled={!selectedMetaIdentity && !facebookConfig?.page.id}
-                >
-                  {!selectedMetaIdentity ? (
-                    <option value={facebookConfig?.page.id ?? ""}>
-                      {facebookConfig?.page.id
-                        ? `使用 .env Page / ${facebookConfig.page.id}`
-                        : "未配置 Page"}
-                    </option>
-                  ) : selectedMetaIdentity.pages.length ? (
-                    selectedMetaIdentity.pages.map((page) => (
-                      <option key={page.id} value={page.id}>
-                        {page.label}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="">未找到可用 Page</option>
-                  )}
-                </select>
-              </label>
-
-              <label>
-                <span>广告账户 Ad Account</span>
-                <select
-                  className="select publish-select"
-                  value={normalizeMetaAdAccountId(publishAdAccountId)}
-                  onChange={(event) => handleMetaAdAccountChange(event.target.value)}
-                  disabled={!selectedMetaIdentity && !facebookConfig?.ads.ad_account_id}
-                >
-                  {!selectedMetaIdentity ? (
-                    <option value={normalizeMetaAdAccountId(facebookConfig?.ads.ad_account_id)}>
-                      {facebookConfig?.ads.ad_account_id
-                        ? `使用 .env Ad Account / ${normalizeMetaAdAccountId(facebookConfig.ads.ad_account_id)}`
-                        : "未配置 Ad Account"}
-                    </option>
-                  ) : selectedMetaIdentity.adAccounts.length ? (
-                    selectedMetaIdentity.adAccounts.map((adAccount) => (
-                      <option key={adAccount.id} value={adAccount.id}>
-                        {adAccount.label}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="">未找到可用 Ad Account</option>
-                  )}
-                </select>
-              </label>
-            </div>
-
-            <div className="oauth-actions identity-actions">
-              <button
-                className="secondary-button"
-                onClick={onRefreshMetaAccounts}
-                disabled={loading === "refresh"}
-              >
-                {loading === "refresh" ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
-                <span>刷新账号资产</span>
-              </button>
-              <button
-                className="secondary-button"
-                onClick={onConnectMetaAccount}
-                disabled={loading === "meta-oauth"}
-              >
-                {loading === "meta-oauth" ? <Loader2 size={16} className="spin" /> : <Megaphone size={16} />}
-                <span>{selectedMetaAccount ? "重新授权" : "连接 Meta 账号"}</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="publish-readiness-grid">
-            <div className={`readiness-item ${selectedCampaign ? "ready" : "missing"}`}>
-              <span>项目</span>
-              <strong>{selectedCampaign?.name || "未选择"}</strong>
-            </div>
-            <div className={`readiness-item ${selectedDraft ? "ready" : "missing"}`}>
-              <span>文案</span>
-              <strong>{selectedDraft ? statusLabel(selectedDraft.status) : "未选择"}</strong>
-            </div>
-            <div className={`readiness-item ${mediaReady ? "ready" : "missing"}`}>
-              <span>素材</span>
-              <strong>{publishMediaTypeLabel(publishMediaType)}</strong>
-            </div>
-            <div className={`readiness-item ${credentialReadyForMode ? "ready" : "missing"}`}>
-              <span>账号</span>
-              <strong>{credentialReadyForMode ? "可创建任务" : "配置不完整"}</strong>
-            </div>
-          </div>
-
-          <PreflightChecklist items={preflightItems} />
-
-          <div className="publish-primary-grid">
-            <div className="publish-main-fields">
-              <div className="publish-section-title">
-                <strong>日常发布信息</strong>
-                <span>选择渠道、素材和正文，确认后再创建任务。</span>
-              </div>
-
-          <div className="publish-controls">
+          <div className="video-config">
             <div className="config-group">
-              <label>发布渠道</label>
-              <div className="segmented-control two">
-                {(["facebook_page", "facebook_ad"] as PublishChannelKey[]).map((value) => (
-                  <button
-                    key={value}
-                    className={publishChannel === value ? "active" : ""}
-                    onClick={() => setPublishChannel(value)}
-                  >
-                    {publishChannelLabel(value)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="config-group">
-              <label>素材类型</label>
+              <label>画面比例</label>
               <div className="segmented-control">
-                {(["image", "video"] as PublishMediaType[]).map((value) => (
+                {["9:16", "1:1", "16:9"].map((value) => (
                   <button
+                    className={aspectRatio === value ? "active" : ""}
                     key={value}
-                    className={publishMediaType === value ? "active" : ""}
-                    onClick={() => setPublishMediaType(value)}
-                    disabled={
-                      (value === "image" && !creatives.length) ||
-                      (value === "video" && !videos.length)
-                    }
+                    type="button"
+                    disabled={storyboardStreaming}
+                    onClick={() => setAspectRatio(value)}
                   >
-                    {publishMediaTypeLabel(value)}
+                    {value}
                   </button>
                 ))}
               </div>
             </div>
-          </div>
-
-          <div className="publish-controls">
-            {publishChannel === "facebook_page" ? (
-              <div className="config-group">
-                <label>Page ID</label>
+            <div className="config-group">
+              <label htmlFor="video-duration">视频时长</label>
+              <div className="duration-control">
                 <input
-                  className="text-field"
-                  value={publishPageId}
-                  onChange={(event) => setPublishPageId(event.target.value)}
-                  placeholder="例如：1234567890"
+                  id="video-duration"
+                  className="input"
+                  type="number"
+                  min={4}
+                  max={12}
+                  value={durationSeconds}
+                  disabled={storyboardStreaming}
+                  onChange={(event) => setDurationSeconds(Number(event.target.value))}
                 />
-              </div>
-            ) : (
-              <div className="config-group">
-                <label>Ad Account ID</label>
-                <input
-                  className="text-field"
-                  value={publishAdAccountId}
-                  onChange={(event) => setPublishAdAccountId(event.target.value)}
-                  placeholder="例如：act_1234567890"
-                />
-              </div>
-            )}
-
-            {publishMediaType === "image" && (
-              <div className="config-group">
-                <label>图片素材</label>
-                <select
-                  className="select publish-select"
-                  value={publishImageUrl}
-                  onChange={(event) => setPublishImageUrl(event.target.value)}
-                >
-                  <option value="">请选择图片</option>
-                  {creatives.map((asset) => (
-                    <option key={asset.id} value={asset.url ?? ""}>
-                      {imageOptionLabel(asset)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {publishMediaType === "video" && (
-              <div className="config-group">
-                <label>视频素材</label>
-                <select
-                  className="select publish-select"
-                  value={publishVideoAssetId}
-                  onChange={(event) => setPublishVideoAssetId(event.target.value)}
-                >
-                  <option value="">请选择视频</option>
-                  {videos.map((video) => (
-                    <option key={video.id} value={video.id}>
-                      {videoOptionLabel(video)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-          </div>
-
-          <textarea
-            className="publish-input compact"
-            value={publishMessage}
-            onChange={(event) => setPublishMessage(event.target.value)}
-            placeholder="发布文案"
-          />
-
-          {publishMediaType === "video" && selectedVideo && (
-            <div className="publish-media-summary">
-              <Film size={16} />
-              <div>
-                <strong>{videoOptionLabel(selectedVideo)}</strong>
-                {selectedVideo.url && (
-                  <a className="asset-url" href={selectedVideo.url} target="_blank" rel="noreferrer">
-                    打开视频 URL
-                  </a>
-                )}
+                <span>秒</span>
               </div>
             </div>
-          )}
-
-            </div>
-
-            <div className="publish-meta-action-card">
-              <div className="publish-section-title">
-                <strong>Meta 投流包准备</strong>
-                <span>预算与 Pixel 确认后，生成待人工审核的投流包。</span>
+            <div className="config-group full">
+              <div className="config-label-row">
+                <label>参考图片</label>
+                <span className="field-hint">已审核通过的图片</span>
               </div>
-              <div className="meta-create-fields">
-                <div className="publish-controls">
-                  <div className="config-group">
-                    <label>Meta daily_budget</label>
-                    <input
-                      className="text-field"
-                      value={metaDailyBudget}
-                      onChange={(event) => setMetaDailyBudget(event.target.value.replace(/\D/g, ""))}
-                      placeholder="例如：100"
-                    />
-                    <span className="field-hint">按 Meta 广告账户最小货币单位填写，最终创建状态固定为 PAUSED。</span>
-                  </div>
-                  <div className="config-group">
-                    <label>Pixel ID（可选）</label>
-                    <div className="pixel-picker-row">
-                      <select
-                        className="select publish-select"
-                        value={metaPixels.some((pixel) => pixel.id === metaPixelId) ? metaPixelId : ""}
-                        onChange={(event) => setMetaPixelId(event.target.value)}
-                      >
-                        <option value="">
-                          {metaPixels.length ? "手动输入或不使用 Pixel" : "未选择 Pixel"}
-                        </option>
-                        {metaPixels.map((pixel) => (
-                          <option key={pixel.id} value={pixel.id}>
-                            {pixelOptionLabel(pixel)}
-                          </option>
-                        ))}
-                      </select>
+              {approvedCreatives.length ? (
+                <div className="source-asset-list video-source-list">
+                  {approvedCreatives.map((asset) => {
+                    const active = selectedCreativeIds.includes(asset.id);
+                    return (
                       <button
-                        className="secondary-button icon-compact"
-                        onClick={onRefreshMetaPixels}
-                        disabled={loading === "meta-pixels"}
-                        title="刷新 Pixel"
+                        className={`list-check ${active ? "active" : ""}`}
+                        key={asset.id}
+                        type="button"
+                        disabled={storyboardStreaming}
+                        onClick={() => {
+                          setSelectedCreativeIds(
+                            active
+                              ? selectedCreativeIds.filter((id) => id !== asset.id)
+                              : [...selectedCreativeIds, asset.id].slice(0, VIDEO_MAX_REFERENCE_IMAGES),
+                          );
+                        }}
                       >
-                        {loading === "meta-pixels" ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+                        <Image size={16} />
+                        <span>{shortId(asset.id)}</span>
+                        <StatusPill status={asset.status} />
                       </button>
-                    </div>
-                    <input
-                      className="text-field"
-                      value={metaPixelId}
-                      onChange={(event) => setMetaPixelId(event.target.value.replace(/\D/g, ""))}
-                      placeholder="也可以手动输入 Pixel ID，例如：1234567890"
-                    />
-                    {metaPixelError && <span className="field-hint warning-text">Pixel 自动获取失败：{metaPixelError}</span>}
-                    <span className="field-hint">不填写则按流量/链接点击创建；选择或填写后购物事件可映射为 PURCHASE 转化。</span>
-                  </div>
+                    );
+                  })}
                 </div>
-                {!metaAdsCredentialReady && (
-                  <div className="inline-warning">
-                    需要完整配置 Page ID、Ad Account ID 和 Ad Token 后才能准备投流包。
-                  </div>
-                )}
-                <button
-                  className="primary-button publish-meta-action"
-                  onClick={() => onPrepareMetaAdsPackage(preflightItems)}
-                  disabled={!canPrepareMetaAdsPackage || loading === "meta-ads-prepare"}
-                >
-                  {loading === "meta-ads-prepare" ? <Loader2 size={16} className="spin" /> : <Megaphone size={16} />}
-                  <span>准备待审核投流包</span>
-                </button>
-                {metaAdsDraftResult && (
-                  <div className="meta-result">
-                    <div className="ad-creative-fields compact">
-                      <div>
-                        <span>状态</span>
-                        <strong>{statusLabel(metaAdsDraftResult.status)}</strong>
-                      </div>
-                      <div>
-                        <span>模式</span>
-                        <strong>{metaAdsDraftResult.dry_run ? "dry-run" : "真实创建"}</strong>
-                      </div>
-                      <div>
-                        <span>Campaign ID</span>
-                        <strong>{metaAdsDraftResult.meta_campaign_id || "-"}</strong>
-                      </div>
-                      <div>
-                        <span>Ad ID</span>
-                        <strong>{metaAdsDraftResult.meta_ad_id || "-"}</strong>
-                      </div>
-                    </div>
-                    {metaAdsDraftResult.error_message && (
-                      <div className="inline-error">{metaAdsDraftResult.error_message}</div>
-                    )}
-                    <JsonDetails title="查看返回 ID" value={metaAdsDraftResult.ids} />
-                  </div>
-                )}
-              </div>
+              ) : (
+                <div className="video-inline-empty">暂无审核通过的图片</div>
+              )}
+            </div>
+            <div className="config-group full">
+              <label htmlFor="video-instructions">风格与镜头要求</label>
+              <textarea
+                id="video-instructions"
+                className="video-instructions"
+                value={instructions}
+                onChange={(event) => setInstructions(event.target.value)}
+                disabled={storyboardStreaming}
+                placeholder="视频风格或镜头要求"
+              />
+            </div>
+            <div className="video-action-bar">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onGenerateStoryboard}
+                disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
+              >
+                {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                <span>生成分镜脚本</span>
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={onCreateVideo}
+                disabled={
+                  !storyboardText.trim() ||
+                  loading === "video" ||
+                  loading === "video-storyboard" ||
+                  loading === "video-storyboard-rewrite"
+                }
+              >
+                <Film size={16} />
+                <span>确认脚本并生成视频</span>
+              </button>
             </div>
           </div>
-
-          <details className="advanced-publish-details">
+          <details className="storyboard-editor-details video-storyboard-editor" open>
             <summary>
-              <span>高级配置与调试</span>
-              <small>字段映射、投放草稿、dry-run payload</small>
+              <span>视频脚本</span>
+              <small>
+                {loading === "video-storyboard"
+                  ? "生成中"
+                  : loading === "video-storyboard-rewrite"
+                    ? "改写中"
+                    : storyboardText.trim()
+                      ? "可编辑"
+                      : "未生成"}
+              </small>
             </summary>
-            <div className="advanced-publish-body">
-          <div className="payload-preview">
-            <div className="payload-preview-head">
-              <h3>广告创意字段映射</h3>
-              <button
-                className="secondary-button"
-                onClick={onBuildAdCreativeDraft}
-                disabled={!selectedCampaign || !selectedDraft || loading === "ad-creative-draft"}
-              >
-                {loading === "ad-creative-draft" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                <span>生成草稿</span>
-              </button>
-            </div>
-            {adCreativeDraft ? (
-              <div className="ad-creative-fields">
-                <div>
-                  <span>目标位置 / 网站</span>
-                  <strong>{adCreativeDraft.destination_url || "-"}</strong>
-                </div>
-                <div>
-                  <span>广告标题 / 选题</span>
-                  <strong>{adCreativeDraft.headline}</strong>
-                </div>
-                <div>
-                  <span>正文 / 文案</span>
-                  <p>{adCreativeDraft.primary_text || "-"}</p>
-                </div>
-                <div>
-                  <span>素材</span>
-                  <strong>
-                    {publishMediaTypeLabel(adCreativeDraft.media_type)}{" "}
-                    {adCreativeDraft.facebook_video_id ? `/ Meta Video ${adCreativeDraft.facebook_video_id}` : ""}
-                  </strong>
-                </div>
-                <JsonDetails title="查看 Meta payload" value={adCreativeDraft.meta_payload} />
+            <textarea
+              className="storyboard-input"
+              value={storyboardText}
+              onChange={(event) => setStoryboardText(event.target.value)}
+              disabled={storyboardStreaming}
+              placeholder="暂无脚本内容"
+            />
+            <div className="storyboard-rewrite-box">
+              <label htmlFor="video-storyboard-feedback">脚本修改意见</label>
+              <textarea
+                id="video-storyboard-feedback"
+                className="storyboard-feedback-input"
+                value={storyboardFeedback}
+                onChange={(event) => setStoryboardFeedback(event.target.value)}
+                disabled={storyboardStreaming}
+                placeholder="例如：第一幕更强钩子，字幕更短，不要旁白，第三幕改成产品使用场景"
+              />
+              <div className="storyboard-rewrite-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={onRewriteStoryboard}
+                  disabled={
+                    !storyboardText.trim() ||
+                    !storyboardFeedback.trim() ||
+                    loading === "video-storyboard" ||
+                    loading === "video-storyboard-rewrite"
+                  }
+                >
+                  {loading === "video-storyboard-rewrite" ? (
+                    <Loader2 size={16} className="spin" />
+                  ) : (
+                    <Sparkles size={16} />
+                  )}
+                  <span>按意见改写脚本</span>
+                </button>
               </div>
-            ) : (
-              <div className="field-hint padded">
-                这里会把工单链接填到“网站”，选题填到“广告标题”，文案填到“正文”。
-              </div>
-            )}
-          </div>
-
-          <div className="payload-preview">
-            <div className="payload-preview-head">
-              <h3>投放计划草稿</h3>
-              <button
-                className="secondary-button"
-                onClick={onBuildAdsPlanDraft}
-                disabled={!selectedCampaign || !selectedDraft || loading === "ads-plan-draft"}
-              >
-                {loading === "ads-plan-draft" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                <span>生成投放草稿</span>
-              </button>
-            </div>
-            {adsPlanDraft ? (
-              <div className="ads-plan-fields">
-                <div className="ad-creative-fields compact">
-                  <div>
-                    <span>国家 / 年龄 / 性别</span>
-                    <strong>
-                      {stringifyValue(adsPlanDraft.targeting_summary.country_code ?? "-")} /{" "}
-                      {stringifyValue(adsPlanDraft.targeting_summary.age_label ?? "-")} /{" "}
-                      {stringifyValue(adsPlanDraft.targeting_summary.gender_label ?? "-")}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>事件 / 目标</span>
-                    <strong>
-                      {stringifyValue(adsPlanDraft.targeting_summary.event_name ?? "-")} /{" "}
-                      {stringifyValue(adsPlanDraft.targeting_summary.mapped_objective ?? "-")}
-                    </strong>
-                  </div>
-                </div>
-                {adsPlanDraft.warnings.length > 0 && (
-                  <div className="inline-warning">
-                    {adsPlanDraft.warnings.map((warning) => (
-                      <div key={warning}>{warning}</div>
-                    ))}
-                  </div>
-                )}
-                <div className="ads-plan-grid">
-                  <div>
-                    <strong>Campaign</strong>
-                    <JsonBlock value={adsPlanDraft.campaign_payload} />
-                  </div>
-                  <div>
-                    <strong>Ad Set</strong>
-                    <JsonBlock value={adsPlanDraft.adset_payload} />
-                  </div>
-                  <div>
-                    <strong>Ad</strong>
-                    <JsonBlock value={adsPlanDraft.ad_payload} />
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="field-hint padded">
-                这里会根据工单国家、人群、事件和已选创意，生成 Campaign / Ad Set / Ad 的 dry-run 草稿。
-              </div>
-            )}
-          </div>
-
-          <div className="payload-preview">
-            <div className="payload-preview-head">
-              <h3>dry-run payload 预览</h3>
-              <span>点击创建任务后，后端会补全 video_url 和 Meta endpoint</span>
-            </div>
-            <JsonDetails title="查看 dry-run payload" value={previewPayload} />
-          </div>
             </div>
           </details>
-        </div>
-      </section>
-
-      <section className="publishing-board">
-        <section className="panel publish-task-panel">
-          <div className="panel-header publish-task-header">
-            <div>
-              <h2>投流任务</h2>
-              <span className="panel-note">列表只显示运营判断需要的信息，原始数据在右侧详情查看</span>
-            </div>
-            <div className="task-filter-tabs">
-              {(["all", "review", "published", "active", "paused", "issue"] as PublishJobFilter[]).map((filter) => (
-                <button
-                  key={filter}
-                  className={publishJobFilter === filter ? "active" : ""}
-                  onClick={() => setPublishJobFilter(filter)}
-                >
-                  {publishJobFilterLabel(filter)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <DataList emptyText="暂无发布任务">
-            {filteredPublishJobs.map((job) => (
-              <PublishJobCard
-                key={job.id}
-                job={job}
-                selected={selectedPublishJob?.id === job.id}
-                loading={loading}
-                onSelect={() => setSelectedPublishJobId(job.id)}
-                onReview={onReview}
-                onPublish={onPublish}
-                onSyncMetaStatus={onSyncMetaStatus}
-                onSyncMetaInsights={onSyncMetaInsights}
-                onActivateMetaAds={onActivateMetaAds}
-                onPauseMetaAds={onPauseMetaAds}
-              />
-            ))}
-          </DataList>
         </section>
 
-        <PublishJobDetailPanel job={selectedPublishJob} />
+        <section className="video-side-stack">
+          <section className="panel video-ad-preview-panel">
+            <div className="panel-header video-panel-header">
+              <div>
+                <span className="section-eyebrow">AD PREVIEW</span>
+                <h2>广告预览</h2>
+              </div>
+              <span className="panel-note">
+                {selectedVideo ? `当前任务 ${shortId(selectedVideo.id)}` : "等待视频任务"}
+              </span>
+            </div>
+            <div className="facebook-preview-shell video-ad-preview-shell">
+              <div className="facebook-preview-card video-ad-preview-card">
+                <div className="facebook-preview-head">
+                  <div className="facebook-page-avatar">AD</div>
+                  <div>
+                    <strong>{campaign?.name || "Campaign"}</strong>
+                    <span>Sponsored</span>
+                  </div>
+                </div>
+                <pre className="facebook-preview-text">{previewText}</pre>
+                {selectedVideo?.url ? (
+                  <div className={`video-ad-preview-media ${previewAspectClass}`}>
+                    <video controls muted playsInline src={selectedVideo.url} />
+                  </div>
+                ) : (
+                  <div
+                    className={`facebook-preview-empty video-ad-preview-empty ${previewAspectClass} ${
+                      previewVideoGenerating ? "generating" : selectedVideo?.status === "failed" ? "failed" : ""
+                    }`}
+                  >
+                    {previewVideoGenerating ? (
+                      <Loader2 size={28} className="spin" />
+                    ) : selectedVideo?.status === "failed" ? (
+                      <X size={28} />
+                    ) : (
+                      <Film size={28} />
+                    )}
+                    <strong>{previewEmptyTitle}</strong>
+                    <span>{previewEmptyHint}</span>
+                    {previewSourceCreatives.length > 0 && (
+                      <div className="video-ad-preview-sources" aria-label="视频参考图">
+                        {previewSourceCreatives.map((asset, index) => (
+                          <img
+                            key={asset.id}
+                            src={asset.url || ""}
+                            alt={asset.alt_text || `参考图 ${index + 1}`}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="facebook-preview-footer">
+                  <div>
+                    <span>{domainFromUrl(landingUrl) || "landing page"}</span>
+                    <strong>{previewHeadline}</strong>
+                    <p>{previewDescription}</p>
+                  </div>
+                  <button type="button">{previewCta}</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel wide video-review-panel">
+          <div className="panel-header video-panel-header">
+            <div>
+              <span className="section-eyebrow">QUEUE</span>
+              <h2>视频审核</h2>
+            </div>
+            <span className="panel-note">{videos.length ? `${videos.length} 个任务` : "暂无任务"}</span>
+          </div>
+          {videos.length ? (
+            <div className="video-task-stack">
+              {videos.map((video) => {
+                const selected = selectedVideo?.id === video.id;
+                const isStarting = loading === `video-generate-${video.id}`;
+                const isGenerating = isStarting || isVideoGeneratingStatus(video.status);
+                const canReview = video.status === "generated" && Boolean(video.url);
+                const canRetryGeneration = ["requested", "failed", "needs_revision"].includes(video.status);
+                return (
+                  <article className={`video-card ${selected ? "selected" : ""}`} key={video.id}>
+                    <div className="video-card-head">
+                      <div>
+                        <span>视频任务 {shortId(video.id)}</span>
+                        <strong>{video.aspect_ratio} / {video.duration_seconds || "-"} 秒</strong>
+                      </div>
+                      <StatusPill status={video.status} />
+                    </div>
+                    {video.url ? (
+                      <VideoPreview url={video.url} />
+                    ) : (
+                      <div className={`video-preview-placeholder ${isGenerating ? "generating" : video.status === "failed" ? "failed" : ""}`}>
+                        {isGenerating ? <Loader2 size={22} className="spin" /> : video.status === "failed" ? <X size={22} /> : <Film size={22} />}
+                        <strong>
+                          {isGenerating
+                            ? "正在生成成片"
+                            : video.status === "failed"
+                              ? "生成失败"
+                              : video.status === "requested"
+                                ? "任务待提交"
+                                : "等待生成成片"}
+                        </strong>
+                        <span>
+                          {isGenerating
+                            ? `已等待 ${formatDuration(videoWaitSeconds(video))}，完成后会自动显示预览`
+                            : video.provider_job_id
+                              ? `任务号 ${video.provider_job_id}`
+                              : video.status === "requested"
+                                ? "自动提交未完成，可重试生成"
+                                : "确认脚本后会自动提交生成"}
+                        </span>
+                      </div>
+                    )}
+                    <div className="video-task-summary">
+                      <div>
+                        <span>比例</span>
+                        <strong>{video.aspect_ratio}</strong>
+                      </div>
+                      <div>
+                        <span>时长</span>
+                        <strong>{video.duration_seconds || "-"} 秒</strong>
+                      </div>
+                      <div>
+                        <span>来源图片</span>
+                        <strong>{video.source_asset_ids.length || "-"} 张</strong>
+                      </div>
+                    </div>
+                    {video.error_message && <p className="video-error-text">{video.error_message}</p>}
+                    <div className="video-task-actions">
+                      {selected ? (
+                        <div className="video-selection-indicator">
+                          <Check size={16} />
+                          <span>当前预览</span>
+                        </div>
+                      ) : (
+                        <button className="secondary-button" type="button" onClick={() => setSelectedVideoId(video.id)}>
+                          <Check size={16} />
+                          <span>设为当前</span>
+                        </button>
+                      )}
+                      {isGenerating && (
+                        <button className="secondary-button" type="button" disabled>
+                          <Loader2 size={16} className="spin" />
+                          <span>生成中</span>
+                        </button>
+                      )}
+                      {!isGenerating && canRetryGeneration && (
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => onStartGeneration(video.id)}
+                          disabled={isStarting}
+                        >
+                          {isStarting ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                          <span>重试生成</span>
+                        </button>
+                      )}
+                      {canReview && (
+                        <>
+                          <button
+                            className="primary-button"
+                            type="button"
+                            onClick={() => onReview("video_asset", video.id, "approved")}
+                          >
+                            <Check size={16} />
+                            <span>通过</span>
+                          </button>
+                          <button
+                            className="secondary-button danger"
+                            type="button"
+                            onClick={() => onReview("video_asset", video.id, "rejected")}
+                          >
+                            <X size={16} />
+                            <span>拒绝</span>
+                          </button>
+                        </>
+                      )}
+                      {video.status === "approved" && (
+                        <div className="review-complete video-review-complete">
+                          <Check size={16} />
+                          <span>视频已通过</span>
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="video-empty-state">
+              <Film size={26} />
+              <strong>暂无视频任务</strong>
+              <span>等待创建</span>
+            </div>
+          )}
+          </section>
+        </section>
       </section>
-    </section>
-  );
-}
-
-function PublishJobCard({
-  job,
-  selected,
-  loading,
-  onSelect,
-  onReview,
-  onPublish,
-  onSyncMetaStatus,
-  onSyncMetaInsights,
-  onActivateMetaAds,
-  onPauseMetaAds,
-}: {
-  job: PublishJob;
-  selected: boolean;
-  loading: string | null;
-  onSelect: () => void;
-  onReview: (entityType: string, entityId: string, decision: "approved" | "rejected" | "needs_revision") => void;
-  onPublish: (jobId: string) => void;
-  onSyncMetaStatus: (jobId: string) => void;
-  onSyncMetaInsights: (jobId: string) => void;
-  onActivateMetaAds: (jobId: string) => void;
-  onPauseMetaAds: (jobId: string) => void;
-}) {
-  const isMetaPackage = isMetaAdsPackageJob(job);
-  const reviewStatus = publishJobReviewStatus(job);
-  const activationStatus = publishJobActivationStatus(job);
-  const metaReviewStatus = publishJobMetaReviewStatus(job);
-  const insightSummary = publishJobInsightSummary(job);
-  const isPausedDelivery = ["paused", "meta_paused"].includes(activationStatus);
-  const canActivateMetaAds = isMetaPackage && job.status === "published" && isPausedDelivery;
-  const canPauseMetaAds =
-    isMetaPackage && job.status === "published" && !isPausedDelivery && activationStatus !== "archived";
-
-  return (
-    <article className={`publish-item publish-card ${selected ? "active" : ""}`} onClick={onSelect}>
-      <div className="item-head">
-        <div className="publish-card-title">
-          <strong>{publishJobTitle(job)}</strong>
-          <span>{job.external_id || job.id}</span>
-        </div>
-        <div className="button-row">
-          {isMetaPackage && <StatusPill status={reviewStatus} />}
-          {isMetaPackage && <StatusPill status={metaReviewStatus} />}
-          {isMetaPackage && <StatusPill status={activationStatus} />}
-          <StatusPill status={job.status} />
-        </div>
-      </div>
-
-      <div className="publish-card-meta">
-        <span>广告组：{publishJobAdsetName(job) || "-"}</span>
-        <span>最近同步：{publishJobLastSync(job) || "-"}</span>
-      </div>
-
-      {insightSummary ? <MetaInsightStrip summary={insightSummary} /> : <EmptyInsightStrip />}
-
-      {isMetaPackage ? (
-        <div className="button-row publish-card-actions">
-          {reviewStatus !== "approved" && job.status !== "cancelled" && (
-            <>
-              <button
-                className="secondary-button"
-                onClick={() => onReview("publish_job", job.id, "approved")}
-                disabled={loading?.startsWith("review-publish_job")}
-              >
-                <Check size={16} />
-                <span>审核通过</span>
-              </button>
-              <button
-                className="secondary-button danger"
-                onClick={() => onReview("publish_job", job.id, "rejected")}
-                disabled={loading?.startsWith("review-publish_job")}
-              >
-                <X size={16} />
-                <span>拒绝</span>
-              </button>
-            </>
-          )}
-          <button
-            className="primary-button"
-            onClick={() => onPublish(job.id)}
-            disabled={reviewStatus !== "approved" || loading === "publish" || job.status === "published"}
-          >
-            <Send size={16} />
-            <span>一键发布</span>
-          </button>
-          {job.status === "published" && (
-            <>
-              <button
-                className="secondary-button"
-                onClick={() => onSyncMetaInsights(job.id)}
-                disabled={loading === `meta-insights-${job.id}`}
-              >
-                {loading === `meta-insights-${job.id}` ? (
-                  <Loader2 size={16} className="spin" />
-                ) : (
-                  <BarChart3 size={16} />
-                )}
-                <span>同步数据</span>
-              </button>
-              <button
-                className="secondary-button"
-                onClick={() => onSyncMetaStatus(job.id)}
-                disabled={loading === `meta-status-${job.id}`}
-              >
-                {loading === `meta-status-${job.id}` ? (
-                  <Loader2 size={16} className="spin" />
-                ) : (
-                  <RefreshCw size={16} />
-                )}
-                <span>同步状态</span>
-              </button>
-            </>
-          )}
-          {canActivateMetaAds && (
-            <button
-              className="secondary-button danger"
-              onClick={() => onActivateMetaAds(job.id)}
-              disabled={loading === "meta-ads-activate"}
-            >
-              <Megaphone size={16} />
-              <span>启用投放</span>
-            </button>
-          )}
-          {canPauseMetaAds && (
-            <button
-              className="secondary-button danger"
-              onClick={() => onPauseMetaAds(job.id)}
-              disabled={loading === "meta-ads-pause"}
-            >
-              <Pause size={16} />
-              <span>暂停投放</span>
-            </button>
-          )}
-          <button className="secondary-button" onClick={onSelect}>
-            <FileText size={16} />
-            <span>查看详情</span>
-          </button>
-        </div>
-      ) : (
-        <div className="button-row publish-card-actions">
-          <button className="secondary-button" onClick={() => onPublish(job.id)} disabled={loading === "publish"}>
-            <Send size={16} />
-            <span>dry-run 发布</span>
-          </button>
-          <button className="secondary-button" onClick={onSelect}>
-            <FileText size={16} />
-            <span>查看详情</span>
-          </button>
-        </div>
-      )}
-    </article>
-  );
-}
-
-function PublishJobDetailPanel({ job }: { job: PublishJob | null }) {
-  if (!job) {
-    return (
-      <aside className="panel publish-detail-panel">
-        <div className="panel-header">
-          <h2>任务详情</h2>
-        </div>
-        <EmptyState text="选择一条发布任务查看详情" />
-      </aside>
-    );
-  }
-
-  const isMetaPackage = isMetaAdsPackageJob(job);
-  const insightSummary = publishJobInsightSummary(job);
-  const metaStatus = isRecord(job.metadata_json.meta_status) ? job.metadata_json.meta_status : null;
-  const metaInsights = isRecord(job.metadata_json.meta_insights) ? job.metadata_json.meta_insights : null;
-  const ids = publishJobMetaIds(job);
-
-  return (
-    <aside className="panel publish-detail-panel">
-      <div className="panel-header">
-        <div>
-          <h2>任务详情</h2>
-          <span className="panel-note">{publishJobTitle(job)}</span>
-        </div>
-      </div>
-      <div className="publish-detail-body">
-        <div className="button-row">
-          {isMetaPackage && <StatusPill status={publishJobReviewStatus(job)} />}
-          {isMetaPackage && <StatusPill status={publishJobMetaReviewStatus(job)} />}
-          {isMetaPackage && <StatusPill status={publishJobActivationStatus(job)} />}
-          <StatusPill status={job.status} />
-        </div>
-
-        {insightSummary && <MetaInsightSummary summary={insightSummary} />}
-
-        <KeyValueTable
-          data={{
-            任务ID: job.id,
-            ExternalID: job.external_id,
-            CampaignID: ids.campaign_id,
-            AdSetID: ids.adset_id,
-            AdID: ids.ad_id,
-            广告组: publishJobAdsetName(job),
-            最近同步: publishJobLastSync(job),
-          }}
-        />
-
-        {typeof job.payload.video_url === "string" && (
-          <a className="asset-url" href={job.payload.video_url} target="_blank" rel="noreferrer">
-            打开视频 URL
-          </a>
-        )}
-
-        <JsonDetails title="任务 payload" value={job.payload.meta_request ?? job.payload.plan ?? job.payload} />
-        {metaInsights && <JsonDetails title="Meta 广告数据" value={metaInsights} />}
-        {metaStatus && <JsonDetails title="Meta 状态" value={metaStatus} />}
-      </div>
-    </aside>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  accent,
-  hint,
-  icon: Icon,
-}: {
-  label: string;
-  value: number;
-  accent: string;
-  hint: string;
-  icon: typeof BarChart3;
-}) {
-  return (
-    <div className={`metric ${accent}`}>
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-        <small>{hint}</small>
-      </div>
-      <div className="metric-icon">
-        <Icon size={20} />
-      </div>
-    </div>
-  );
-}
-
-function StepButton({
-  index,
-  label,
-  onClick,
-  disabled,
-}: {
-  index: number;
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button className="step-button" onClick={onClick} disabled={disabled}>
-      <span>{index}</span>
-      <strong>{label}</strong>
-    </button>
-  );
-}
-
-function NextStep({
-  title,
-  actionLabel,
-  onAction,
-  loading,
-}: {
-  title: string;
-  actionLabel: string;
-  onAction: () => void;
-  loading: boolean;
-}) {
-  return (
-    <section className="next-step">
-      <strong>{title}</strong>
-      <button className="primary-button" onClick={onAction} disabled={loading}>
-        {loading ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
-        <span>{actionLabel}</span>
-      </button>
     </section>
   );
 }
@@ -4040,123 +3493,41 @@ function DeliveryConfirmDialog({
   onCancel: () => void;
 }) {
   if (!open || !extraction) return null;
-  const fields = extraction.fields;
-
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="confirm-dialog delivery-confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="delivery-confirm-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="confirm-icon">
-          <Sparkles size={22} />
+    <div className="modal-backdrop">
+      <section className="modal-card delivery-dialog">
+        <div className="modal-head">
+          <h2>确认投放参数</h2>
+          <button className="icon-button" onClick={onCancel}>
+            <X size={18} />
+          </button>
         </div>
-        <div className="confirm-body">
-          <h2 id="delivery-confirm-title">确认投放信息</h2>
-          <p>缺失和建议值需要人工确认后再保存。</p>
-
-          <div className="delivery-confirm-form">
-            <div className="config-group full">
-              <label>
-                落地页链接 <span className="required-mark">必填</span>
-              </label>
-              <input
-                className="text-field"
-                value={form.landing_url}
-                onChange={(event) => onChange("landing_url", event.target.value)}
-                placeholder="https://example.com/page"
-                autoComplete="off"
-              />
-              <DeliveryFieldMeta field={fields.landing_url} />
-              <DeliveryCandidates
-                values={fields.landing_url.candidates}
-                onSelect={(value) => onChange("landing_url", value)}
-              />
-            </div>
-
-            <div className="delivery-confirm-grid">
-              <div className="config-group">
-                <label>投放事件</label>
-                <select
-                  className="select delivery-select"
-                  value={form.event_name}
-                  onChange={(event) => onChange("event_name", event.target.value)}
-                >
+        <div className="delivery-grid">
+          {(["landing_url", "event_name", "country", "age_min", "age_max", "gender", "audience_description_raw"] as Array<
+            keyof ReviewedDeliveryFields
+          >).map((key) => (
+            <label key={key}>
+              <span>{deliveryFieldLabel(key)}</span>
+              {key === "event_name" ? (
+                <select className="select" value={form[key]} onChange={(event) => onChange(key, event.target.value)}>
                   {DELIVERY_EVENT_OPTIONS.map((option) => (
-                    <option value={option} key={option}>
-                      {option}
-                    </option>
+                    <option value={option} key={option}>{option}</option>
                   ))}
                 </select>
-                <DeliveryFieldMeta field={fields.event_name} />
-              </div>
-
-              <div className="config-group">
-                <label>
-                  投放国家 <span className="required-mark">必填</span>
-                </label>
-                <input
-                  className="text-field"
-                  value={form.country}
-                  onChange={(event) => onChange("country", event.target.value)}
-                  placeholder="例如：印度 / IN"
-                  autoComplete="off"
-                />
-                <DeliveryFieldMeta field={fields.country} />
-                <DeliveryCandidates
-                  values={fields.country.candidates}
-                  onSelect={(value) => onChange("country", value)}
-                />
-              </div>
-
-              <div className="config-group">
-                <label>年龄</label>
-                <div className="age-range-row">
-                  <input
-                    className="text-field"
-                    value={form.age_min}
-                    onChange={(event) => onChange("age_min", event.target.value.replace(/\D/g, ""))}
-                    placeholder="不限"
-                    inputMode="numeric"
-                  />
-                  <span>到</span>
-                  <input
-                    className="text-field"
-                    value={form.age_max}
-                    onChange={(event) => onChange("age_max", event.target.value.replace(/\D/g, ""))}
-                    placeholder="不限"
-                    inputMode="numeric"
-                  />
-                </div>
-                <DeliveryFieldMeta field={fields.age_min} fallbackField={fields.age_max} />
-              </div>
-
-              <div className="config-group">
-                <label>性别</label>
-                <select
-                  className="select delivery-select"
-                  value={form.gender}
-                  onChange={(event) => onChange("gender", event.target.value)}
-                >
-                  <option value="不限">不限</option>
-                  <option value="男">男</option>
-                  <option value="女">女</option>
-                </select>
-                <DeliveryFieldMeta field={fields.gender} />
-              </div>
-            </div>
-          </div>
+              ) : key === "country" ? (
+                <CountryField value={form.country} onChange={(value) => onChange("country", value)} />
+              ) : (
+                <input className="input" value={form[key]} onChange={(event) => onChange(key, event.target.value)} />
+              )}
+              <small>{deliveryExtractionHint(extraction, key)}</small>
+            </label>
+          ))}
         </div>
-        <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} disabled={loading}>
-            取消
-          </button>
+        <div className="button-row modal-actions">
+          <button className="secondary-button" onClick={onCancel}>取消</button>
           <button className="primary-button" onClick={onConfirm} disabled={loading}>
             {loading ? <Loader2 size={16} className="spin" /> : <Check size={16} />}
-            <span>确认创建</span>
+            <span>创建 AI 工单</span>
           </button>
         </div>
       </section>
@@ -4164,452 +3535,114 @@ function DeliveryConfirmDialog({
   );
 }
 
-function DeliveryFieldMeta({
-  field,
-  fallbackField,
-}: {
-  field: WorkOrderDeliveryField;
-  fallbackField?: WorkOrderDeliveryField;
-}) {
-  const reason = field.reason || fallbackField?.reason;
+function CountryField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const option = countryOptionForValue(value);
+  const selectValue = option?.value ?? "__other__";
+  const isOther = !option;
+
   return (
-    <div className="delivery-field-meta">
-      <span className={`delivery-status ${field.status}`}>{deliveryStatusLabel(field.status)}</span>
-      {reason && <span>{reason}</span>}
+    <div className="country-field">
+      <select
+        className="select"
+        value={selectValue}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          onChange(nextValue === "__other__" ? "" : nextValue);
+        }}
+      >
+        {DELIVERY_COUNTRY_OPTIONS.map((item) => (
+          <option value={item.value} key={item.code}>
+            {item.label}
+          </option>
+        ))}
+        <option value="__other__">其他国家/地区</option>
+      </select>
+      {isOther && (
+        <input
+          className="input"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="请输入国家或地区"
+        />
+      )}
     </div>
   );
 }
 
-function DeliveryCandidates({
-  values,
-  onSelect,
+function Metric({
+  label,
+  value,
+  accent,
+  hint,
+  icon: Icon,
 }: {
-  values: unknown[];
-  onSelect: (value: string) => void;
+  label: string;
+  value: number;
+  accent: "blue" | "amber" | "violet" | "rose";
+  hint: string;
+  icon: typeof BarChart3;
 }) {
-  const candidates = uniqueTexts(values).slice(0, 4);
-  if (!candidates.length) return null;
-
   return (
-    <div className="delivery-candidates">
-      {candidates.map((candidate) => (
-        <button
-          className="candidate-button"
-          type="button"
-          key={candidate}
-          onClick={() => onSelect(candidate)}
-        >
-          {candidate}
-        </button>
+    <article className={`metric ${accent}`}>
+      <div className="metric-icon">
+        <Icon size={20} />
+      </div>
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+        <em>{hint}</em>
+      </div>
+    </article>
+  );
+}
+
+function WorkflowProgress({ summary }: { summary: WorkflowSummary }) {
+  const steps = workflowSummarySteps(summary);
+  return (
+    <div className="workflow-steps">
+      {steps.map((step, index) => (
+        <div className={`workflow-step ${step.status}`} key={step.key}>
+          <div className="workflow-step-index">{index + 1}</div>
+          <div className="workflow-step-body">
+            <div className="workflow-step-title">
+              <strong>{step.title}</strong>
+              <span>{workflowStepStatusLabel(step.status)}</span>
+            </div>
+            <p>{step.label}</p>
+          </div>
+        </div>
       ))}
     </div>
   );
 }
 
-function ConfirmDialog({
-  open,
-  icon = "image",
-  title,
-  description,
-  confirmLabel,
-  cancelLabel,
-  loading,
-  onConfirm,
-  onCancel,
-}: {
-  open: boolean;
-  icon?: "image" | "video" | "publish";
-  title: string;
-  description: string;
-  confirmLabel: string;
-  cancelLabel: string;
-  loading: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  if (!open) return null;
-  const Icon = icon === "video" ? Film : icon === "publish" ? Megaphone : Image;
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="confirm-icon">
-          <Icon size={22} />
-        </div>
-        <div className="confirm-body">
-          <h2 id="confirm-dialog-title">{title}</h2>
-          <p>{description}</p>
-        </div>
-        <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} disabled={loading}>
-            {cancelLabel}
-          </button>
-          <button className="primary-button" onClick={onConfirm} disabled={loading}>
-            {loading ? <Loader2 size={16} className="spin" /> : <Icon size={16} />}
-            <span>{confirmLabel}</span>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
+function workflowSummarySteps(summary: WorkflowSummary): WorkflowSummary["fields"][] {
+  return [summary.fields, summary.topic, summary.copy, summary.image, summary.video, summary.final];
 }
 
-function PreflightRiskDialog({
-  action,
-  loading,
-  onConfirm,
-  onCancel,
-}: {
-  action: PendingPreflightAction | null;
-  loading: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  if (!action) return null;
-
-  const isPublish = action.kind === "publish_job";
-  const title = isPublish ? "确认带风险一键发布？" : "确认带风险准备投流包？";
-  const description = isPublish
-    ? "以下项目仍需人工确认。继续后系统会执行当前发布任务。"
-    : "以下项目仍需人工确认。继续后系统会生成待审核投流包。";
-  const confirmLabel = isPublish ? "继续一键发布" : "继续准备";
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="confirm-dialog preflight-risk-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="preflight-risk-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="confirm-icon">
-          <Clock3 size={22} />
-        </div>
-        <div className="confirm-body">
-          <h2 id="preflight-risk-dialog-title">{title}</h2>
-          <p>{description}</p>
-          <div className="preflight-risk-list">
-            {action.warnings.map((item) => (
-              <div className="preflight-risk-item" key={`${item.label}-${item.value}`}>
-                <strong>{item.label}</strong>
-                <span>{item.value}</span>
-                <p>{item.detail}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} disabled={loading}>
-            取消
-          </button>
-          <button className="primary-button" onClick={onConfirm} disabled={loading}>
-            {loading ? <Loader2 size={16} className="spin" /> : <Clock3 size={16} />}
-            <span>{confirmLabel}</span>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
+function currentWorkflowStep(summary: WorkflowSummary): WorkflowSummary["fields"] {
+  const steps = workflowSummarySteps(summary);
+  return steps.find((step) => step.status === "active") ?? steps.find((step) => step.key === "final") ?? steps[0];
 }
 
-function ActivateAdsDialog({
-  open,
-  value,
-  loading,
-  onChange,
-  onConfirm,
-  onCancel,
-}: {
-  open: boolean;
-  value: string;
-  loading: boolean;
-  onChange: (value: string) => void;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="activate-ads-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="confirm-icon danger">
-          <Megaphone size={22} />
-        </div>
-        <div className="confirm-body">
-          <h2 id="activate-ads-dialog-title">确认启用真实投放</h2>
-          <p>
-            启用后 Meta Campaign、Ad Set 和 Ad 会切换为 ACTIVE，并可能开始消耗广告预算。请输入 ACTIVE
-            确认。
-          </p>
-          <input
-            className="text-field"
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            placeholder="ACTIVE"
-            autoComplete="off"
-          />
-        </div>
-        <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} disabled={loading}>
-            取消
-          </button>
-          <button className="primary-button danger" onClick={onConfirm} disabled={loading || value !== "ACTIVE"}>
-            {loading ? <Loader2 size={16} className="spin" /> : <Megaphone size={16} />}
-            <span>确认启用</span>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function PauseAdsDialog({
-  open,
-  value,
-  loading,
-  onChange,
-  onConfirm,
-  onCancel,
-}: {
-  open: boolean;
-  value: string;
-  loading: boolean;
-  onChange: (value: string) => void;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="pause-ads-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="confirm-icon danger">
-          <Pause size={22} />
-        </div>
-        <div className="confirm-body">
-          <h2 id="pause-ads-dialog-title">确认暂停真实投放</h2>
-          <p>
-            暂停后 Meta Ad、Ad Set 和 Campaign 会切换为 PAUSED，通常不会继续产生新的投放消耗。已发生的展示、点击或数据结算可能仍有延迟。请输入 PAUSE 确认。
-          </p>
-          <input
-            className="text-field"
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            placeholder="PAUSE"
-            autoComplete="off"
-          />
-        </div>
-        <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} disabled={loading}>
-            取消
-          </button>
-          <button className="primary-button danger" onClick={onConfirm} disabled={loading || value !== "PAUSE"}>
-            {loading ? <Loader2 size={16} className="spin" /> : <Pause size={16} />}
-            <span>确认暂停</span>
-          </button>
-        </div>
-      </section>
-    </div>
-  );
+function workflowProgressPercent(summary: WorkflowSummary): number {
+  const steps = workflowSummarySteps(summary);
+  if (!steps.length) return 0;
+  return Math.round((steps.filter((step) => step.done).length / steps.length) * 100);
 }
 
 function DataList({ children, emptyText }: { children: React.ReactNode; emptyText: string }) {
-  const hasItems = Array.isArray(children) ? children.length > 0 : Boolean(children);
-  return <div className="data-list">{hasItems ? children : <EmptyState text={emptyText} />}</div>;
+  const items = Array.isArray(children) ? children.filter(Boolean) : children;
+  const empty = Array.isArray(items) ? items.length === 0 : !items;
+  return <div className="data-list">{empty ? <EmptyState text={emptyText} /> : items}</div>;
 }
 
 function EmptyState({ text }: { text: string }) {
-  return (
-    <div className="empty-state">
-      <Clock3 size={22} />
-      <span>{text}</span>
-    </div>
-  );
-}
-
-function isCreativeGenerationActive(generation: CreativeGenerationState | null): boolean {
-  return Boolean(
-    generation &&
-      ["submitting", "generating", "saving"].includes(generation.phase),
-  );
-}
-
-function formatElapsedSeconds(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  return `${minutes}m ${remainingSeconds}s`;
-}
-
-function VideoPreview({ url }: { url: string }) {
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    setFailed(false);
-  }, [url]);
-
-  return (
-    <div className="video-preview">
-      {failed ? (
-        <div className="video-preview-error">
-          <Film size={18} />
-          <div>
-            <strong>视频暂时无法预览</strong>
-            <span>链接可能已过期，或后端地址已变化。请先刷新状态；如果仍不可用，需要重新生成视频。</span>
-          </div>
-        </div>
-      ) : (
-        <video controls src={url} onError={() => setFailed(true)} />
-      )}
-      <a className="asset-url" href={url} target="_blank" rel="noreferrer">
-        打开视频链接
-      </a>
-    </div>
-  );
+  return <div className="empty-state">{text}</div>;
 }
 
 function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status}`}>{statusLabel(status)}</span>;
-}
-
-function MetaInsightStrip({ summary }: { summary: Record<string, unknown> }) {
-  const currency = readText(summary.currency) || "USD";
-  const metrics = [
-    { label: "已花费", value: moneyLabel(summary.spend, currency) },
-    { label: "展示", value: numberLabel(summary.impressions) },
-    { label: "覆盖", value: numberLabel(summary.reach) },
-    { label: "成效", value: numberLabel(summary.result_count) },
-    { label: "单次成效", value: moneyLabel(summary.cost_per_result, currency) },
-  ];
-
-  return (
-    <div className="meta-insight-strip">
-      {metrics.map((metric) => (
-        <div key={metric.label}>
-          <span>{metric.label}</span>
-          <strong>{metric.value}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function EmptyInsightStrip() {
-  return (
-    <div className="meta-insight-strip empty">
-      <div>
-        <span>广告数据</span>
-        <strong>未同步</strong>
-      </div>
-      <div>
-        <span>已花费</span>
-        <strong>-</strong>
-      </div>
-      <div>
-        <span>展示</span>
-        <strong>-</strong>
-      </div>
-      <div>
-        <span>成效</span>
-        <strong>-</strong>
-      </div>
-    </div>
-  );
-}
-
-function PreflightChecklist({ items }: { items: PreflightChecklistItem[] }) {
-  const hasError = items.some((item) => item.status === "error");
-  const hasWarning = items.some((item) => item.status === "warning");
-  const state: PreflightStatus = hasError ? "error" : hasWarning ? "warning" : "ready";
-  const summary =
-    state === "ready"
-      ? "可以进入投放审核"
-      : state === "warning"
-        ? "可继续，但需要确认"
-        : "缺少必要信息";
-
-  return (
-    <section className={`preflight-checklist state-${state}`}>
-      <div className="preflight-head">
-        <div>
-          <strong>投放前检查清单</strong>
-          <span>发布前先核对关键资料，避免点发布后才发现字段缺失。</span>
-        </div>
-        <span className={`preflight-summary state-${state}`}>{summary}</span>
-      </div>
-      <div className="preflight-grid">
-        {items.map((item) => {
-          const Icon = item.status === "ready" ? Check : item.status === "warning" ? Clock3 : X;
-          return (
-            <article className={`preflight-item state-${item.status}`} key={item.label}>
-              <div className="preflight-item-title">
-                <span className="preflight-icon">
-                  <Icon size={13} />
-                </span>
-                <strong>{item.label}</strong>
-              </div>
-              <span className="preflight-value" title={item.value}>
-                {item.value}
-              </span>
-              <p>{item.detail}</p>
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function MetaInsightSummary({ summary }: { summary: Record<string, unknown> }) {
-  const currency = readText(summary.currency) || "USD";
-  const metrics = [
-    { label: "已花费", value: moneyLabel(summary.spend, currency) },
-    { label: "展示次数", value: numberLabel(summary.impressions) },
-    { label: "覆盖人数", value: numberLabel(summary.reach) },
-    { label: "成效", value: `${numberLabel(summary.result_count)} ${resultTypeLabel(readText(summary.result_type))}` },
-    { label: "单次成效费用", value: moneyLabel(summary.cost_per_result, currency) },
-    { label: "预算", value: budgetLabel(summary, currency) },
-    { label: "质量排名", value: rankingLabel(summary.quality_ranking) },
-    { label: "互动率排名", value: rankingLabel(summary.engagement_rate_ranking) },
-    { label: "转化率排名", value: rankingLabel(summary.conversion_rate_ranking) },
-    { label: "广告组", value: readText(summary.adset_name) || "-" },
-    { label: "结束日期", value: readText(summary.end_time) || "-" },
-    { label: "上次修改", value: readText(summary.last_update_time) || "-" },
-  ];
-
-  return (
-    <div className="meta-insight-grid">
-      {metrics.map((metric) => (
-        <div className="meta-insight-cell" key={metric.label}>
-          <span>{metric.label}</span>
-          <strong title={metric.value}>{metric.value}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function isReviewedStatus(status: string): boolean {
-  return status === "approved" || status === "rejected";
 }
 
 function KeyValueTable({ data }: { data: Record<string, unknown> }) {
@@ -4625,140 +3658,347 @@ function KeyValueTable({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-function JsonDetails({
-  title,
-  value,
-  defaultOpen = false,
-}: {
-  title: string;
-  value: unknown;
-  defaultOpen?: boolean;
-}) {
-  return (
-    <details className="json-details" open={defaultOpen}>
-      <summary>{title}</summary>
-      <JsonBlock value={value} />
-    </details>
-  );
-}
-
 function JsonBlock({ value }: { value: unknown }) {
   return <pre className="json-block">{JSON.stringify(value ?? {}, null, 2)}</pre>;
 }
 
-function formatStoryboard(storyboard: Record<string, unknown>[]): string {
-  if (!storyboard.length) return "";
-
-  return storyboard
-    .map((scene, index) => {
-      const sceneIndex = sceneValue(scene, "scene_index") || String(index + 1);
-      const start = sceneValue(scene, "start_second") || "-";
-      const end = sceneValue(scene, "end_second") || "-";
-      const sourceAssetIds = scene["source_asset_ids"];
-      const imageLine = Array.isArray(sourceAssetIds)
-        ? `图片：${sourceAssetIds.map(String).join(", ")}`
-        : "";
-      return [
-        `镜头 ${sceneIndex}（${start}-${end} 秒）`,
-        `画面：${sceneValue(scene, "visual") || "-"}`,
-        `字幕：${sceneValue(scene, "subtitle") || "-"}`,
-        `动效：${sceneValue(scene, "motion") || "-"}`,
-        `旁白：${sceneValue(scene, "voiceover") || "-"}`,
-        imageLine,
-        `备注：${sceneValue(scene, "notes") || "-"}`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    })
-    .join("\n\n");
-}
-
-function storyboardPayloadFromText(
-  text: string,
-  originalStoryboard: Record<string, unknown>[],
-): Record<string, unknown>[] {
-  return [
-    {
-      scene_index: 1,
-      visual: text.trim(),
-      notes: "manual_storyboard_text",
-      original_storyboard: originalStoryboard,
-    },
-  ];
-}
-
-function sceneValue(scene: Record<string, unknown>, key: string): string {
-  const value = scene[key];
-  if (value == null) return "";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function ImagePreview({
-  asset,
-  onInvalid,
-  onOpen,
-}: {
-  asset: CreativeAsset;
-  onInvalid: (assetId: string) => void;
-  onOpen?: () => void;
-}) {
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    setFailed(false);
-  }, [asset.url]);
-
-  if (!asset.url || failed) {
+function ImagePreview({ asset }: { asset: CreativeAsset }) {
+  if (!asset.url) {
     return (
       <div className="image-placeholder">
         <Image size={28} />
-        <span>{failed ? "图片链接已过期，请重新生成图片" : asset.storage_key || "等待图片 URL"}</span>
+        <span>等待图片 URL</span>
       </div>
     );
   }
+  return <img className="asset-image" src={asset.url} alt={asset.alt_text || "creative"} />;
+}
+
+function VideoPreview({ url }: { url: string }) {
   return (
-    <button className="asset-image-button" type="button" onClick={onOpen} title="打开大图预览">
-      <img
-        className="asset-image"
-        src={asset.url}
-        alt={asset.alt_text || "creative"}
-        onError={() => {
-          setFailed(true);
-          onInvalid(asset.id);
-        }}
-      />
-    </button>
+    <div className="video-preview">
+      <video controls src={url} />
+    </div>
   );
 }
 
-function ImagePreviewDialog({ asset, onClose }: { asset: CreativeAsset | null; onClose: () => void }) {
-  if (!asset?.url) return null;
+type WorkflowSummary = Record<"fields" | "topic" | "copy" | "image" | "video" | "final", {
+  key: string;
+  title: string;
+  label: string;
+  done: boolean;
+  status: WorkflowStepStatus;
+}>;
 
-  return (
-    <div className="modal-backdrop image-preview-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="image-preview-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label="图片预览"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="image-preview-head">
-          <div>
-            <strong>{asset.alt_text || imagePromptTitle(asset.prompt) || "图片预览"}</strong>
-            <span>{statusLabel(asset.status)}</span>
-          </div>
-          <button className="secondary-button icon-compact" onClick={onClose} title="关闭预览">
-            <X size={16} />
-          </button>
-        </div>
-        <img className="image-preview-large" src={asset.url} alt={asset.alt_text || "creative preview"} />
-      </section>
-    </div>
-  );
+function buildWorkflowSummary({
+  job,
+  campaign,
+  topic,
+  draft,
+  creatives,
+  videos,
+}: {
+  job: AdGenerationJob | null;
+  campaign: Campaign | null;
+  topic: Topic | null;
+  draft: CopyDraft | null;
+  creatives: CreativeAsset[];
+  videos: VideoAsset[];
+}): WorkflowSummary {
+  const fieldsDone = Boolean(job && campaign && !["queued", "processing", "failed"].includes(job.status));
+  const topicDone = Boolean(topic && topic.status === "selected");
+  const copyDone = Boolean(draft && draft.status === "approved");
+  const imageDone = creatives.length > 0;
+  const videoDone = videos.length > 0;
+  return {
+    fields: stepSummary("fields", "参数确认", fieldsDone, fieldsDone ? "参数已确认" : "等待识别", Boolean(job)),
+    topic: stepSummary("topic", "人工选题", topicDone, topic?.title || "未选择选题", fieldsDone),
+    copy: stepSummary("copy", "审核文案", copyDone, draft?.headline || "未通过文案", topicDone),
+    image: stepSummary("image", "审核图片", imageDone, imageDone ? `${creatives.length} 张已通过` : "无通过图片", copyDone),
+    video: stepSummary("video", "审核视频", videoDone, videoDone ? `${videos.length} 个已通过` : "无通过视频", imageDone),
+    final: stepSummary("final", "最终预审", fieldsDone && topicDone && copyDone && imageDone && videoDone, "确认后回传投放系统", videoDone),
+  };
+}
+
+function stepSummary(
+  key: string,
+  title: string,
+  done: boolean,
+  label: string,
+  available: boolean,
+): WorkflowSummary["fields"] {
+  return {
+    key,
+    title,
+    label,
+    done,
+    status: done ? "done" : available ? "active" : "blocked",
+  };
+}
+
+function buildFinalPayload({
+  job,
+  campaign,
+  topic,
+  draft,
+  creatives,
+  videos,
+  selectedCreativeIds,
+  selectedVideoId,
+}: {
+  job: AdGenerationJob | null;
+  campaign: Campaign | null;
+  topic: Topic | null;
+  draft: CopyDraft | null;
+  creatives: CreativeAsset[];
+  videos: VideoAsset[];
+  selectedCreativeIds: string[];
+  selectedVideoId: string | null;
+}): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } {
+  if (!job) return { ok: false, message: "请先选择 AI 工单。" };
+  if (!campaign) return { ok: false, message: "参数识别尚未完成，请稍后刷新。" };
+  if (!topic || topic.status !== "selected") return { ok: false, message: "请先选择选题。" };
+  if (!draft || draft.status !== "approved") return { ok: false, message: "请先审核通过文案。" };
+  if (!creatives.length) return { ok: false, message: "请先审核通过图片。" };
+  if (!videos.length) return { ok: false, message: "请先审核通过视频。" };
+
+  const result = job.result_payload ?? {};
+  const campaignPayload = isRecord(result.campaign_payload) ? result.campaign_payload : {};
+  const adsetPayload = isRecord(result.adset_payload) ? result.adset_payload : {};
+  const review = isRecord(result.review) ? result.review : {};
+  const image = creatives.find((item) => selectedCreativeIds.includes(item.id)) ?? creatives[0];
+  const video = videos.find((item) => item.id === selectedVideoId) ?? videos[0];
+  const link = campaignLandingUrl(campaign);
+
+  return {
+    ok: true,
+    value: {
+      ...result,
+      job_id: job.id,
+      external_order_id: job.external_order_id,
+      status: "final_review",
+      campaign_payload: {
+        ...campaignPayload,
+        name: readText(campaignPayload.name) || campaign.name,
+        objective: readText(campaignPayload.objective) || campaign.objective || "OUTCOME_TRAFFIC",
+        status: "PAUSED",
+        draft: 1,
+      },
+      adset_payload: {
+        ...adsetPayload,
+        billing_event: readText(adsetPayload.billing_event) || "IMPRESSIONS",
+        optimization_goal: readText(adsetPayload.optimization_goal) || "LINK_CLICKS",
+        bid_strategy: readText(adsetPayload.bid_strategy) || "LOWEST_COST_WITHOUT_CAP",
+        start_type: readText(adsetPayload.start_type) || "I",
+        start_time: Number(adsetPayload.start_time ?? 0),
+        status: "PAUSED",
+        draft: 1,
+      },
+      creative_payload: {
+        name: `${campaign.name} - video`,
+        type: "video",
+        message: draft.primary_text || draft.body,
+        link,
+        ads_name: draft.headline || topic.title,
+        description: draft.description,
+        btn_type: "LEARN_MORE",
+        asset_url: video.url || image.url,
+        asset_id: null,
+        image_asset_url: image.url,
+        video_asset_url: video.url,
+        draft: 1,
+      },
+      assets: {
+        images: creatives.map((asset) => ({
+          id: asset.id,
+          filename: filenameFromUrl(asset.url),
+          url: asset.url,
+          size: asset.size,
+          prompt: asset.prompt,
+          alt_text: asset.alt_text,
+        })),
+        videos: videos.map((item) => ({
+          id: item.id,
+          url: item.url,
+          cover_url: null,
+          duration_seconds: item.duration_seconds,
+          storyboard: item.storyboard,
+        })),
+      },
+      review: {
+        ...review,
+        final_precheck: {
+          topic_reviewed: true,
+          copy_reviewed: true,
+          image_reviewed: true,
+          video_reviewed: true,
+        },
+      },
+      metadata_json: {
+        ...(isRecord(result.metadata_json) ? result.metadata_json : {}),
+        workflow_stage: "final_review",
+        campaign_id: campaign.id,
+        topic_id: topic.id,
+        draft_id: draft.id,
+        creative_asset_ids: creatives.map((item) => item.id),
+        video_asset_ids: videos.map((item) => item.id),
+        final_prechecked_at: new Date().toISOString(),
+      },
+    },
+  };
+}
+
+function loadDeliveryExtractionCache(rawContent: string): DeliveryExtractionCacheEntry | null {
+  const key = deliveryExtractionCacheKey(rawContent);
+  if (!key) return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.extraction) || typeof parsed.savedAt !== "string") {
+      return null;
+    }
+    return {
+      key,
+      extraction: parsed.extraction as unknown as WorkOrderDeliveryExtraction,
+      savedAt: parsed.savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveDeliveryExtractionCache(
+  rawContent: string,
+  extraction: WorkOrderDeliveryExtraction,
+): DeliveryExtractionCacheEntry | null {
+  const key = deliveryExtractionCacheKey(rawContent);
+  if (!key) return null;
+  const entry = { key, extraction, savedAt: new Date().toISOString() };
+  try {
+    window.localStorage.setItem(key, JSON.stringify(entry));
+    pruneDeliveryExtractionCache(key);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function removeDeliveryExtractionCache(rawContent: string) {
+  const key = deliveryExtractionCacheKey(rawContent);
+  if (!key) return;
+  try {
+    window.localStorage.removeItem(key);
+    const index = readDeliveryExtractionCacheIndex().filter((item) => item !== key);
+    window.localStorage.setItem(DELIVERY_EXTRACTION_CACHE_INDEX_KEY, JSON.stringify(index));
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function pruneDeliveryExtractionCache(latestKey: string) {
+  const nextIndex = [
+    latestKey,
+    ...readDeliveryExtractionCacheIndex().filter((key) => key !== latestKey),
+  ];
+  const kept = nextIndex.slice(0, DELIVERY_EXTRACTION_CACHE_LIMIT);
+  const dropped = nextIndex.slice(DELIVERY_EXTRACTION_CACHE_LIMIT);
+  dropped.forEach((key) => window.localStorage.removeItem(key));
+  window.localStorage.setItem(DELIVERY_EXTRACTION_CACHE_INDEX_KEY, JSON.stringify(kept));
+}
+
+function readDeliveryExtractionCacheIndex(): string[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DELIVERY_EXTRACTION_CACHE_INDEX_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadVideoStoryboardDraftCache(campaignId: string): VideoStoryboardDraftCache | null {
+  const direct = loadVideoStoryboardDraftCacheFromKey(videoStoryboardDraftCacheKey(campaignId), campaignId);
+  if (direct) return direct;
+
+  const latest = loadVideoStoryboardDraftCacheFromKey(VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY, campaignId);
+  return latest?.campaignId === campaignId ? latest : null;
+}
+
+function loadLatestVideoStoryboardDraftCache(): VideoStoryboardDraftCache | null {
+  return loadVideoStoryboardDraftCacheFromKey(VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY, "");
+}
+
+function loadVideoStoryboardDraftCacheFromKey(
+  key: string,
+  campaignId: string,
+): VideoStoryboardDraftCache | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    return {
+      campaignId: readText(parsed.campaignId) || campaignId,
+      aspectRatio: readText(parsed.aspectRatio) || "9:16",
+      durationSeconds: Number(parsed.durationSeconds) || 12,
+      instructions: readText(parsed.instructions),
+      selectedCreativeIds: Array.isArray(parsed.selectedCreativeIds)
+        ? parsed.selectedCreativeIds.filter((item): item is string => typeof item === "string")
+        : [],
+      storyboard: Array.isArray(parsed.storyboard)
+        ? parsed.storyboard.filter((item): item is Record<string, unknown> => isRecord(item))
+        : [],
+      storyboardText: readText(parsed.storyboardText),
+      storyboardDirty: typeof parsed.storyboardDirty === "boolean" ? parsed.storyboardDirty : true,
+      storyboardFeedback: readText(parsed.storyboardFeedback),
+      savedAt: readText(parsed.savedAt) || new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveVideoStoryboardDraftCache(campaignId: string, entry: VideoStoryboardDraftCache) {
+  try {
+    const hasDraft =
+      entry.storyboardText.trim() ||
+      entry.instructions.trim() ||
+      entry.storyboardFeedback.trim() ||
+      entry.storyboard.length;
+    if (!hasDraft) {
+      return;
+    }
+    const key = videoStoryboardDraftCacheKey(campaignId);
+    window.localStorage.setItem(key, JSON.stringify(entry));
+    window.localStorage.setItem(VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function videoStoryboardDraftCacheKey(campaignId: string): string {
+  return `${VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX}${campaignId}`;
+}
+
+function deliveryExtractionCacheKey(rawContent: string): string | null {
+  const normalized = normalizeWorkOrderCacheContent(rawContent);
+  if (!normalized) return null;
+  return `${DELIVERY_EXTRACTION_CACHE_PREFIX}${hashWorkOrderContent(normalized)}`;
+}
+
+function normalizeWorkOrderCacheContent(rawContent: string): string {
+  return rawContent.trim().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function hashWorkOrderContent(value: string): string {
+  let first = 2166136261;
+  let second = 2166136261 ^ value.length;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ (code + index), 16777619);
+  }
+  return `${value.length}-${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
 }
 
 function emptyReviewedDeliveryFields(): ReviewedDeliveryFields {
@@ -4787,41 +4027,36 @@ function buildDeliveryConfirmForm(extraction: WorkOrderDeliveryExtraction): Revi
 }
 
 function validateDeliveryConfirmForm(form: ReviewedDeliveryFields): string | null {
-  const landingUrl = form.landing_url.trim();
-  const country = form.country.trim();
-  const eventName = form.event_name.trim();
-  const ageMin = form.age_min.trim();
-  const ageMax = form.age_max.trim();
-
-  if (!landingUrl) return "请补充落地页链接。";
-  if (!isHttpUrl(landingUrl)) return "落地页链接需要是 http 或 https 开头的完整链接。";
-  if (!country) return "请确认投放国家。";
-  if (!eventName) return "请选择投放事件。";
-  if ((ageMin && !ageMax) || (!ageMin && ageMax)) {
-    return "年龄需要同时填写最小和最大，或都留空表示不限。";
-  }
-  if (ageMin && ageMax) {
-    const min = Number(ageMin);
-    const max = Number(ageMax);
-    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 13 || max > 65 || min > max) {
-      return "年龄范围需要在 13 到 65 之间，且最小年龄不能大于最大年龄。";
-    }
-  }
+  if (!form.landing_url.trim()) return "请补充投放链接。";
+  if (!isHttpUrl(form.landing_url.trim())) return "投放链接需要是 http 或 https 开头的完整链接。";
+  if (!form.country.trim()) return "请确认投放国家。";
+  if (!form.event_name.trim()) return "请选择投放事件。";
   return null;
 }
 
 function normalizeReviewedDeliveryFields(form: ReviewedDeliveryFields): ReviewedDeliveryFields {
-  const ageMin = form.age_min.trim();
-  const ageMax = form.age_max.trim();
   return {
     landing_url: form.landing_url.trim(),
     event_name: normalizeEventLabel(form.event_name) || "流量",
     country: form.country.trim(),
-    age_min: ageMin || "不限",
-    age_max: ageMax || "不限",
+    age_min: form.age_min.trim() || "不限",
+    age_max: form.age_max.trim() || "不限",
     gender: normalizeGenderLabel(form.gender),
     audience_description_raw: form.audience_description_raw.trim(),
   };
+}
+
+function countryOptionForValue(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  return (
+    DELIVERY_COUNTRY_OPTIONS.find(
+      (item) =>
+        item.value.toLowerCase() === normalized ||
+        item.code.toLowerCase() === normalized ||
+        item.label.toLowerCase() === normalized,
+    ) ?? null
+  );
 }
 
 function deliveryFieldDisplayText(field: WorkOrderDeliveryField): string {
@@ -4834,32 +4069,26 @@ function deliveryAgeText(field: WorkOrderDeliveryField): string {
   return value.replace(/\D/g, "");
 }
 
-function normalizeEventLabel(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
-  if (!normalized) return "";
-  if (["purchase", "shop", "shopping"].includes(normalized) || /购物|购买|下单/.test(value)) {
-    return "购物";
-  }
-  if (["addtocart", "add_to_cart", "cart"].includes(normalized) || value.includes("加购")) {
-    return "加购";
-  }
-  if (["lead", "signup"].includes(normalized) || /线索|注册/.test(value)) {
-    return "线索";
-  }
-  if (["traffic", "click", "linkclick", "link_click"].includes(normalized) || /流量|点击/.test(value)) {
-    return "流量";
-  }
-  return DELIVERY_EVENT_OPTIONS.includes(value as (typeof DELIVERY_EVENT_OPTIONS)[number])
-    ? value
-    : "流量";
+function deliveryExtractionHint(
+  extraction: WorkOrderDeliveryExtraction,
+  key: keyof ReviewedDeliveryFields,
+): string {
+  const field = extraction.fields[key];
+  if (!field) return "";
+  return `${deliveryStatusLabel(field.status)} / 置信度 ${Math.round((field.confidence || 0) * 100)}%`;
 }
 
-function normalizeGenderLabel(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized || ["不限", "all", "all genders", "none"].includes(normalized)) return "不限";
-  if (["male", "men", "man"].includes(normalized) || value.includes("男")) return "男";
-  if (["female", "women", "woman"].includes(normalized) || value.includes("女")) return "女";
-  return "不限";
+function deliveryFieldLabel(key: keyof ReviewedDeliveryFields): string {
+  const labels: Record<keyof ReviewedDeliveryFields, string> = {
+    landing_url: "投放链接",
+    event_name: "投放事件",
+    country: "投放国家",
+    age_min: "最小年龄",
+    age_max: "最大年龄",
+    gender: "性别",
+    audience_description_raw: "投放人群",
+  };
+  return labels[key];
 }
 
 function deliveryStatusLabel(status: WorkOrderDeliveryField["status"]): string {
@@ -4872,755 +4101,400 @@ function deliveryStatusLabel(status: WorkOrderDeliveryField["status"]): string {
   return labels[status] ?? status;
 }
 
-function uniqueTexts(values: unknown[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of values) {
-    const text = readText(value);
-    if (text && !seen.has(text)) {
-      seen.add(text);
-      result.push(text);
+function normalizeEventLabel(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
+  if (!normalized) return "";
+  if (["purchase", "shop", "shopping"].includes(normalized) || /购物|购买|下单/.test(value)) return "购物";
+  if (["addtocart", "add_to_cart", "cart"].includes(normalized) || value.includes("加购")) return "加购";
+  if (["lead", "signup"].includes(normalized) || /线索|注册/.test(value)) return "线索";
+  if (["traffic", "click", "linkclick", "link_click"].includes(normalized) || /流量|点击/.test(value)) return "流量";
+  return DELIVERY_EVENT_OPTIONS.includes(value as (typeof DELIVERY_EVENT_OPTIONS)[number]) ? value : "流量";
+}
+
+function normalizeGenderLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || ["不限", "all", "all genders", "none"].includes(normalized)) return "不限";
+  if (["male", "men", "man"].includes(normalized) || value.includes("男")) return "男";
+  if (["female", "women", "woman"].includes(normalized) || value.includes("女")) return "女";
+  return "不限";
+}
+
+function formatStoryboard(storyboard: Record<string, unknown>[]): string {
+  if (!storyboard.length) return "";
+  return storyboard
+    .map((scene, index) => {
+      const sceneIndex = sceneValue(scene, "scene_index") || String(index + 1);
+      const start = sceneValue(scene, "start_second") || "-";
+      const end = sceneValue(scene, "end_second") || "-";
+      return [
+        `镜头 ${sceneIndex}（${start}-${end} 秒）`,
+        `画面：${sceneValue(scene, "visual") || "-"}`,
+        `字幕：${sceneValue(scene, "subtitle") || "-"}`,
+        `动效：${sceneValue(scene, "motion") || "-"}`,
+        `旁白：${sceneValue(scene, "voiceover") || "-"}`,
+        `备注：${sceneValue(scene, "notes") || "-"}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function storyboardPayloadFromText(
+  text: string,
+  originalStoryboard: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return [
+    {
+      scene_index: 1,
+      visual: text.trim(),
+      notes: "manual_storyboard_text",
+      original_storyboard: originalStoryboard,
+    },
+  ];
+}
+
+function sceneValue(scene: Record<string, unknown>, key: string): string {
+  const value = scene[key];
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
+  return items.some((item) => item.id === next.id)
+    ? items.map((item) => (item.id === next.id ? next : item))
+    : [next, ...items];
+}
+
+function appendOrReplaceById<T extends { id: string }>(items: T[], next: T): T[] {
+  return items.some((item) => item.id === next.id)
+    ? items.map((item) => (item.id === next.id ? next : item))
+    : [...items, next];
+}
+
+function prependOrReplaceById<T extends { id: string }>(items: T[], next: T): T[] {
+  return items.some((item) => item.id === next.id)
+    ? items.map((item) => (item.id === next.id ? next : item))
+    : [next, ...items];
+}
+
+function initialTopicSlots(limit: number): TopicGenerationSlot[] {
+  return Array.from({ length: limit }, (_, index) => ({
+    index: index + 1,
+    status: "loading" as const,
+  }));
+}
+
+function initialCreativeSlots(limit: number): CreativeGenerationSlot[] {
+  return Array.from({ length: limit }, (_, index) => ({
+    index: index + 1,
+    status: "loading" as const,
+  }));
+}
+
+function buildCreativeSlots(
+  creatives: CreativeAsset[],
+  activeSlots: CreativeGenerationSlot[],
+): CreativeGenerationSlot[] {
+  if (activeSlots.length) return activeSlots;
+  if (!creatives.length) return [];
+
+  const sorted = creatives
+    .slice()
+    .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+  const assetsByIndex = new Map<number, CreativeAsset>();
+  const fallbackAssets: CreativeAsset[] = [];
+  for (const asset of sorted) {
+    const index = creativeImageIndex(asset, 0);
+    if (index >= 1 && index <= CREATIVE_GENERATION_LIMIT && !assetsByIndex.has(index)) {
+      assetsByIndex.set(index, asset);
+    } else {
+      fallbackAssets.push(asset);
     }
   }
-  return result;
-}
 
-function reviewedDeliveryFieldText(fields: Record<string, unknown>, key: keyof ReviewedDeliveryFields): string {
-  const value = fields[key];
-  if (isRecord(value)) {
-    return readText(value.value) || readText(value.normalized_value);
+  const usedIds = new Set<string>();
+  const slots: CreativeGenerationSlot[] = [];
+
+  for (let index = 1; index <= CREATIVE_GENERATION_LIMIT; index += 1) {
+    const indexedAsset = assetsByIndex.get(index);
+    const fallbackAsset = fallbackAssets.find((asset) => !usedIds.has(asset.id));
+    const asset = indexedAsset ?? fallbackAsset;
+    if (!asset) continue;
+    usedIds.add(asset.id);
+    slots.push({
+      index,
+      status: "done",
+      asset,
+    });
   }
-  return readText(value);
+  return slots;
 }
 
-function reviewedAgeLabel(fields: Record<string, unknown>): string | null {
-  const ageMin = reviewedDeliveryFieldText(fields, "age_min");
-  const ageMax = reviewedDeliveryFieldText(fields, "age_max");
-  if (ageMin && ageMax && ageMin !== "不限" && ageMax !== "不限") return `${ageMin}-${ageMax}`;
-  if (ageMin === "不限" || ageMax === "不限") return "不限";
-  return null;
+function creativeImageIndex(asset: CreativeAsset, fallback: number): number {
+  const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
+  const rawIndex = metadata.image_index;
+  const index =
+    typeof rawIndex === "number"
+      ? rawIndex
+      : typeof rawIndex === "string"
+        ? Number.parseInt(rawIndex, 10)
+        : Number.NaN;
+  return Number.isFinite(index) && index > 0 ? index : fallback;
 }
 
-function workOrderFields(workOrder: WorkOrder): Record<string, unknown> {
-  const reviewedFields = isRecord(workOrder.metadata_json.reviewed_delivery_fields)
-    ? workOrder.metadata_json.reviewed_delivery_fields
-    : {};
-  const reviewedAge = reviewedAgeLabel(reviewedFields);
-  const reviewedGender = reviewedDeliveryFieldText(reviewedFields, "gender");
+function adGenerationCampaignId(job: AdGenerationJob): string | null {
+  const result = job.result_payload ?? {};
+  const metadata = isRecord(result.metadata_json) ? result.metadata_json : {};
+  return readText(metadata.campaign_id);
+}
 
+function adGenerationJobTitle(job: AdGenerationJob): string {
+  const result = job.result_payload ?? {};
+  const campaignPayload = isRecord(result.campaign_payload) ? result.campaign_payload : {};
+  const request = job.request_payload ?? {};
+  const workOrder = isRecord(request.work_order) ? request.work_order : {};
+  const structuredFields = isRecord(workOrder.structured_fields) ? workOrder.structured_fields : {};
+  return (
+    readText(campaignPayload.name) ||
+    readText(structuredFields.project_name) ||
+    readText(structuredFields.product_name) ||
+    job.external_order_id ||
+    `AI 工单 ${shortId(job.id)}`
+  );
+}
+
+function adGenerationJobFields(job: AdGenerationJob, campaign: Campaign | null): Record<string, unknown> {
+  const result = job.result_payload ?? {};
+  const adsetPayload = isRecord(result.adset_payload) ? result.adset_payload : {};
+  const creativePayload = isRecord(result.creative_payload) ? result.creative_payload : {};
   return {
-    项目名称: workOrder.project_name,
-    投放国家: workOrder.country || reviewedDeliveryFieldText(reviewedFields, "country"),
-    投放媒体: workOrder.media,
-    投放事件: workOrder.event_name || reviewedDeliveryFieldText(reviewedFields, "event_name"),
-    年龄: reviewedAge,
-    性别: reviewedGender || null,
-    投放人群: workOrder.audience_description,
-    产品名称: workOrder.product_name,
-    投放链接: workOrder.landing_url || reviewedDeliveryFieldText(reviewedFields, "landing_url"),
-    日报时区: workOrder.report_timezone,
+    任务状态: statusLabel(job.status),
+    外部工单: job.external_order_id,
+    项目: campaign?.name || adGenerationJobTitle(job),
+    国家: adsetPayload.countries || adsetPayload.country_code,
+    年龄: adsetPayload.age_min && adsetPayload.age_max ? `${adsetPayload.age_min}-${adsetPayload.age_max}` : null,
+    投放链接: creativePayload.link || campaignLandingUrl(campaign),
+    标题: creativePayload.ads_name,
+    创建时间: formatDate(job.created_at),
   };
+}
+
+function adGenerationRawContent(requestPayload: Record<string, unknown>): string {
+  const workOrder = isRecord(requestPayload.work_order) ? requestPayload.work_order : {};
+  return readText(workOrder.raw_content) || "暂无工单原文";
+}
+
+function campaignLandingUrl(campaign: Campaign | null): string | null {
+  if (!campaign) return null;
+  const landingPage = isRecord(campaign.metadata_json.landing_page) ? campaign.metadata_json.landing_page : {};
+  const workOrder = isRecord(campaign.metadata_json.work_order) ? campaign.metadata_json.work_order : {};
+  return readText(landingPage.url) || readText(workOrder.landing_url);
+}
+
+function draftTargetLanguageLabel(draft: CopyDraft): string {
+  const targetLanguage = isRecord(draft.metadata_json.target_language) ? draft.metadata_json.target_language : {};
+  return readText(targetLanguage.label) || readText(targetLanguage.instruction) || "未标注";
+}
+
+function draftLandingUrl(draft: CopyDraft | null, campaign: Campaign | null): string | null {
+  if (draft) {
+    const landingPage = isRecord(draft.metadata_json.landing_page) ? draft.metadata_json.landing_page : {};
+    const url = readText(landingPage.url);
+    if (url) return url;
+  }
+  return campaignLandingUrl(campaign);
+}
+
+function copySnippet(draft: CopyDraft): string {
+  return (draft.primary_text || draft.body || draft.description || "暂无内容").replace(/\s+/g, " ").slice(0, 92);
+}
+
+function copyLengthLabel(text: string | null): string {
+  return `${Array.from(text || "").length} 字符`;
+}
+
+function domainFromUrl(url: string | null): string {
+  if (!url) return "";
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function initialViewFromUrl(): ViewKey {
+  if (adGenerationJobIdFromUrl()) return "workflow";
+  if (window.location.pathname.startsWith("/work-orders/new")) return "work-orders";
+  const value = new URLSearchParams(window.location.search).get("view");
+  return navItems.some((item) => item.key === value) ? (value as ViewKey) : "dashboard";
+}
+
+function adGenerationJobIdFromUrl(): string | null {
+  const match = window.location.pathname.match(/\/review\/ad-generation\/([^/]+)/);
+  if (match?.[1]) return decodeURIComponent(match[1]);
+  return new URLSearchParams(window.location.search).get("job_id");
+}
+
+function publishingEntryContextFromUrl(): PublishingEntryContext {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    externalOrderId: params.get("external_order_id") || params.get("order_id"),
+    returnUrl: params.get("return_url"),
+  };
+}
+
+function initialRawWorkOrderFromUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  const rawContent = params.get("raw_content") || params.get("work_order");
+  if (rawContent) return rawContent;
+  const rows = [
+    ["项目名称", params.get("project_name")],
+    ["投放国家", params.get("country") || params.get("countries")],
+    ["投放事件", params.get("event_name")],
+    ["投放人群", params.get("audience")],
+    ["年龄", [params.get("age_min"), params.get("age_max")].filter(Boolean).join("-")],
+    ["投放链接", params.get("landing_url") || params.get("link")],
+  ].filter(([, value]) => Boolean(value));
+  if (rows.length) return ["工单", ...rows.map(([label, value]) => `${label}：${value}`)].join("\n");
+  return sampleWorkOrder;
 }
 
 function viewTitle(view: ViewKey): string {
   return navItems.find((item) => item.key === view)?.label ?? "工作台";
 }
 
-function initialViewFromUrl(): ViewKey {
-  const value = new URLSearchParams(window.location.search).get("view");
-  return navItems.some((item) => item.key === value) ? (value as ViewKey) : "dashboard";
-}
-
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     active: "进行中",
-    archived: "已归档",
     approved: "已通过",
-    cancelled: "已取消",
-    completed: "已完成",
+    archived: "已归档",
+    copy_review: "文案审核",
     draft: "草稿",
     failed: "失败",
-    fetched: "已抓取",
+    fields_review: "参数确认",
+    final_review: "最终预审",
     generated: "已生成",
     generating: "生成中",
-    inactive: "不可用",
-    meta_active: "Meta可投放",
-    meta_approved: "Meta已通过",
-    meta_inactive: "Meta不可用",
-    meta_paused: "Meta暂停",
-    meta_rejected: "Meta拒绝",
-    meta_reviewing: "Meta审核中",
-    meta_unknown: "Meta未知",
-    meta_unsynced: "Meta未同步",
+    image_review: "图片审核",
     needs_revision: "需修改",
-    paused: "已暂停",
-    pending: "待审核",
+    processing: "初始化中",
     proposed: "待选择",
-    published: "已发布",
-    publishing: "发布中",
-    queued: "排队中",
-    received: "已接收",
+    queued: "创建中",
     rejected: "已拒绝",
-    requested: "已创建",
+    returned: "已回传",
     selected: "已选择",
+    topic_review: "选题审核",
+    video_review: "视频审核",
   };
   return labels[status] ?? status;
 }
 
-function publishChannelLabel(value: string): string {
-  const labels: Record<string, string> = {
-    facebook_page: "Facebook Page",
-    facebook_ad: "Facebook Ads",
-  };
-  return labels[value] ?? value;
+function isVideoGeneratingStatus(status: string): boolean {
+  return status === "generating";
 }
 
-function publishMediaTypeLabel(value: string): string {
-  const labels: Record<string, string> = {
-    image: "图片",
-    video: "视频",
-    text: "未配置素材",
-  };
-  return labels[value] ?? value;
-}
+function mediaPreviewAspectClass(value: string | null | undefined): string {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized || normalized === "1:1" || normalized === "square") return "square";
+  if (normalized === "9:16" || normalized === "portrait" || normalized === "vertical") return "portrait";
+  if (normalized === "16:9" || normalized === "landscape" || normalized === "horizontal") return "landscape";
 
-function isMetaAdsPackageJob(job: PublishJob): boolean {
-  return job.payload.ad_operation === "create_meta_ads_draft";
-}
-
-function publishJobFilterLabel(filter: PublishJobFilter): string {
-  const labels: Record<PublishJobFilter, string> = {
-    all: "全部",
-    review: "待审核",
-    published: "已发布",
-    active: "投放中",
-    paused: "暂停",
-    issue: "异常",
-  };
-  return labels[filter];
-}
-
-function publishJobBucket(job: PublishJob): PublishJobFilter {
-  const reviewStatus = publishJobReviewStatus(job);
-  const activationStatus = publishJobActivationStatus(job);
-  const metaReviewStatus = publishJobMetaReviewStatus(job);
-  if (job.status === "failed" || reviewStatus === "rejected" || metaReviewStatus === "meta_rejected") {
-    return "issue";
-  }
-  if (reviewStatus !== "approved" && isMetaAdsPackageJob(job)) {
-    return "review";
-  }
-  if (["active", "meta_active"].includes(activationStatus)) {
-    return "active";
-  }
-  if (["paused", "meta_paused"].includes(activationStatus)) {
-    return "paused";
-  }
-  if (job.status === "published") {
-    return "published";
-  }
-  return "published";
-}
-
-function publishJobTitle(job: PublishJob): string {
-  const channel = isMetaAdsPackageJob(job)
-    ? "Meta 投流包"
-    : publishChannelLabel(String(job.channel) as PublishChannelKey);
-  return `${channel} / ${publishMediaTypeLabel(String(job.payload.media_type ?? "image"))}`;
-}
-
-function publishJobMetaIds(job: PublishJob): Record<string, string | null> {
-  const metadataIds = job.metadata_json.meta_ads_ids;
-  const providerResponse = job.metadata_json.provider_response;
-  const providerIds = isRecord(providerResponse) ? providerResponse.meta_ads_ids : null;
-  const ids = isRecord(metadataIds) ? metadataIds : isRecord(providerIds) ? providerIds : {};
-  return {
-    campaign_id: readText(ids.campaign_id) || null,
-    adset_id: readText(ids.adset_id) || null,
-    ad_creative_id: readText(ids.ad_creative_id) || null,
-    ad_id: readText(ids.ad_id) || job.external_id,
-  };
-}
-
-function publishJobAdsetName(job: PublishJob): string {
-  const summary = publishJobInsightSummary(job);
-  const summaryName = summary ? readText(summary.adset_name) : "";
-  if (summaryName) return summaryName;
-  const plan = job.payload.plan;
-  if (isRecord(plan)) {
-    const adsetPayload = plan.adset_payload;
-    if (isRecord(adsetPayload)) {
-      return readText(adsetPayload.name);
+  const match = normalized.match(/^(\d+(?:\.\d+)?)\s*[x:]\s*(\d+(?:\.\d+)?)$/);
+  if (match) {
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      const ratio = width / height;
+      if (ratio < 0.8) return "portrait";
+      if (ratio > 1.25) return "landscape";
     }
   }
-  return "";
+
+  return "square";
 }
 
-function publishJobLastSync(job: PublishJob): string {
-  const insights = job.metadata_json.meta_insights;
-  if (isRecord(insights)) {
-    const syncedAt = readText(insights.synced_at);
-    if (syncedAt) return syncedAt;
-  }
-  const status = job.metadata_json.meta_status;
-  if (isRecord(status)) {
-    const syncedAt = readText(status.synced_at);
-    if (syncedAt) return syncedAt;
-  }
-  return "";
+function videoWaitSeconds(video: VideoAsset): number {
+  const startedAt =
+    Date.parse(readText(video.metadata_json?.provider_started_at)) ||
+    Date.parse(video.created_at) ||
+    Date.parse(video.updated_at);
+  if (!Number.isFinite(startedAt)) return 0;
+  return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
 }
 
-function publishJobReviewStatus(job: PublishJob): string {
-  const status = job.metadata_json.review_status;
-  return typeof status === "string" ? status : "pending";
-}
-
-function publishJobActivationStatus(job: PublishJob): string {
-  const activation = job.metadata_json.activation;
-  if (isRecord(activation)) {
-    const status = activation.status;
-    if (typeof status === "string") return status;
-  }
-  const deliveryStatus = job.metadata_json.delivery_status;
-  if (typeof deliveryStatus === "string") return deliveryStatus;
-  return "paused";
-}
-
-function publishJobMetaReviewStatus(job: PublishJob): string {
-  const status = job.metadata_json.meta_review_status;
-  if (typeof status === "string") {
-    return status.startsWith("meta_") ? status : `meta_${status}`;
-  }
-  const metaStatus = job.metadata_json.meta_status;
-  if (isRecord(metaStatus)) {
-    const summary = metaStatus.summary;
-    if (isRecord(summary)) {
-      const reviewStatus = summary.review_status;
-      if (typeof reviewStatus === "string") {
-        return reviewStatus.startsWith("meta_") ? reviewStatus : `meta_${reviewStatus}`;
-      }
-    }
-  }
-  return "meta_unsynced";
-}
-
-function publishJobInsightSummary(job: PublishJob): Record<string, unknown> | null {
-  const insights = job.metadata_json.meta_insights;
-  if (!isRecord(insights)) return null;
-  const summary = insights.summary;
-  return isRecord(summary) ? summary : null;
-}
-
-function buildPreflightChecklist({
-  landingUrl,
-  selectedCampaign,
-  selectedDraft,
-  message,
-  publishChannel,
-  publishMediaType,
-  pageId,
-  adAccountId,
-  mediaReady,
-  selectedImage,
-  selectedVideo,
-  selectedVideoReady,
-  metaDailyBudgetValue,
-  metaAdsCredentialReady,
-  latestMetaAdsJob,
-  metaAdsDraftResult,
-  isDryRunMode,
-}: {
-  landingUrl: string;
-  selectedCampaign: Campaign | null;
-  selectedDraft: CopyDraft | null;
-  message: string;
-  publishChannel: PublishChannelKey;
-  publishMediaType: PublishMediaType;
-  pageId: string;
-  adAccountId: string;
-  mediaReady: boolean;
-  selectedImage: CreativeAsset | null;
-  selectedVideo: VideoAsset | null;
-  selectedVideoReady: boolean;
-  metaDailyBudgetValue: number | null;
-  metaAdsCredentialReady: boolean;
-  latestMetaAdsJob: PublishJob | null;
-  metaAdsDraftResult: MetaAdsDraftCreateResult | null;
-  isDryRunMode: boolean;
-}): PreflightChecklistItem[] {
-  return [
-    landingPagePreflightItem(landingUrl, selectedCampaign),
-    pagePreflightItem(pageId),
-    adAccountPreflightItem(adAccountId, publishChannel),
-    creativePreflightItem(publishMediaType, mediaReady, selectedImage, selectedVideo, selectedVideoReady),
-    copyPreflightItem(message, selectedDraft),
-    budgetPreflightItem(metaDailyBudgetValue, publishChannel),
-    metaStatusPreflightItem({
-      metaAdsCredentialReady,
-      latestMetaAdsJob,
-      metaAdsDraftResult,
-      isDryRunMode,
-      publishChannel,
-    }),
-  ];
-}
-
-function landingPagePreflightItem(landingUrl: string, selectedCampaign: Campaign | null): PreflightChecklistItem {
-  if (!selectedCampaign) {
-    return {
-      label: "落地页链接",
-      status: "error",
-      value: "未选择广告项目",
-      detail: "先选择或创建广告项目，系统才能读取工单投放链接。",
-    };
-  }
-  if (!landingUrl) {
-    return {
-      label: "落地页链接",
-      status: "error",
-      value: "未找到链接",
-      detail: "工单或广告项目里缺少投放链接，真实广告无法落到目标网站。",
-    };
-  }
-  if (!isHttpUrl(landingUrl)) {
-    return {
-      label: "落地页链接",
-      status: "warning",
-      value: landingUrl,
-      detail: "链接格式不像 http/https 地址，发布前需要人工核实。",
-    };
-  }
-  return {
-    label: "落地页链接",
-    status: "ready",
-    value: landingUrl,
-    detail: "将作为广告目标网站使用。",
+function workflowStepStatusLabel(status: WorkflowStepStatus): string {
+  const labels: Record<WorkflowStepStatus, string> = {
+    done: "已完成",
+    active: "进行中",
+    blocked: "未开始",
   };
+  return labels[status];
 }
 
-function pagePreflightItem(pageId: string): PreflightChecklistItem {
-  if (!pageId.trim()) {
-    return {
-      label: "Page",
-      status: "error",
-      value: "缺少 Page ID",
-      detail: "Meta 广告需要公共主页作为广告身份。",
-    };
-  }
-  return {
-    label: "Page",
-    status: "ready",
-    value: pageId,
-    detail: "已准备公共主页身份。",
+function operationProgressText(
+  loading: string | null,
+  elapsedSeconds: number,
+): { title: string; estimate: string } | null {
+  if (!loading) return null;
+  const labels: Record<string, { title: string; estimate: string }> = {
+    topics: { title: "正在生成选题", estimate: "预计 20-60 秒" },
+    copy: { title: "正在生成文案", estimate: "预计 15-45 秒" },
+    creatives: { title: "正在生成图片", estimate: "预计 30-90 秒" },
+    "video-storyboard": { title: "正在生成视频脚本", estimate: "预计 20-60 秒" },
+    "video-storyboard-rewrite": { title: "正在改写视频脚本", estimate: "预计 20-60 秒" },
+    video: { title: "正在提交视频生成", estimate: "预计 10-30 秒" },
+    "save-final-payload": { title: "正在保存预审包", estimate: "预计几秒" },
+    "confirm-return": { title: "正在确认回传", estimate: "预计几秒" },
+    "ad-generation-refresh": { title: "正在刷新任务", estimate: "预计几秒" },
+    "campaign-refresh": { title: "正在刷新生产数据", estimate: "预计几秒" },
   };
+  return labels[loading] ?? { title: "正在处理", estimate: elapsedSeconds > 60 ? "仍在处理中" : "预计稍等片刻" };
 }
 
-function adAccountPreflightItem(adAccountId: string, publishChannel: PublishChannelKey): PreflightChecklistItem {
-  if (publishChannel !== "facebook_ad") {
-    return {
-      label: "Ad Account",
-      status: "warning",
-      value: "当前是 Facebook Page",
-      detail: "真实投流前请切换到 Facebook Ads 并确认广告账户。",
-    };
-  }
-  if (!adAccountId.trim()) {
-    return {
-      label: "Ad Account",
-      status: "error",
-      value: "缺少广告账户",
-      detail: "真实创建 Campaign / Ad Set / Ad 必须有广告账户。",
-    };
-  }
-  return {
-    label: "Ad Account",
-    status: "ready",
-    value: adAccountId,
-    detail: "已准备广告账户。",
-  };
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
 }
 
-function creativePreflightItem(
-  publishMediaType: PublishMediaType,
-  mediaReady: boolean,
-  selectedImage: CreativeAsset | null,
-  selectedVideo: VideoAsset | null,
-  selectedVideoReady: boolean,
-): PreflightChecklistItem {
-  if (publishMediaType === "image") {
-    return mediaReady && selectedImage
-      ? {
-          label: "素材",
-          status: "ready",
-          value: imageOptionLabel(selectedImage),
-          detail: "已选择图片素材。",
-        }
-      : {
-          label: "素材",
-          status: "error",
-          value: "未选择图片",
-          detail: "当前选择图片投放，需要先选择可访问的图片素材。",
-        };
-  }
-  if (publishMediaType === "video") {
-    if (selectedVideoReady && selectedVideo) {
-      return {
-        label: "素材",
-        status: "ready",
-        value: videoOptionLabel(selectedVideo),
-        detail: "已选择可发布的视频素材。",
-      };
-    }
-    return {
-      label: "素材",
-      status: "error",
-      value: selectedVideo ? statusLabel(selectedVideo.status) : "未选择视频",
-      detail: "当前选择视频投放，需要可发布的视频或已上传 Meta Video。",
-    };
-  }
-  return {
-    label: "素材",
-    status: "error",
-    value: "缺少素材",
-    detail: "投放素材只支持图片或视频，请先生成并选择素材。",
-  };
-}
+function copyPreviewCreatives(creatives: CreativeAsset[], selectedDraft: CopyDraft | null): CreativeAsset[] {
+  const draftId = selectedDraft?.id ?? null;
+  return creatives
+    .filter((asset) => Boolean(asset.url))
+    .slice()
+    .sort((left, right) => {
+      const leftDraftRank = draftId && left.draft_id === draftId ? 0 : 1;
+      const rightDraftRank = draftId && right.draft_id === draftId ? 0 : 1;
+      if (leftDraftRank !== rightDraftRank) return leftDraftRank - rightDraftRank;
 
-function copyPreflightItem(message: string, selectedDraft: CopyDraft | null): PreflightChecklistItem {
-  const trimmed = message.trim();
-  if (!trimmed) {
-    return {
-      label: "文案",
-      status: "error",
-      value: "缺少正文",
-      detail: "发布正文为空，先选择或生成审核通过的文案。",
-    };
-  }
-  if (!selectedDraft) {
-    return {
-      label: "文案",
-      status: "warning",
-      value: `${trimmed.length} 字`,
-      detail: "有正文，但未关联文案草稿，建议先走人工审核。",
-    };
-  }
-  if (selectedDraft.status !== "approved") {
-    return {
-      label: "文案",
-      status: "warning",
-      value: statusLabel(selectedDraft.status),
-      detail: "文案还不是已通过状态，真实投放前建议先审核通过。",
-    };
-  }
-  return {
-    label: "文案",
-    status: "ready",
-    value: `${trimmed.length} 字 / 已通过`,
-    detail: "正文已准备好。",
-  };
-}
+      const leftStatusRank = creativePreviewStatusRank(left.status);
+      const rightStatusRank = creativePreviewStatusRank(right.status);
+      if (leftStatusRank !== rightStatusRank) return leftStatusRank - rightStatusRank;
 
-function budgetPreflightItem(
-  metaDailyBudgetValue: number | null,
-  publishChannel: PublishChannelKey,
-): PreflightChecklistItem {
-  if (publishChannel !== "facebook_ad") {
-    return {
-      label: "预算",
-      status: "warning",
-      value: "当前渠道不使用预算",
-      detail: "真实广告投放前请切换 Facebook Ads 并填写 daily_budget。",
-    };
-  }
-  if (!metaDailyBudgetValue) {
-    return {
-      label: "预算",
-      status: "error",
-      value: "缺少 daily_budget",
-      detail: "真实创建 Ad Set 必须有日预算，按广告账户最小货币单位填写。",
-    };
-  }
-  return {
-    label: "预算",
-    status: "ready",
-    value: `daily_budget ${metaDailyBudgetValue}`,
-    detail: "预算已填写，真实创建后默认保持 PAUSED。",
-  };
-}
-
-function metaStatusPreflightItem({
-  metaAdsCredentialReady,
-  latestMetaAdsJob,
-  metaAdsDraftResult,
-  isDryRunMode,
-  publishChannel,
-}: {
-  metaAdsCredentialReady: boolean;
-  latestMetaAdsJob: PublishJob | null;
-  metaAdsDraftResult: MetaAdsDraftCreateResult | null;
-  isDryRunMode: boolean;
-  publishChannel: PublishChannelKey;
-}): PreflightChecklistItem {
-  if (publishChannel !== "facebook_ad") {
-    return {
-      label: "Meta 状态",
-      status: "warning",
-      value: "Page 发布模式",
-      detail: "当前不会创建 Meta 广告结构，真实投流前请切到 Facebook Ads。",
-    };
-  }
-  if (!metaAdsCredentialReady) {
-    return {
-      label: "Meta 状态",
-      status: "error",
-      value: "账号配置不完整",
-      detail: "需要 Page ID、Ad Account ID 和 Ad Token。",
-    };
-  }
-  if (isDryRunMode) {
-    return {
-      label: "Meta 状态",
-      status: "warning",
-      value: "dry-run 模式",
-      detail: "当前只会预览 payload，不会真实创建 Meta 广告。",
-    };
-  }
-  if (metaAdsDraftResult?.error_message) {
-    return {
-      label: "Meta 状态",
-      status: "error",
-      value: "创建失败",
-      detail: metaAdsDraftResult.error_message,
-    };
-  }
-  if (!latestMetaAdsJob) {
-    return {
-      label: "Meta 状态",
-      status: "warning",
-      value: "尚未准备投流包",
-      detail: "资料齐全后，先准备待审核投流包，再一键创建 Meta 广告。",
-    };
-  }
-
-  const reviewStatus = publishJobReviewStatus(latestMetaAdsJob);
-  const metaReviewStatus = publishJobMetaReviewStatus(latestMetaAdsJob);
-  const activationStatus = publishJobActivationStatus(latestMetaAdsJob);
-  if (latestMetaAdsJob.status === "failed" || reviewStatus === "rejected" || metaReviewStatus === "meta_rejected") {
-    return {
-      label: "Meta 状态",
-      status: "error",
-      value: statusLabel(metaReviewStatus),
-      detail: latestMetaAdsJob.error_message || "Meta 或人工审核未通过，需要调整后重新创建。",
-    };
-  }
-  if (activationStatus === "active" || activationStatus === "meta_active") {
-    return {
-      label: "Meta 状态",
-      status: "ready",
-      value: "投放中",
-      detail: "Meta 广告已经启用。",
-    };
-  }
-  if (metaReviewStatus === "meta_approved") {
-    return {
-      label: "Meta 状态",
-      status: "ready",
-      value: "Meta 已通过",
-      detail: "广告已通过 Meta 审核，可按确认流程启用投放。",
-    };
-  }
-  if (reviewStatus !== "approved") {
-    return {
-      label: "Meta 状态",
-      status: "warning",
-      value: "待人工审核",
-      detail: "投流包还没有人工审核通过。",
-    };
-  }
-  return {
-    label: "Meta 状态",
-    status: "warning",
-    value: statusLabel(metaReviewStatus),
-    detail: "Meta 广告已准备，建议同步审核状态后再启用投放。",
-  };
-}
-
-function publishJobBlockingPreflightItems(job: PublishJob): PreflightChecklistItem[] {
-  if (!isMetaAdsPackageJob(job)) return [];
-  const items: PreflightChecklistItem[] = [];
-  const plan = publishJobPreparedPlan(job);
-  const dryRun = publishJobIsDryRun(job);
-  const reviewStatus = publishJobReviewStatus(job);
-  const pageId = readText(job.payload.page_id) || readText(plan?.page_id);
-  const adAccountId = readText(job.payload.ad_account_id) || readText(plan?.ad_account_id);
-  const destinationUrl = readText(plan?.destination_url);
-  const mediaType = readText(job.payload.media_type) || readText(plan?.media_type);
-  const adsetPayload = isRecord(plan?.adset_payload) ? plan.adset_payload : null;
-  const dailyBudget = readText(adsetPayload?.daily_budget);
-
-  if (reviewStatus !== "approved") {
-    items.push({
-      label: "人工审核",
-      status: "error",
-      value: statusLabel(reviewStatus),
-      detail: "投流包必须先审核通过，才能一键发布。",
+      return Date.parse(right.created_at) - Date.parse(left.created_at);
     });
-  }
-  if (!plan) {
-    items.push({
-      label: "投流包",
-      status: "error",
-      value: "缺少 plan",
-      detail: "任务 payload 缺少 Campaign / Ad Set / Ad 计划，无法发布。",
-    });
-    return items;
-  }
-  if (!destinationUrl || !isHttpUrl(destinationUrl)) {
-    items.push({
-      label: "落地页链接",
-      status: "error",
-      value: destinationUrl || "缺少链接",
-      detail: "Meta 广告必须有有效的目标网站链接。",
-    });
-  }
-  if (!["image", "video"].includes(mediaType)) {
-    items.push({
-      label: "素材",
-      status: "error",
-      value: mediaType || "缺少素材类型",
-      detail: "投放任务必须使用图片或视频素材，不能发布纯文字广告。",
-    });
-  }
-  if (!dryRun && (!pageId || pageId === "dry-run-page")) {
-    items.push({
-      label: "Page",
-      status: "error",
-      value: pageId || "缺少 Page ID",
-      detail: "真实发布必须使用有效 Page ID，不能使用 dry-run 占位值。",
-    });
-  }
-  if (!dryRun && (!adAccountId || adAccountId === "dry-run-ad-account")) {
-    items.push({
-      label: "Ad Account",
-      status: "error",
-      value: adAccountId || "缺少广告账户",
-      detail: "真实发布必须使用有效广告账户，不能使用 dry-run 占位值。",
-    });
-  }
-  if (!dailyBudget || dailyBudget === "<DAILY_BUDGET_REQUIRED>") {
-    items.push({
-      label: "预算",
-      status: "error",
-      value: dailyBudget || "缺少 daily_budget",
-      detail: "发布 Meta Ad Set 必须有 daily_budget。",
-    });
-  }
-  if (containsRequiredPlaceholder(plan)) {
-    items.push({
-      label: "Meta payload",
-      status: "error",
-      value: "存在占位字段",
-      detail: "payload 中仍有 REQUIRED 占位符，需要先补齐字段。",
-    });
-  }
-  return items;
 }
 
-function publishJobWarningPreflightItems(job: PublishJob): PreflightChecklistItem[] {
-  if (!isMetaAdsPackageJob(job)) return [];
-  const items: PreflightChecklistItem[] = [];
-  const plan = publishJobPreparedPlan(job);
-  const dryRun = publishJobIsDryRun(job);
-  const mediaType = readText(job.payload.media_type) || readText(plan?.media_type);
-  const metaReviewStatus = publishJobMetaReviewStatus(job);
-  const planWarnings = Array.isArray(job.metadata_json.preflight_warnings)
-    ? job.metadata_json.preflight_warnings.map(readText).filter(Boolean)
-    : [];
-
-  if (dryRun) {
-    items.push({
-      label: "发布模式",
-      status: "warning",
-      value: "dry-run",
-      detail: "继续后只会模拟创建，不会真实创建 Meta 广告。",
-    });
-  }
-  if (job.status !== "published") {
-    items.push({
-      label: "投放状态",
-      status: "warning",
-      value: "将创建为 PAUSED",
-      detail: "一键发布只创建广告结构，启用投放仍需后续人工确认。",
-    });
-  }
-  if (!["meta_approved", "meta_unsynced", "meta_paused"].includes(metaReviewStatus)) {
-    items.push({
-      label: "Meta 审核",
-      status: "warning",
-      value: statusLabel(metaReviewStatus),
-      detail: "建议发布后同步 Meta 审核状态，再决定是否启用投放。",
-    });
-  }
-  for (const warning of planWarnings.slice(0, 4)) {
-    items.push({
-      label: "后端预检",
-      status: "warning",
-      value: "需要确认",
-      detail: warning,
-    });
-  }
-  return dedupePreflightItems(items);
+function creativePreviewStatusRank(status: string): number {
+  if (status === "approved") return 0;
+  if (status === "rejected") return 2;
+  return 1;
 }
 
-function publishJobPreparedPlan(job: PublishJob): Record<string, unknown> | null {
-  const plan = job.payload.plan;
-  if (!isRecord(plan)) return null;
-  return plan;
+function imagePromptTitle(prompt: string): string {
+  return prompt.split("\n")[0].slice(0, 60) || "图片素材";
 }
 
-function publishJobIsDryRun(job: PublishJob): boolean {
-  if (job.payload.dry_run === true) return true;
-  const plan = publishJobPreparedPlan(job);
-  const metaPayload = isRecord(plan?.meta_payload) ? plan.meta_payload : null;
-  return metaPayload?.dry_run === true;
+function filenameFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  return url.split("?")[0].replace(/\/$/, "").split("/").pop() || null;
 }
 
-function containsRequiredPlaceholder(value: unknown): boolean {
-  if (typeof value === "string") return value.includes("<") && value.includes("REQUIRED");
-  if (Array.isArray(value)) return value.some(containsRequiredPlaceholder);
-  if (isRecord(value)) return Object.values(value).some(containsRequiredPlaceholder);
-  return false;
-}
-
-function dedupePreflightItems(items: PreflightChecklistItem[]): PreflightChecklistItem[] {
-  const seen = new Set<string>();
-  return items.filter((item) => {
-    const key = `${item.label}:${item.value}:${item.detail}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function landingUrlFromCampaign(campaign: Campaign | null): string {
-  const metadata = campaign?.metadata_json ?? {};
-  const landingPage = isRecord(metadata.landing_page) ? metadata.landing_page : null;
-  const workOrder = isRecord(metadata.work_order) ? metadata.work_order : null;
-  const parsedFields = isRecord(workOrder?.parsed_fields) ? workOrder.parsed_fields : null;
-  return (
-    readText(landingPage?.url) ||
-    readText(workOrder?.landing_url) ||
-    readText(parsedFields?.landing_url)
-  );
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
+function stringifyValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(stringifyValue).join(", ");
+  if (typeof value === "object" && value !== null) return JSON.stringify(value);
+  return String(value);
 }
 
 function readText(value: unknown): string {
@@ -5630,489 +4504,16 @@ function readText(value: unknown): string {
   return "";
 }
 
-function numberLabel(value: unknown): string {
-  const text = readText(value);
-  if (!text) return "0";
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed.toLocaleString() : text;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function moneyLabel(value: unknown, currency: string): string {
-  const text = readText(value);
-  if (!text) return `0.00 ${currency}`;
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? `${parsed.toFixed(2)} ${currency}` : `${text} ${currency}`;
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
 }
 
-function budgetLabel(summary: Record<string, unknown>, currency: string): string {
-  const amount = readText(summary.budget_amount);
-  if (!amount) return "-";
-  const type = readText(summary.budget_type) === "lifetime_budget" ? "总预算" : "日预算";
-  return `${type} ${minorCurrencyLabel(amount, currency)}`;
-}
-
-function minorCurrencyLabel(value: string, currency: string): string {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return `${value} ${currency}`;
-  const zeroDecimalCurrencies = new Set(["BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"]);
-  const amount = zeroDecimalCurrencies.has(currency.toUpperCase()) ? parsed : parsed / 100;
-  return `${amount.toLocaleString(undefined, {
-    minimumFractionDigits: zeroDecimalCurrencies.has(currency.toUpperCase()) ? 0 : 2,
-    maximumFractionDigits: zeroDecimalCurrencies.has(currency.toUpperCase()) ? 0 : 2,
-  })} ${currency}`;
-}
-
-function rankingLabel(value: unknown): string {
-  const ranking = readText(value);
-  const labels: Record<string, string> = {
-    ABOVE_AVERAGE: "高于平均",
-    AVERAGE: "平均",
-    BELOW_AVERAGE_35: "低于平均 35%",
-    BELOW_AVERAGE_20: "低于平均 20%",
-    BELOW_AVERAGE_10: "低于平均 10%",
-    UNKNOWN: "数据不足",
-  };
-  return labels[ranking] ?? (ranking || "数据不足");
-}
-
-function resultTypeLabel(value: string): string {
-  const labels: Record<string, string> = {
-    link_click: "链接点击",
-    landing_page_view: "落地页浏览",
-    purchase: "购买",
-    "offsite_conversion.fb_pixel_purchase": "购买",
-    add_to_cart: "加购",
-    "offsite_conversion.fb_pixel_add_to_cart": "加购",
-    lead: "线索",
-  };
-  return labels[value] ?? value;
-}
-
-function imageOptionLabel(asset: CreativeAsset): string {
-  return asset.alt_text || asset.prompt || asset.url || shortId(asset.id);
-}
-
-function imagePromptTitle(prompt: string | null | undefined): string {
-  const text = prompt || "";
-  const titleLine = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.startsWith("主题：") || line.toLowerCase().startsWith("theme:"));
-  if (titleLine) {
-    return titleLine.replace(/^主题：/i, "").replace(/^theme:/i, "").trim();
-  }
-  return text.split(/\r?\n/).find(Boolean)?.trim().slice(0, 80) || "";
-}
-
-function videoOptionLabel(video: VideoAsset): string {
-  const duration = video.duration_seconds ? `${video.duration_seconds}s` : "-";
-  const uploadMode = metaVideoId(video) ? "Meta Video" : hasLocalVideoFile(video) ? "local file" : "no upload file";
-  return `${video.aspect_ratio} / ${duration} / ${statusLabel(video.status)} / ${uploadMode} / ${shortId(video.id)}`;
-}
-
-function videoTaskStateLabel(video: VideoAsset): string {
-  if (video.status === "approved") return "已通过，可用于发布";
-  if (video.status === "rejected") return "已拒绝";
-  if (video.status === "failed") return "生成失败，可重试";
-  if (video.status === "generating") return "生成中，稍后刷新";
-  if (video.url || video.status === "generated") return "已生成，待审核";
-  if (video.provider_job_id) return "已提交，等待结果";
-  return "待开始生成";
-}
-
-function videoReviewLabel(video: VideoAsset): string {
-  if (video.status === "approved") return "已通过";
-  if (video.status === "rejected") return "已拒绝";
-  if (video.url || video.status === "generated") return "待审核";
-  return "生成后审核";
-}
-
-function pixelOptionLabel(pixel: AdPixel): string {
-  const name = pixel.name || "Meta Pixel";
-  const fired = pixel.last_fired_time ? ` / 最近触发：${formatDate(pixel.last_fired_time)}` : "";
-  return `${name} (${pixel.id})${fired}`;
-}
-
-function formatMetaPixelError(message: string): string {
-  if (message.includes("API access blocked") || message.includes('"code":200')) {
-    return "Meta 阻止了当前 token 读取 Pixel 列表。可以先手动填写 Pixel ID；后续需要确认应用权限、广告账户权限或 BM 资产授权。";
-  }
-  if (message.includes("Ad Account ID is required")) {
-    return "请先选择广告账户 Ad Account。";
-  }
-  if (message.includes("access token")) {
-    return "当前账号缺少可用的 Ads Token，请重新授权或检查 token 配置。";
-  }
-  return message;
-}
-
-function isPublishableVideo(video: VideoAsset): boolean {
-  return ["generated", "approved"].includes(video.status) && Boolean(metaVideoId(video) || hasLocalVideoFile(video));
-}
-
-function hasLocalVideoFile(video: VideoAsset | null): boolean {
-  return Boolean(video?.storage_key?.startsWith("local://"));
-}
-
-function metaVideoId(video: VideoAsset | null): string | null {
-  const value = video?.metadata_json?.facebook_video_id;
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function buildMetaIdentityOptions(
-  accounts: MetaAccount[],
-  _config: FacebookPublishConfig | null,
-): MetaIdentityOption[] {
-  const groups = new Map<string, MetaIdentityOption>();
-  for (const account of accounts) {
-    const key = metaIdentityKey(account);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.accounts.push(account);
-      continue;
-    }
-    groups.set(key, {
-      key,
-      label: metaIdentityLabel(account),
-      subtitle: "",
-      accounts: [account],
-      pages: [],
-      adAccounts: [],
-    });
-  }
-
-  return Array.from(groups.values()).map((identity) => {
-    const pages = dedupeMetaAssetOptions(
-      identity.accounts.flatMap((account) => metaPageOptionsForAccount(account)),
-    );
-    const adAccounts = dedupeMetaAssetOptions(
-      identity.accounts.flatMap((account) =>
-        metaAdAccountOptionsForAccount(account).map((option) => ({
-          ...option,
-          accountId: accountIdForAdAccount(identity.accounts, option.id, option.accountId),
-        })),
-      ),
-    );
-    return {
-      ...identity,
-      pages,
-      adAccounts,
-      subtitle: `${adAccounts.length || 0} 个广告账户 / ${pages.length || 0} 个 Page`,
-    };
-  });
-}
-
-function metaIdentityKey(account: MetaAccount): string {
-  const oauthUser = metaOAuthUser(account);
-  const userId = readText(oauthUser?.id);
-  return userId ? `user:${userId}` : `account:${account.id}`;
-}
-
-function metaIdentityLabel(account: MetaAccount): string {
-  const oauthUser = metaOAuthUser(account);
-  return (
-    readText(oauthUser?.name) ||
-    cleanMetaIdentityName(account.name, account) ||
-    account.ad_account_name ||
-    account.ad_account_id ||
-    shortId(account.id)
-  );
-}
-
-function cleanMetaIdentityName(value: unknown, account: MetaAccount): string {
-  let text = readText(value);
-  if (!text) return "";
-
-  const pageNames = new Set<string>();
-  if (account.page_name) pageNames.add(account.page_name);
-  if (account.page_id) pageNames.add(account.page_id);
-  for (const page of account.available_pages ?? []) {
-    const name = readText(page.name);
-    const id = readText(page.id);
-    if (name) pageNames.add(name);
-    if (id) pageNames.add(id);
-  }
-
-  for (const pageName of pageNames) {
-    const suffix = ` / ${pageName}`;
-    if (text.endsWith(suffix)) {
-      text = text.slice(0, -suffix.length).trim();
-      break;
-    }
-  }
-  return text;
-}
-
-function metaOAuthUser(account: MetaAccount): Record<string, unknown> | null {
-  const value = account.metadata_json?.oauth_user;
-  return isRecord(value) ? value : null;
-}
-
-function metaPageOptionsForAccount(account: MetaAccount): MetaAssetOption[] {
-  const rawPages = Array.isArray(account.available_pages) ? account.available_pages : [];
-  const options: MetaAssetOption[] = [];
-  for (const page of rawPages) {
-    const id = readText(page.id);
-    if (!id) continue;
-    const name = readText(page.name) || id;
-    options.push({
-      id,
-      name,
-      label: `${name} (${id})`,
-      accountId: account.id,
-    });
-  }
-
-  if (account.page_id && !options.some((item) => item.id === account.page_id)) {
-    const name = account.page_name || account.page_id;
-    options.unshift({
-      id: account.page_id,
-      name,
-      label: `${name} (${account.page_id})`,
-      accountId: account.id,
-    });
-  }
-  return options;
-}
-
-function metaAdAccountOptionsForAccount(account: MetaAccount): MetaAssetOption[] {
-  const rawAdAccounts = Array.isArray(account.available_ad_accounts)
-    ? account.available_ad_accounts
-    : [];
-  const options: MetaAssetOption[] = [];
-  for (const adAccount of rawAdAccounts) {
-    const id = normalizeMetaAdAccountId(readText(adAccount.id) || readText(adAccount.account_id));
-    if (!id) continue;
-    const business = isRecord(adAccount.business) ? adAccount.business : null;
-    const businessId = readText(business?.id) || null;
-    const businessName = readText(business?.name) || null;
-    const name = readText(adAccount.name) || id;
-    options.push({
-      id,
-      name,
-      label: businessName ? `${name} (${id}) / BM: ${businessName}` : `${name} (${id})`,
-      accountId: account.id,
-      businessId,
-      businessName,
-    });
-  }
-
-  const accountAdId = normalizeMetaAdAccountId(account.ad_account_id);
-  if (accountAdId && !options.some((item) => item.id === accountAdId)) {
-    const name = account.ad_account_name || accountAdId;
-    options.unshift({
-      id: accountAdId,
-      name,
-      label: account.business_name
-        ? `${name} (${accountAdId}) / BM: ${account.business_name}`
-        : `${name} (${accountAdId})`,
-      accountId: account.id,
-      businessId: account.business_id,
-      businessName: account.business_name,
-    });
-  }
-  return options;
-}
-
-function dedupeMetaAssetOptions(options: MetaAssetOption[]): MetaAssetOption[] {
-  const byId = new Map<string, MetaAssetOption>();
-  for (const option of options) {
-    const existing = byId.get(option.id);
-    if (!existing) {
-      byId.set(option.id, { ...option });
-      continue;
-    }
-    if (!existing.accountId && option.accountId) existing.accountId = option.accountId;
-    if (!existing.businessId && option.businessId) existing.businessId = option.businessId;
-    if (!existing.businessName && option.businessName) existing.businessName = option.businessName;
-  }
-  return Array.from(byId.values());
-}
-
-function accountIdForAdAccount(
-  accounts: MetaAccount[],
-  adAccountId: string,
-  fallbackAccountId: string | null,
-): string | null {
-  const matched = accounts.find(
-    (account) => normalizeMetaAdAccountId(account.ad_account_id) === adAccountId,
-  );
-  return matched?.id ?? fallbackAccountId;
-}
-
-function normalizeMetaAdAccountId(value: unknown): string {
-  const text = readText(value);
-  if (!text) return "";
-  return text.startsWith("act_") ? text : `act_${text}`;
-}
-
-function metaAccountIdentitySummary(
-  account: MetaAccount | null,
-  config: FacebookPublishConfig | null,
-  selectedPage?: MetaAssetOption | null,
-  selectedAdAccount?: MetaAssetOption | null,
-  selectedIdentity?: MetaIdentityOption | null,
-): {
-  accountName: string;
-  subtitle: string;
-  pageLabel: string;
-  adAccountLabel: string;
-  businessLabel: string;
-  tokenLabel: string;
-  expiryLabel: string;
-} {
-  if (!account) {
-    return {
-      accountName: ".env 默认账号",
-      subtitle: "未选择 OAuth 授权账号，将使用本地环境变量配置",
-      pageLabel: config?.page.id || (config?.page.id_configured ? "已配置" : "未配置"),
-      adAccountLabel: config?.ads.ad_account_id || (config?.ads.ad_account_configured ? "已配置" : "未配置"),
-      businessLabel: "-",
-      tokenLabel: [
-        config?.page.access_token_configured ? "Page Token 已配置" : "Page Token 未配置",
-        config?.ads.access_token_configured ? "Ad Token 已配置" : "Ad Token 未配置",
-      ].join(" / "),
-      expiryLabel: "环境变量 Token",
-    };
-  }
-
-  return {
-    accountName:
-      selectedIdentity?.label ||
-      metaIdentityLabel(account) ||
-      account.ad_account_name ||
-      account.ad_account_id ||
-      shortId(account.id),
-    subtitle:
-      selectedIdentity?.subtitle ||
-      `${account.ad_account_name || account.ad_account_id || "未绑定 Ad Account"} / ${
-        account.page_name || account.page_id || "未绑定 Page"
-      }`,
-    pageLabel:
-      selectedPage?.label ||
-      (account.page_name
-        ? `${account.page_name}${account.page_id ? ` (${account.page_id})` : ""}`
-        : account.page_id || "未绑定 Page"),
-    adAccountLabel:
-      selectedAdAccount?.label ||
-      (account.ad_account_name
-        ? `${account.ad_account_name}${account.ad_account_id ? ` (${account.ad_account_id})` : ""}`
-        : account.ad_account_id || "未绑定 Ad Account"),
-    businessLabel: selectedAdAccount?.businessName
-      ? `${selectedAdAccount.businessName}${
-          selectedAdAccount.businessId ? ` (${selectedAdAccount.businessId})` : ""
-        }`
-      : account.business_name
-        ? `${account.business_name}${account.business_id ? ` (${account.business_id})` : ""}`
-        : account.business_id || "未绑定 BM",
-    tokenLabel: account.access_token_configured
-      ? account.page_access_token_configured
-        ? "Ad Token / Page Token 可用"
-        : "Ad Token 可用，Page Token 未配置"
-      : "Token 未配置",
-    expiryLabel: metaTokenExpiryLabel(account.token_expires_at),
-  };
-}
-
-function metaAccountIdentityHealth(
-  account: MetaAccount | null,
-  config: FacebookPublishConfig | null,
-  selectedPageId?: string,
-  selectedAdAccountId?: string,
-  selectedPage?: MetaAssetOption | null,
-  selectedAdAccount?: MetaAssetOption | null,
-): { status: PreflightStatus; label: string; notes: string[] } {
-  const notes: string[] = [];
-
-  if (!account) {
-    if (!config?.page.id_configured) notes.push("缺少 Page ID");
-    if (!config?.ads.ad_account_configured) notes.push("缺少 Ad Account ID");
-    if (!config?.ads.access_token_configured) notes.push("缺少 Ad Token");
-    if (!config?.page.access_token_configured) notes.push("缺少 Page Token");
-    if (notes.some((note) => note.includes("缺少"))) {
-      return { status: "error", label: "默认账号不完整", notes };
-    }
-    return { status: "ready", label: "默认账号可用", notes: ["当前使用 .env 默认配置"] };
-  }
-
-  const effectivePageId = selectedPageId || account.page_id || "";
-  const effectiveAdAccountId =
-    normalizeMetaAdAccountId(selectedAdAccountId) || normalizeMetaAdAccountId(account.ad_account_id);
-  const hasPageOptions = (account.available_pages ?? []).length > 0;
-  const hasAdAccountOptions = (account.available_ad_accounts ?? []).length > 0;
-
-  if (!effectivePageId) notes.push("缺少 Page");
-  if (!effectiveAdAccountId) notes.push("缺少 Ad Account");
-  if (!account.access_token_configured) notes.push("缺少 Ad Token");
-  if (!account.page_access_token_configured) notes.push("Page Token 未确认，发布主页内容会受影响");
-  if (selectedPageId && hasPageOptions && !selectedPage) notes.push("所选 Page 不在授权资产列表");
-  if (selectedAdAccountId && hasAdAccountOptions && !selectedAdAccount) {
-    notes.push("所选 Ad Account 不在授权资产列表");
-  }
-
-  const expiry = metaTokenExpiryState(account.token_expires_at);
-  if (expiry === "expired") notes.push("Token 已过期");
-  if (expiry === "soon") notes.push("Token 即将过期");
-  if (!account.business_id && !account.business_name) notes.push("未绑定 BM，可继续但建议核实归属");
-  if (account.status && !["active", "connected"].includes(account.status)) {
-    notes.push(`账号状态：${account.status}`);
-  }
-
-  if (
-    notes.some(
-      (note) =>
-        note.includes("缺少") ||
-        note.includes("已过期") ||
-        note.includes("不在授权资产列表"),
-    )
-  ) {
-    return { status: "error", label: "账号不可用", notes };
-  }
-  if (notes.length) {
-    return { status: "warning", label: "需要确认", notes };
-  }
-  return { status: "ready", label: "投放身份可用", notes: ["Page、Ad Account、Token 已准备"] };
-}
-
-function metaTokenExpiryState(value: string | null): "unknown" | "valid" | "soon" | "expired" {
-  if (!value) return "unknown";
-  const expiresAt = Date.parse(value);
-  if (!Number.isFinite(expiresAt)) return "unknown";
-  const daysLeft = (expiresAt - Date.now()) / 86400000;
-  if (daysLeft < 0) return "expired";
-  if (daysLeft <= 7) return "soon";
-  return "valid";
-}
-
-function metaTokenExpiryLabel(value: string | null): string {
-  if (!value) return "未提供过期时间";
-  const expiresAt = Date.parse(value);
-  if (!Number.isFinite(expiresAt)) return value;
-  const daysLeft = Math.ceil((expiresAt - Date.now()) / 86400000);
-  const date = new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(expiresAt));
-  if (daysLeft < 0) return `${date} 已过期`;
-  if (daysLeft === 0) return `${date} 今日到期`;
-  return `${date} / ${daysLeft} 天后到期`;
-}
-
-function metaAccountEnvOptionLabel(config: FacebookPublishConfig | null): string {
-  const page = config?.page.id || (config?.page.id_configured ? "Page 已配置" : "Page 未配置");
-  const ad = config?.ads.ad_account_id || (config?.ads.ad_account_configured ? "Ad Account 已配置" : "Ad Account 未配置");
-  return `${ad} / ${page}`;
-}
-
-function metaAccountOptionLabel(account: MetaAccount): string {
-  const health = metaAccountIdentityHealth(account, null);
-  const adAccount = account.ad_account_name || account.ad_account_id || "未绑定 Ad Account";
-  const page = account.page_name || account.page_id || "未绑定 Page";
-  return `${health.label} / ${adAccount} / Page: ${page}`;
-}
-
-function formatDate(value: string): string {
+function formatDate(value: string | null): string {
+  if (!value) return "-";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -6121,37 +4522,8 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
-function campaignOptionLabel(campaign: Campaign, index: number): string {
-  const latest = index === 0 ? "（最新）" : "";
-  return `${campaign.name}${latest} · ${formatDate(campaign.created_at)} · ${shortId(campaign.id)}`;
-}
-
 function shortId(value: string): string {
   return value.slice(0, 8);
-}
-
-function isToday(value: string): boolean {
-  const date = new Date(value);
-  const today = new Date();
-  return date.toDateString() === today.toDateString();
-}
-
-function stringifyValue(value: unknown): string {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseOptionalInteger(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 export default App;

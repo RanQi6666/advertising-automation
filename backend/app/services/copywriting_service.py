@@ -7,6 +7,7 @@ from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.enums import DraftStatus
 from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm import get_llm_provider
+from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.copywriting import CopyGenerateRequest, CopyReviseRequest
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.utils import get_required
@@ -29,6 +30,10 @@ class CopywritingService:
             session,
             campaign,  # type: ignore[arg-type]
         )
+        target_language = build_target_language_context(
+            campaign=campaign,
+            context={"landing_page": landing_page_context},
+        )
         candidate = await self.llm.generate_copy(
             campaign=campaign,  # type: ignore[arg-type]
             topic=topic,  # type: ignore[arg-type]
@@ -44,7 +49,10 @@ class CopywritingService:
             cta=candidate.cta,
             model_name=self.settings.llm_model,
             prompt_version="copywriting.v1",
-            metadata_json={"landing_page": landing_page_context} if landing_page_context else {},
+            metadata_json={
+                **({"landing_page": landing_page_context} if landing_page_context else {}),
+                "target_language": target_language,
+            },
         )
         session.add(draft)
         await session.commit()
@@ -60,6 +68,10 @@ class CopywritingService:
         draft = await get_required(session, CopyDraft, draft_id)
         topic = await get_required(session, ContentTopic, draft.topic_id)
         campaign = await get_required(session, Campaign, draft.campaign_id)
+        target_language = build_target_language_context(
+            campaign=campaign,
+            draft_metadata=draft.metadata_json,
+        )
         candidate = await self.llm.revise_copy(
             campaign=campaign,  # type: ignore[arg-type]
             topic=topic,  # type: ignore[arg-type]
@@ -79,7 +91,11 @@ class CopywritingService:
             version=draft.version + 1,
             model_name=self.settings.llm_model,
             prompt_version="copywriting.v1",
-            metadata_json={"revision_feedback": payload.feedback, "previous_draft_id": draft.id},
+            metadata_json={
+                "revision_feedback": payload.feedback,
+                "previous_draft_id": draft.id,
+                "target_language": target_language,
+            },
         )
         session.add(revised)
         await session.commit()

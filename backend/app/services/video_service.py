@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,7 @@ from backend.app.schemas.video import (
     VideoGenerateRequest,
     VideoStoryboardGenerateRequest,
     VideoStoryboardRead,
+    VideoStoryboardRewriteRequest,
 )
 from backend.app.services.creative_asset_urls import (
     repair_creative_asset_urls,
@@ -121,6 +124,173 @@ class VideoService:
         await session.commit()
         await session.refresh(video)
         return video
+
+    async def stream_storyboard_text(
+        self,
+        session: AsyncSession,
+        payload: VideoStoryboardGenerateRequest,
+    ) -> AsyncIterator[dict]:
+        campaign = await get_required(session, Campaign, payload.campaign_id)
+        assets = await self._load_source_assets(
+            session=session,
+            campaign_id=payload.campaign_id,
+            asset_ids=payload.creative_asset_ids,
+        )
+        draft = await self._load_draft(session, payload.draft_id, assets)
+        context = {
+            "work_order": campaign.metadata_json.get("work_order"),
+            "landing_page": await self._landing_page_context(
+                session,
+                campaign_id=payload.campaign_id,
+            ),
+        }
+        yield {
+            "type": "start",
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+        }
+
+        full_text = ""
+        try:
+            async for chunk in self.llm.stream_video_storyboard_text(
+                campaign=campaign,  # type: ignore[arg-type]
+                draft=draft,  # type: ignore[arg-type]
+                assets=assets,  # type: ignore[arg-type]
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+                context=context,
+                instructions=payload.instructions,
+            ):
+                if not chunk:
+                    continue
+                full_text += chunk
+                yield {"type": "delta", "text": chunk}
+        except Exception as exc:
+            yield {"type": "error", "message": f"视频脚本生成中断：{exc}"}
+            return
+
+        yield {
+            "type": "done",
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+            "text": full_text,
+        }
+
+    async def rewrite_storyboard(
+        self,
+        session: AsyncSession,
+        payload: VideoStoryboardRewriteRequest,
+    ) -> VideoStoryboardRead:
+        feedback = payload.feedback.strip()
+        if not feedback:
+            raise AppError("Please provide storyboard revision feedback.")
+        if not payload.storyboard and not (payload.storyboard_text or "").strip():
+            raise AppError("Please generate or enter a storyboard before rewriting it.")
+
+        campaign = await get_required(session, Campaign, payload.campaign_id)
+        assets = await self._load_source_assets(
+            session=session,
+            campaign_id=payload.campaign_id,
+            asset_ids=payload.creative_asset_ids,
+        )
+        draft = await self._load_draft(session, payload.draft_id, assets)
+        context = {
+            "work_order": campaign.metadata_json.get("work_order"),
+            "landing_page": await self._landing_page_context(
+                session,
+                campaign_id=payload.campaign_id,
+            ),
+        }
+        storyboard = await self.llm.revise_video_storyboard(
+            campaign=campaign,  # type: ignore[arg-type]
+            draft=draft,  # type: ignore[arg-type]
+            assets=assets,  # type: ignore[arg-type]
+            duration_seconds=payload.duration_seconds,
+            aspect_ratio=payload.aspect_ratio,
+            context=context,
+            current_storyboard=payload.storyboard,
+            current_storyboard_text=payload.storyboard_text,
+            feedback=feedback,
+        )
+        storyboard_items = [scene.model_dump() for scene in storyboard.scenes]
+        prompt = _storyboard_to_prompt(storyboard_items)
+        return VideoStoryboardRead(
+            campaign_id=payload.campaign_id,
+            draft_id=draft.id if draft else None,
+            creative_asset_ids=payload.creative_asset_ids,
+            duration_seconds=storyboard.duration_seconds,
+            aspect_ratio=storyboard.aspect_ratio,
+            storyboard=storyboard_items,
+            prompt=prompt,
+            metadata_json={
+                **payload.metadata_json,
+                "rationale": storyboard.rationale,
+                "provider": self.settings.llm_provider,
+                "model": self.settings.llm_model,
+                "revision_feedback": feedback,
+            },
+        )
+
+    async def stream_rewrite_storyboard_text(
+        self,
+        session: AsyncSession,
+        payload: VideoStoryboardRewriteRequest,
+    ) -> AsyncIterator[dict]:
+        feedback = payload.feedback.strip()
+        if not feedback:
+            yield {"type": "error", "message": "请先填写脚本修改意见。"}
+            return
+        if not payload.storyboard and not (payload.storyboard_text or "").strip():
+            yield {"type": "error", "message": "请先生成或填写视频脚本。"}
+            return
+
+        campaign = await get_required(session, Campaign, payload.campaign_id)
+        assets = await self._load_source_assets(
+            session=session,
+            campaign_id=payload.campaign_id,
+            asset_ids=payload.creative_asset_ids,
+        )
+        draft = await self._load_draft(session, payload.draft_id, assets)
+        context = {
+            "work_order": campaign.metadata_json.get("work_order"),
+            "landing_page": await self._landing_page_context(
+                session,
+                campaign_id=payload.campaign_id,
+            ),
+        }
+        yield {
+            "type": "start",
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+        }
+
+        full_text = ""
+        try:
+            async for chunk in self.llm.stream_video_storyboard_revision_text(
+                campaign=campaign,  # type: ignore[arg-type]
+                draft=draft,  # type: ignore[arg-type]
+                assets=assets,  # type: ignore[arg-type]
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+                context=context,
+                current_storyboard=payload.storyboard,
+                current_storyboard_text=payload.storyboard_text,
+                feedback=feedback,
+            ):
+                if not chunk:
+                    continue
+                full_text += chunk
+                yield {"type": "delta", "text": chunk}
+        except Exception as exc:
+            yield {"type": "error", "message": f"视频脚本改写中断：{exc}"}
+            return
+
+        yield {
+            "type": "done",
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+            "text": full_text,
+        }
 
     async def list_videos(
         self,

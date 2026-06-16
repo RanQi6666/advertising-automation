@@ -67,20 +67,20 @@ async def wait_creative_review_node(state: AdWorkflowState) -> AdWorkflowState:
     return {"review_feedback": decision.get("feedback", "")}
 
 
-async def prepare_publish_node(state: AdWorkflowState) -> AdWorkflowState:
-    return {"publish_job_id": state.get("publish_job_id", "")}
+async def prepare_delivery_package_node(state: AdWorkflowState) -> AdWorkflowState:
+    return {"delivery_job_id": state.get("delivery_job_id", "")}
 
 
-async def wait_publish_review_node(state: AdWorkflowState) -> AdWorkflowState:
+async def wait_final_review_node(state: AdWorkflowState) -> AdWorkflowState:
     decision = _interrupt(
         {
-            "kind": "publish_review",
+            "kind": "final_review",
             "campaign_id": state.get("campaign_id"),
-            "publish_job_id": state.get("publish_job_id"),
+            "delivery_job_id": state.get("delivery_job_id"),
         }
     )
     return {"review_feedback": decision.get("feedback", "")}
 
 
-async def publish_node(state: AdWorkflowState) -> AdWorkflowState:
-    return {"publish_job_id": state.get("publish_job_id", "")}
+async def return_delivery_package_node(state: AdWorkflowState) -> AdWorkflowState:
+    return {"delivery_job_id": state.get("delivery_job_id", "")}

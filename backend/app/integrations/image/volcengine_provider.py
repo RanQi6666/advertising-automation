@@ -1,7 +1,12 @@
+import re
+
 from openai import AsyncOpenAI
 
 from backend.app.core.errors import ProviderError
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
+
+_PLATFORM_BRAND_PATTERN = re.compile(r"\b(Facebook|Meta|Instagram)\b", re.IGNORECASE)
+_PLATFORM_LABEL_PATTERN = re.compile(r"\bSponsored(?:\s+labels?)?\b", re.IGNORECASE)
 
 
 class VolcengineImageProvider:
@@ -53,12 +58,22 @@ class VolcengineImageProvider:
 
 
 def _prompt_from_brief(brief: ImageBrief) -> str:
+    visual_direction = _platform_neutral_text(brief.visual_direction)
     return (
-        "请生成一张用于 Facebook 广告投放的图片。\n"
+        "请生成一张独立的移动端信息流广告素材图片。\n"
         f"图片序号：{brief.image_index}\n"
         f"主题：{brief.title}\n"
         f"画面文字：{brief.short_text}\n"
-        f"画面方向：{brief.visual_direction}\n"
+        f"画面方向：{visual_direction}\n"
         f"广告比例要求：{brief.size}\n"
-        "要求：画面清晰，广告感强，主体明确，文字简洁易读，适合移动端信息流。"
+        "核心要求：画面清晰，主体明确，产品或使用场景突出，商业质感强，构图适合移动端信息流。\n"
+        "文字要求：只使用上方“画面文字”字段提供的文字；如果该字段为空，不要额外生成文字。"
+        "文字需简洁、易读、不能遮挡主体。\n"
+        "禁止元素：任何社交平台品牌标识、平台 Logo、应用界面、信息流页面截图、"
+        "赞助/广告标签、点赞/评论/分享按钮、浏览器边框、手机系统截图、二维码、水印、版权标识。"
     )
+
+
+def _platform_neutral_text(value: str) -> str:
+    text = _PLATFORM_BRAND_PATTERN.sub("mobile feed", value)
+    return _PLATFORM_LABEL_PATTERN.sub("ad labels", text).strip()

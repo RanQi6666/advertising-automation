@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Query, status
+from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
@@ -13,6 +16,19 @@ service = TopicService()
 )
 async def generate_topics(payload: TopicGenerateRequest, session: DbSession):
     return await service.generate_topics(session, payload)
+
+
+@router.post("/topics/generate/stream")
+async def stream_topics(payload: TopicGenerateRequest, session: DbSession):
+    async def event_stream():
+        async for event in service.stream_topics(session, payload):
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/campaigns/{campaign_id}/topics", response_model=list[TopicRead])

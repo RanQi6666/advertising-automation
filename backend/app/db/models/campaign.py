@@ -47,7 +47,3 @@ class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="campaign",
         cascade="all, delete-orphan",
     )
-    publish_jobs = relationship(
-        "PublishJob", back_populates="campaign", cascade="all, delete-orphan"
-    )
-    insights = relationship("InsightDaily", back_populates="campaign", cascade="all, delete-orphan")

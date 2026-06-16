@@ -6,11 +6,8 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.client import Client
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
-from backend.app.db.models.facebook_account import FacebookAccount
-from backend.app.db.models.insight import InsightDaily
 from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.db.models.prompt_version import PromptVersion
-from backend.app.db.models.publish_job import PublishJob
 from backend.app.db.models.review import ReviewTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.user import User
@@ -27,11 +24,8 @@ __all__ = [
     "ContentTopic",
     "CopyDraft",
     "CreativeAsset",
-    "FacebookAccount",
-    "InsightDaily",
     "LandingPageSnapshot",
     "PromptVersion",
-    "PublishJob",
     "ReviewTask",
     "User",
     "VideoAsset",

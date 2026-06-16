@@ -72,6 +72,43 @@ export interface Campaign extends Timestamped {
   metadata_json: Record<string, unknown>;
 }
 
+export type AdGenerationStatus =
+  | "queued"
+  | "processing"
+  | "fields_review"
+  | "topic_review"
+  | "copy_review"
+  | "image_review"
+  | "video_review"
+  | "final_review"
+  | "generated"
+  | "reviewing"
+  | "reviewed"
+  | "returned"
+  | "completed"
+  | "failed"
+  | string;
+
+export interface AdGenerationJob extends Timestamped {
+  external_order_id: string | null;
+  status: AdGenerationStatus;
+  callback_url: string | null;
+  request_payload: Record<string, unknown>;
+  result_payload: Record<string, unknown>;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  metadata_json: Record<string, unknown>;
+  review_url: string | null;
+  return_url: string | null;
+}
+
+export interface AdGenerationJobAccepted {
+  job_id: string;
+  status: AdGenerationStatus;
+  review_url: string;
+}
+
 export interface LandingPageSnapshot extends Timestamped {
   campaign_id: string;
   work_order_id: string | null;
@@ -154,135 +191,6 @@ export interface VideoStoryboardResponse {
   aspect_ratio: string;
   storyboard: Record<string, unknown>[];
   prompt: string;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface PublishJob extends Timestamped {
-  campaign_id: string;
-  draft_id: string | null;
-  channel: string;
-  payload: Record<string, unknown>;
-  status: string;
-  external_id: string | null;
-  error_message: string | null;
-  scheduled_for: string | null;
-  published_at: string | null;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface AdCreativeDraft {
-  campaign_id: string;
-  draft_id: string | null;
-  topic_id: string | null;
-  destination_url: string | null;
-  headline: string;
-  primary_text: string;
-  description: string | null;
-  media_type: string;
-  creative_asset_id: string | null;
-  image_url: string | null;
-  facebook_image_hash: string | null;
-  video_asset_id: string | null;
-  facebook_video_id: string | null;
-  page_id: string | null;
-  ad_account_id: string | null;
-  cta_type: string;
-  meta_payload: Record<string, unknown>;
-  source_mapping: Record<string, unknown>;
-}
-
-export interface AdsPlanDraft {
-  campaign_id: string;
-  draft_id: string | null;
-  topic_id: string | null;
-  destination_url: string | null;
-  headline: string;
-  primary_text: string;
-  media_type: string;
-  creative_asset_id: string | null;
-  facebook_image_hash: string | null;
-  page_id: string | null;
-  ad_account_id: string | null;
-  ad_creative_id: string | null;
-  campaign_payload: Record<string, unknown>;
-  adset_payload: Record<string, unknown>;
-  creative_payload: Record<string, unknown>;
-  ad_payload: Record<string, unknown>;
-  meta_payload: Record<string, unknown>;
-  targeting_summary: Record<string, unknown>;
-  source_mapping: Record<string, unknown>;
-  warnings: string[];
-}
-
-export interface MetaAdsDraftCreateResult {
-  job_id: string;
-  status: string;
-  dry_run: boolean;
-  campaign_id: string;
-  draft_id: string | null;
-  meta_campaign_id: string | null;
-  meta_adset_id: string | null;
-  meta_ad_creative_id: string | null;
-  meta_ad_id: string | null;
-  error_message: string | null;
-  ids: Record<string, unknown>;
-  responses: Record<string, unknown>;
-  plan: Record<string, unknown>;
-  warnings: string[];
-}
-
-export interface AdPixel {
-  id: string;
-  name: string | null;
-  last_fired_time: string | null;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface FacebookPublishConfig {
-  dry_run: boolean;
-  graph_api_version: string;
-  app: {
-    app_id: string | null;
-    app_id_configured: boolean;
-    app_secret_configured: boolean;
-  };
-  page: {
-    id: string | null;
-    id_configured: boolean;
-    access_token_configured: boolean;
-    access_token_ref: string;
-  };
-  ads: {
-    ad_account_id: string | null;
-    ad_account_configured: boolean;
-    access_token_configured: boolean;
-    access_token_ref: string;
-    dry_run: boolean;
-  };
-  missing_fields: string[];
-}
-
-export interface MetaOAuthAuthorizeUrl {
-  authorization_url: string;
-  redirect_uri: string;
-  scopes: string[];
-  state: string;
-}
-
-export interface MetaAccount extends Timestamped {
-  name: string;
-  page_id: string | null;
-  page_name: string | null;
-  ad_account_id: string | null;
-  ad_account_name: string | null;
-  business_id: string | null;
-  business_name: string | null;
-  token_expires_at: string | null;
-  status: string;
-  access_token_configured: boolean;
-  page_access_token_configured: boolean;
-  available_pages: Record<string, unknown>[];
-  available_ad_accounts: Record<string, unknown>[];
   metadata_json: Record<string, unknown>;
 }
 

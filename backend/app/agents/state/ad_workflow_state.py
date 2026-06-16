@@ -8,6 +8,6 @@ class AdWorkflowState(TypedDict, total=False):
     selected_topic_id: str
     copy_draft_id: str
     creative_asset_ids: list[str]
-    publish_job_id: str
+    delivery_job_id: str
     review_feedback: str
     errors: list[str]

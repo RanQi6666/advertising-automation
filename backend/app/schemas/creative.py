@@ -7,6 +7,12 @@ class CreativeGenerateRequest(BaseModel):
     draft_id: str
     count: int = Field(default=3, ge=1, le=5)
     size: str = "1:1"
+    target_index: int | None = Field(default=None, ge=1, le=5)
+
+
+class CreativeRegenerateRequest(BaseModel):
+    feedback: str = Field(min_length=1, max_length=2000)
+    size: str | None = None
 
 
 class CreativeAssetRead(TimestampedRead):

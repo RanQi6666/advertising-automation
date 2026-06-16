@@ -6,11 +6,8 @@ from backend.app.api.v1.endpoints import (
     copywriting,
     creatives,
     health,
-    insights,
     landing_pages,
     legal,
-    meta_oauth,
-    publishing,
     reviews,
     topics,
     videos,
@@ -28,7 +25,4 @@ api_router.include_router(copywriting.router, tags=["copywriting"])
 api_router.include_router(creatives.router, tags=["creatives"])
 api_router.include_router(videos.router, tags=["videos"])
 api_router.include_router(reviews.router, tags=["reviews"])
-api_router.include_router(publishing.router, tags=["publishing"])
-api_router.include_router(insights.router, tags=["insights"])
-api_router.include_router(meta_oauth.router, tags=["meta-oauth"])
 api_router.include_router(legal.router, tags=["legal"])
