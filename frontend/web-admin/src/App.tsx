@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError, api } from "./lib/api";
+import { ApiError, api, getAccessToken } from "./lib/api";
 import type { CreativeStreamEvent, TopicStreamEvent, VideoStoryboardTextStreamEvent } from "./lib/api";
 import type {
   AdGenerationJob,
@@ -32,10 +32,6 @@ import type {
 
 type ViewKey = "dashboard" | "work-orders" | "workflow" | "topics" | "copy" | "creatives" | "videos";
 type WorkflowStepStatus = "done" | "active" | "blocked";
-type PublishingEntryContext = {
-  externalOrderId: string | null;
-  returnUrl: string | null;
-};
 type DeliveryExtractionCacheEntry = {
   key: string;
   extraction: WorkOrderDeliveryExtraction;
@@ -126,8 +122,6 @@ const sampleWorkOrder = `工单
 
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>(() => initialViewFromUrl());
-  const publishingEntry = useMemo(() => publishingEntryContextFromUrl(), []);
-
   const [jobs, setJobs] = useState<AdGenerationJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(() => adGenerationJobIdFromUrl());
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -144,7 +138,7 @@ function App() {
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
 
-  const [rawWorkOrder, setRawWorkOrder] = useState(() => initialRawWorkOrderFromUrl());
+  const [rawWorkOrder, setRawWorkOrder] = useState(() => sampleWorkOrder);
   const [deliveryExtractionCache, setDeliveryExtractionCache] =
     useState<DeliveryExtractionCacheEntry | null>(null);
   const [deliveryExtraction, setDeliveryExtraction] = useState<WorkOrderDeliveryExtraction | null>(null);
@@ -542,8 +536,6 @@ function App() {
       "create-ad-generation",
       () =>
         api.createAdGenerationJob({
-          externalOrderId: publishingEntry.externalOrderId,
-          returnUrl: publishingEntry.returnUrl,
           rawContent: deliveryConfirmRawContent || rawWorkOrder.trim(),
           structuredFields: { ...reviewedFields },
           deliveryExtraction,
@@ -1345,6 +1337,8 @@ function App() {
       const target = new URL(job.return_url);
       target.searchParams.set("job_id", job.id);
       target.searchParams.set("status", job.status);
+      const accessToken = getAccessToken();
+      if (accessToken) target.searchParams.set("access_token", accessToken);
       if (job.external_order_id) target.searchParams.set("external_order_id", job.external_order_id);
       window.location.href = target.toString();
     }
@@ -4333,30 +4327,6 @@ function adGenerationJobIdFromUrl(): string | null {
   const match = window.location.pathname.match(/\/review\/ad-generation\/([^/]+)/);
   if (match?.[1]) return decodeURIComponent(match[1]);
   return new URLSearchParams(window.location.search).get("job_id");
-}
-
-function publishingEntryContextFromUrl(): PublishingEntryContext {
-  const params = new URLSearchParams(window.location.search);
-  return {
-    externalOrderId: params.get("external_order_id") || params.get("order_id"),
-    returnUrl: params.get("return_url"),
-  };
-}
-
-function initialRawWorkOrderFromUrl(): string {
-  const params = new URLSearchParams(window.location.search);
-  const rawContent = params.get("raw_content") || params.get("work_order");
-  if (rawContent) return rawContent;
-  const rows = [
-    ["项目名称", params.get("project_name")],
-    ["投放国家", params.get("country") || params.get("countries")],
-    ["投放事件", params.get("event_name")],
-    ["投放人群", params.get("audience")],
-    ["年龄", [params.get("age_min"), params.get("age_max")].filter(Boolean).join("-")],
-    ["投放链接", params.get("landing_url") || params.get("link")],
-  ].filter(([, value]) => Boolean(value));
-  if (rows.length) return ["工单", ...rows.map(([label, value]) => `${label}：${value}`)].join("\n");
-  return sampleWorkOrder;
 }
 
 function viewTitle(view: ViewKey): string {

@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     create_db_on_startup: bool = False
 
     secret_key: str = "change-me-in-production"
+    ai_ads_access_token: str | None = None
+    ai_ads_return_url: str | None = None
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )

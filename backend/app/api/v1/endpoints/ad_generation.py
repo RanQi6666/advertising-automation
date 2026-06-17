@@ -111,10 +111,8 @@ async def confirm_publishing_ad_generation_review(
 
 def _job_read(job: AdGenerationJob) -> PublishingAdGenerationJobRead:
     read = PublishingAdGenerationJobRead.model_validate(job)
-    metadata = job.metadata_json or {}
-    read.review_url = str(metadata.get("review_url") or service.review_url_for_job(job.id))
-    return_url = metadata.get("return_url")
-    read.return_url = str(return_url) if return_url else None
+    read.review_url = service.review_url_for_job(job.id)
+    read.return_url = service.return_url_for_job(job)
     return read
 
 

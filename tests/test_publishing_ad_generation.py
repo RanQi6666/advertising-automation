@@ -179,6 +179,67 @@ async def test_publishing_ad_generation_result_endpoint_requires_returned_status
     await engine.dispose()
 
 
+def test_publishing_ad_generation_review_url_includes_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AD_GENERATION_REVIEW_BASE_URL", "https://ai.example.test")
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "test-review-token")
+    get_settings.cache_clear()
+
+    service = AdGenerationService()
+
+    assert (
+        service.review_url_for_job("job-123")
+        == "https://ai.example.test/review/ad-generation/job-123?access_token=test-review-token"
+    )
+
+
+def test_publishing_ad_generation_return_url_uses_default_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ADS_RETURN_URL", "https://ads.ggcss.xyz/api/ai/receive_ai_ads")
+    get_settings.cache_clear()
+
+    service = AdGenerationService()
+    job = AdGenerationJob(metadata_json={})
+
+    assert service.return_url_for_job(job) == "https://ads.ggcss.xyz/api/ai/receive_ai_ads"
+
+
+def test_publishing_ad_generation_return_url_prefers_job_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ADS_RETURN_URL", "https://ads.ggcss.xyz/api/ai/receive_ai_ads")
+    get_settings.cache_clear()
+
+    service = AdGenerationService()
+    job = AdGenerationJob(metadata_json={"return_url": "https://publishing.example/ai-return"})
+
+    assert service.return_url_for_job(job) == "https://publishing.example/ai-return"
+
+
+def test_ai_ads_access_token_protects_api_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "test-api-token")
+    get_settings.cache_clear()
+
+    app = create_app()
+    with TestClient(app) as client:
+        health_response = client.get("/api/v1/health/live")
+        missing_token_response = client.get(
+            "/api/v1/integrations/publishing/ad-generation/jobs/job-123/result"
+        )
+        wrong_token_response = client.get(
+            "/api/v1/integrations/publishing/ad-generation/jobs/job-123/result",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert health_response.status_code == 200
+    assert missing_token_response.status_code == 401
+    assert wrong_token_response.status_code == 401
+
+
 @pytest.mark.asyncio
 async def test_publishing_ad_generation_result_endpoint_returns_final_json(
     tmp_path,
@@ -265,6 +326,72 @@ async def test_publishing_ad_generation_result_endpoint_returns_final_json(
     assert result["campaign_payload"]["objective"] == "OUTCOME_SALES"
     assert result["creative_payload"]["video_asset_url"] == "https://cdn.example/video.mp4"
     assert "request_payload" not in result
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ai_ads_access_token_accepts_query_and_bearer_tokens(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "test-api-token")
+    get_settings.cache_clear()
+
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'adgen-token.db').as_posix()}"
+    engine = create_async_engine(database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-token",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: token result\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: purchase\n"
+                        "Landing: https://example.com/token"
+                    ),
+                    structured_fields={
+                        "project_name": "Token Result",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "purchase",
+                        "landing_url": "https://example.com/token",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+
+    async def override_get_session():
+        async with session_factory() as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        with TestClient(app) as client:
+            query_response = client.get(
+                f"/api/v1/integrations/publishing/ad-generation/jobs/{job.id}/result"
+                "?access_token=test-api-token"
+            )
+            bearer_response = client.get(
+                f"/api/v1/integrations/publishing/ad-generation/jobs/{job.id}/result",
+                headers={"Authorization": "Bearer test-api-token"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert query_response.status_code == 409
+    assert bearer_response.status_code == 409
 
     await engine.dispose()
 

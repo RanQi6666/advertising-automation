@@ -2,7 +2,7 @@ import logging
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -282,7 +282,14 @@ class AdGenerationService:
 
     def review_url_for_job(self, job_id: str) -> str:
         base_url = self.settings.ad_generation_review_base_url.rstrip("/")
-        return f"{base_url}/review/ad-generation/{job_id}"
+        review_url = f"{base_url}/review/ad-generation/{job_id}"
+        return _with_access_token(review_url, self.settings.ai_ads_access_token)
+
+    def return_url_for_job(self, job: AdGenerationJob) -> str | None:
+        metadata = job.metadata_json or {}
+        return _text_or_none(metadata.get("return_url")) or _text_or_none(
+            self.settings.ai_ads_return_url
+        )
 
     async def run_job(self, job_id: str) -> None:
         async with AsyncSessionLocal() as session:
@@ -607,6 +614,15 @@ def _merge_result_payload(current: dict, updates: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+def _with_access_token(url: str, access_token: str | None) -> str:
+    if not access_token:
+        return url
+    parsed = urlparse(url)
+    query_items = [(key, value) for key, value in parse_qsl(parsed.query) if key != "access_token"]
+    query_items.append(("access_token", access_token))
+    return parsed._replace(query=urlencode(query_items)).geturl()
 
 
 def _workflow_status_from_payload(payload: dict) -> str | None:

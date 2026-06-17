@@ -15,6 +15,7 @@ import type {
 } from "../types/domain";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8001/api/v1";
+const ACCESS_TOKEN_STORAGE_KEY = "ai_ads_access_token";
 
 type JsonBody = Record<string, unknown> | unknown[];
 export type TopicStreamEvent =
@@ -48,10 +49,7 @@ class ApiError extends Error {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
+    headers: requestHeaders(options.headers),
   });
 
   if (!response.ok) {
@@ -89,9 +87,7 @@ async function streamNdjson<TEvent>(
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: requestHeaders(),
     body: JSON.stringify(body),
   });
 
@@ -137,10 +133,7 @@ async function streamSse<TEvent>(
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
+    headers: requestHeaders({ Accept: "text/event-stream" }),
     body: JSON.stringify(body),
   });
 
@@ -201,18 +194,14 @@ export const api = {
       method: "DELETE",
     }),
   createAdGenerationJob: (payload: {
-    externalOrderId?: string | null;
     rawContent: string;
     structuredFields: Record<string, unknown>;
     deliveryExtraction?: WorkOrderDeliveryExtraction | null;
-    returnUrl?: string | null;
     creativeType?: "image" | "video" | "carousel";
     imageCount?: number;
     dailyBudget?: number | null;
   }) =>
     post<AdGenerationJobAccepted>("/integrations/publishing/ad-generation/jobs", {
-      external_order_id: payload.externalOrderId ?? null,
-      return_url: payload.returnUrl ?? null,
       work_order: {
         raw_content: payload.rawContent,
         structured_fields: payload.structuredFields,
@@ -465,3 +454,24 @@ export const api = {
 };
 
 export { ApiError };
+
+function requestHeaders(headers: HeadersInit = {}): HeadersInit {
+  const accessToken = getAccessToken();
+  return {
+    "Content-Type": "application/json",
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...(headers as Record<string, string>),
+  };
+}
+
+export function getAccessToken(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const tokenFromUrl = new URLSearchParams(window.location.search).get("access_token")?.trim();
+  if (tokenFromUrl) {
+    window.sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, tokenFromUrl);
+    return tokenFromUrl;
+  }
+
+  return window.sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+}
