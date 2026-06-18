@@ -13,12 +13,13 @@ DbSession = Annotated[AsyncSession, Depends(get_session)]
 def require_ai_ads_access_token(
     authorization: Annotated[str | None, Header()] = None,
     access_token: Annotated[str | None, Query()] = None,
+    ai_access_token: Annotated[str | None, Query()] = None,
 ) -> None:
     expected_token = get_settings().ai_ads_access_token
     if not expected_token:
         return
 
-    provided_token = _bearer_token(authorization) or access_token
+    provided_token = _bearer_token(authorization) or access_token or ai_access_token
     if provided_token and secrets.compare_digest(provided_token, expected_token):
         return
 

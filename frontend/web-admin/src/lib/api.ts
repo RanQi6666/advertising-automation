@@ -533,7 +533,9 @@ function requestHeaders(headers: HeadersInit = {}): HeadersInit {
 export function getAccessToken(): string | null {
   if (typeof window === "undefined") return null;
 
-  const tokenFromUrl = new URLSearchParams(window.location.search).get("access_token")?.trim();
+  const params = new URLSearchParams(window.location.search);
+  const tokenFromUrl =
+    params.get("access_token")?.trim() || params.get("ai_access_token")?.trim();
   if (tokenFromUrl) {
     window.sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, tokenFromUrl);
     return tokenFromUrl;

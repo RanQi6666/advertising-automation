@@ -20,6 +20,7 @@ from backend.app.schemas.ad_generation import (
     PublishingAdGenerationJobCreate,
     PublishingAdGenerationPreferences,
     PublishingAdGenerationReviewConfirm,
+    PublishingAdGenerationReviewUpdate,
     PublishingWorkOrderPayload,
 )
 from backend.app.services.ad_generation_service import AdGenerationService
@@ -383,6 +384,10 @@ async def test_ai_ads_access_token_accepts_query_and_bearer_tokens(
                 f"/api/v1/integrations/publishing/ad-generation/jobs/{job.id}/result"
                 "?access_token=test-api-token"
             )
+            ai_query_response = client.get(
+                f"/api/v1/integrations/publishing/ad-generation/jobs/{job.id}/result"
+                "?ai_access_token=test-api-token"
+            )
             bearer_response = client.get(
                 f"/api/v1/integrations/publishing/ad-generation/jobs/{job.id}/result",
                 headers={"Authorization": "Bearer test-api-token"},
@@ -391,6 +396,7 @@ async def test_ai_ads_access_token_accepts_query_and_bearer_tokens(
         app.dependency_overrides.clear()
 
     assert query_response.status_code == 409
+    assert ai_query_response.status_code == 409
     assert bearer_response.status_code == 409
 
     await engine.dispose()
@@ -869,6 +875,60 @@ async def test_publishing_ad_generation_confirm_posts_callback(
     assert callback_delivery["last_result"]["request_payload"] == captured["payload"]
 
     get_settings.cache_clear()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publishing_ad_generation_update_cannot_roll_back_returned_status() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: returned rollback guard\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: purchase\n"
+                        "Landing: https://example.com/rollback"
+                    ),
+                    structured_fields={
+                        "project_name": "Returned Rollback Guard",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "purchase",
+                        "landing_url": "https://example.com/rollback",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        generated = await service.process_job(session, job.id)
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(result_payload=generated.result_payload),
+        )
+
+        updated = await service.update_review_payload(
+            session,
+            returned.id,
+            PublishingAdGenerationReviewUpdate(
+                result_payload={**returned.result_payload, "status": "final_review"}
+            ),
+        )
+
+    assert updated.status == "returned"
+    assert updated.result_payload["status"] == "returned"
+    assert updated.completed_at is not None
+
     await engine.dispose()
 
 

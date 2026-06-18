@@ -345,7 +345,10 @@ class AdGenerationService:
     ) -> AdGenerationJob:
         job = await self.get_job(session, job_id)
         result_payload = _merge_result_payload(job.result_payload or {}, payload.result_payload)
-        next_status = _workflow_status_from_payload(result_payload) or "reviewing"
+        if job.status == "returned":
+            next_status = "returned"
+        else:
+            next_status = _workflow_status_from_payload(result_payload) or "reviewing"
         result_payload["status"] = next_status
         job.result_payload = result_payload
         job.status = next_status

@@ -1480,7 +1480,10 @@ function App() {
       target.searchParams.set("job_id", job.id);
       target.searchParams.set("status", job.status);
       const accessToken = getAccessToken();
-      if (accessToken) target.searchParams.set("access_token", accessToken);
+      if (accessToken) {
+        target.searchParams.set("access_token", accessToken);
+        target.searchParams.set("ai_access_token", accessToken);
+      }
       if (job.external_order_id) target.searchParams.set("external_order_id", job.external_order_id);
       window.location.href = target.toString();
     }
