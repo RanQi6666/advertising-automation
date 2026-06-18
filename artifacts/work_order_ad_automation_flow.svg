@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="2200" viewBox="0 0 1800 2200">
+  <defs>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#334155"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 42px; font-weight: 700; fill: #0f172a; }
+      .subtitle { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 22px; fill: #475569; }
+      .lane-title { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #334155; }
+      .node { rx: 16; ry: 16; stroke-width: 2; filter: url(#shadow); }
+      .node-text { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 24px; font-weight: 700; fill: #0f172a; text-anchor: middle; }
+      .node-sub { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 18px; fill: #475569; text-anchor: middle; }
+      .small { font-size: 16px; }
+      .arrow { stroke: #334155; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .arrow-soft { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrow); stroke-dasharray: 8 8; }
+      .label { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #334155; text-anchor: middle; }
+      .input { fill: #e0f2fe; stroke: #0284c7; }
+      .data { fill: #ecfdf5; stroke: #059669; }
+      .ai { fill: #fef3c7; stroke: #d97706; }
+      .review { fill: #fce7f3; stroke: #db2777; }
+      .asset { fill: #ede9fe; stroke: #7c3aed; }
+      .publish { fill: #fee2e2; stroke: #dc2626; }
+      .feedback { fill: #f1f5f9; stroke: #64748b; }
+      .note { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 14; ry: 14; }
+      .note-text { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; font-size: 18px; fill: #475569; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="2200"/>
+  <text class="title" x="900" y="70">广告自动化投放系统执行流程图</text>
+  <text class="subtitle" x="900" y="112" text-anchor="middle">以工单为入口，结合投放链接落地页内容生成选题、文案、图片、视频，并发布到 Facebook / Meta</text>
+
+  <rect class="note" x="120" y="145" width="1560" height="78"/>
+  <text class="note-text" x="160" y="178">说明：Client / Brand 现在是可选能力，不再是主流程必填。真实业务入口是 WorkOrder 工单。</text>
+  <text class="note-text" x="160" y="207">投放链接会被抓取为 LandingPageSnapshot，成为大模型生成内容的重要上下文。</text>
+
+  <text class="lane-title" x="210" y="285">工单入口</text>
+  <text class="lane-title" x="595" y="285">数据沉淀</text>
+  <text class="lane-title" x="970" y="285">AI 生成</text>
+  <text class="lane-title" x="1350" y="285">人工审核 / 发布</text>
+
+  <rect class="node input" x="120" y="320" width="280" height="100"/>
+  <text class="node-text" x="260" y="360">运营提交工单</text>
+  <text class="node-sub" x="260" y="392">原始文本可变</text>
+
+  <rect class="node data" x="500" y="320" width="280" height="100"/>
+  <text class="node-text" x="640" y="360">保存 WorkOrder</text>
+  <text class="node-sub" x="640" y="392">raw_content 原文入库</text>
+
+  <rect class="node data" x="880" y="320" width="280" height="100"/>
+  <text class="node-text" x="1020" y="360">解析工单字段</text>
+  <text class="node-sub" x="1020" y="392">国家 / 人群 / 产品 / 链接</text>
+
+  <rect class="node data" x="1260" y="320" width="300" height="100"/>
+  <text class="node-text" x="1410" y="360">创建 Campaign</text>
+  <text class="node-sub" x="1410" y="392">关联 work_order_id</text>
+
+  <path class="arrow" d="M400 370 H500"/>
+  <path class="arrow" d="M780 370 H880"/>
+  <path class="arrow" d="M1160 370 H1260"/>
+
+  <rect class="note" x="140" y="470" width="510" height="132"/>
+  <text class="note-text" x="170" y="505">工单示例字段：</text>
+  <text class="note-text" x="170" y="535">项目名称、投放国家、投放媒体、投放事件、投放人群</text>
+  <text class="note-text" x="170" y="565">产品名称、打款金额、服务费、商务、投放链接</text>
+  <text class="note-text" x="170" y="595">额外描述会保存在 parsed_fields / metadata</text>
+
+  <rect class="node data" x="760" y="495" width="320" height="100"/>
+  <text class="node-text" x="920" y="535">读取投放链接</text>
+  <text class="node-sub" x="920" y="567">landing_url</text>
+
+  <rect class="node data" x="1230" y="495" width="330" height="100"/>
+  <text class="node-text" x="1395" y="535">抓取落地页</text>
+  <text class="node-sub" x="1395" y="567">标题 / 描述 / 正文摘要</text>
+
+  <path class="arrow" d="M1410 420 V460 C1410 475 1395 475 1395 495"/>
+  <path class="arrow" d="M1080 545 H1230"/>
+
+  <rect class="node data" x="760" y="670" width="360" height="100"/>
+  <text class="node-text" x="940" y="710">保存落地页快照</text>
+  <text class="node-sub" x="940" y="742">LandingPageSnapshot</text>
+
+  <rect class="node ai" x="1230" y="670" width="330" height="100"/>
+  <text class="node-text" x="1395" y="710">构建 AI 上下文</text>
+  <text class="node-sub" x="1395" y="742">工单 + 落地页 + 历史数据</text>
+
+  <path class="arrow" d="M1395 595 V635 C1395 650 1375 650 1375 670"/>
+  <path class="arrow" d="M1230 720 H1120"/>
+  <path class="arrow" d="M1120 720 H1230"/>
+  <path class="arrow-soft" d="M1410 420 V642"/>
+
+  <rect class="node ai" x="760" y="850" width="330" height="100"/>
+  <text class="node-text" x="925" y="890">AI 生成选题</text>
+  <text class="node-sub" x="925" y="922">多个角度供选择</text>
+
+  <polygon points="1395,835 1555,900 1395,965 1235,900" fill="#fce7f3" stroke="#db2777" stroke-width="2" filter="url(#shadow)"/>
+  <text class="node-text" x="1395" y="895">人工选择</text>
+  <text class="node-sub" x="1395" y="925">通过 / 重来</text>
+
+  <path class="arrow" d="M1395 770 V835"/>
+  <path class="arrow" d="M1235 900 H1090"/>
+  <path class="arrow" d="M925 850 V800 C925 785 940 785 940 770"/>
+  <path class="arrow" d="M1090 900 H1235"/>
+  <path class="arrow-soft" d="M1395 965 C1395 1020 925 1020 925 950"/>
+  <text class="label" x="1145" y="1012">不满意则重新生成</text>
+
+  <rect class="node ai" x="760" y="1080" width="330" height="100"/>
+  <text class="node-text" x="925" y="1120">AI 生成文案</text>
+  <text class="node-sub" x="925" y="1152">宣传文章 / FB 文案</text>
+
+  <polygon points="1395,1065 1555,1130 1395,1195 1235,1130" fill="#fce7f3" stroke="#db2777" stroke-width="2" filter="url(#shadow)"/>
+  <text class="node-text" x="1395" y="1125">审核文案</text>
+  <text class="node-sub" x="1395" y="1155">通过 / 修改</text>
+
+  <path class="arrow" d="M1395 965 V1065"/>
+  <path class="arrow" d="M1235 1130 H1090"/>
+  <path class="arrow-soft" d="M1395 1195 C1395 1260 925 1260 925 1180"/>
+  <text class="label" x="1160" y="1250">根据反馈重写</text>
+
+  <rect class="node ai" x="760" y="1320" width="330" height="100"/>
+  <text class="node-text" x="925" y="1360">生成图片 Brief</text>
+  <text class="node-sub" x="925" y="1392">从文案提炼视觉脚本</text>
+
+  <rect class="node asset" x="1230" y="1320" width="330" height="100"/>
+  <text class="node-text" x="1395" y="1360">生成广告图片</text>
+  <text class="node-sub" x="1395" y="1392">3-5 张 Creative Assets</text>
+
+  <path class="arrow" d="M1395 1195 V1275 C1395 1295 925 1295 925 1320"/>
+  <path class="arrow" d="M1090 1370 H1230"/>
+
+  <polygon points="925,1515 1085,1580 925,1645 765,1580" fill="#fce7f3" stroke="#db2777" stroke-width="2" filter="url(#shadow)"/>
+  <text class="node-text" x="925" y="1575">审核图片</text>
+  <text class="node-sub" x="925" y="1605">通过 / 修改</text>
+
+  <polygon points="1395,1515 1555,1580 1395,1645 1235,1580" fill="#f1f5f9" stroke="#64748b" stroke-width="2" filter="url(#shadow)"/>
+  <text class="node-text" x="1395" y="1575">是否生成视频</text>
+  <text class="node-sub" x="1395" y="1605">可选</text>
+
+  <path class="arrow" d="M1395 1420 V1470 C1395 1500 925 1500 925 1515"/>
+  <path class="arrow-soft" d="M765 1580 C650 1580 650 1370 760 1370"/>
+  <text class="label" x="650" y="1490">修改图片</text>
+  <path class="arrow" d="M1085 1580 H1235"/>
+
+  <rect class="node asset" x="760" y="1760" width="330" height="100"/>
+  <text class="node-text" x="925" y="1800">创建视频任务</text>
+  <text class="node-sub" x="925" y="1832">Video Asset requested</text>
+
+  <polygon points="1395,1745 1555,1810 1395,1875 1235,1810" fill="#fce7f3" stroke="#db2777" stroke-width="2" filter="url(#shadow)"/>
+  <text class="node-text" x="1395" y="1805">审核视频</text>
+  <text class="node-sub" x="1395" y="1835">通过 / 修改</text>
+
+  <path class="arrow" d="M1395 1645 C1395 1700 925 1700 925 1760"/>
+  <text class="label" x="1180" y="1700">是</text>
+  <path class="arrow" d="M1090 1810 H1235"/>
+  <path class="arrow-soft" d="M1235 1810 C1140 1810 1140 1810 1090 1810"/>
+
+  <rect class="node publish" x="760" y="1990" width="330" height="100"/>
+  <text class="node-text" x="925" y="2030">创建发布任务</text>
+  <text class="node-sub" x="925" y="2062">Publish Job</text>
+
+  <rect class="node publish" x="1230" y="1990" width="330" height="100"/>
+  <text class="node-text" x="1395" y="2030">发布 / 投放</text>
+  <text class="node-sub" x="1395" y="2062">Pages API 或 Marketing API</text>
+
+  <path class="arrow" d="M1395 1875 C1395 1940 925 1940 925 1990"/>
+  <path class="arrow" d="M1395 1645 V1940 C1395 1965 925 1965 925 1990"/>
+  <text class="label" x="1460" y="1695">否</text>
+  <path class="arrow" d="M1090 2040 H1230"/>
+
+  <rect class="node data" x="155" y="1970" width="390" height="120"/>
+  <text class="node-text" x="350" y="2010">数据回流</text>
+  <text class="node-sub" x="350" y="2042">Post ID / Ad ID / CTR / CPC / 转化</text>
+  <text class="node-sub" x="350" y="2074">进入下一轮内容优化</text>
+
+  <path class="arrow" d="M1230 2040 H545"/>
+  <path class="arrow-soft" d="M350 1970 C350 880 760 880 760 900"/>
+
+  <rect class="note" x="118" y="2125" width="1565" height="50"/>
+  <text class="note-text" x="155" y="2157">当前实现：视频生成为预留任务；Facebook 发布为 dry-run；落地页抓取、工单解析、选题/文案上下文注入已接入后端。</text>
+</svg>

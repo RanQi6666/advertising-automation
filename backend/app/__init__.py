@@ -1,0 +1,1 @@
+"""Advertising automation FastAPI application."""
