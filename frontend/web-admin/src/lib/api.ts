@@ -16,6 +16,8 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8001/api/v1";
 const ACCESS_TOKEN_STORAGE_KEY = "ai_ads_access_token";
+const EXTERNAL_AI_TRANSIENT_MESSAGE =
+  "外部 AI 服务短暂波动，任务可能仍在处理中，请稍后查看结果或重试。";
 
 type JsonBody = Record<string, unknown> | unknown[];
 export type TopicStreamEvent =
@@ -38,31 +40,91 @@ export type VideoStoryboardTextStreamEvent =
 
 class ApiError extends Error {
   status: number;
+  rawMessage: string;
+  isTransient: boolean;
 
   constructor(status: number, message: string) {
-    super(message);
+    super(normalizeApiErrorMessage(status, message));
     this.name = "ApiError";
     this.status = status;
+    this.rawMessage = message;
+    this.isTransient = isTransientApiProblem(status, message);
   }
 }
 
+async function safeFetch(url: string, options: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, options);
+  } catch (caught) {
+    const message =
+      caught instanceof Error ? caught.message : "Network request failed.";
+    throw new ApiError(0, message);
+  }
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text();
+  let message = text || response.statusText || `HTTP ${response.status}`;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (parsed.detail) {
+      message =
+        typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail);
+    }
+  } catch {
+    // Keep raw text.
+  }
+  return message;
+}
+
+function normalizeApiErrorMessage(status: number, message: string): string {
+  if (isTransientApiProblem(status, message)) return EXTERNAL_AI_TRANSIENT_MESSAGE;
+  return message || (status ? `HTTP ${status}` : "网络请求失败");
+}
+
+function isTransientApiProblem(status: number, message: string): boolean {
+  const normalized = (message || "").toLowerCase();
+  return (
+    [408, 502, 503, 504].includes(status) ||
+    normalized.includes("bad gateway") ||
+    normalized.includes("gateway timeout") ||
+    normalized.includes("timeout") ||
+    normalized.includes("timed out") ||
+    normalized.includes("temporarily unavailable") ||
+    normalized.includes("service unavailable") ||
+    normalized.includes("failed to fetch") ||
+    normalized.includes("networkerror") ||
+    normalized.includes("network request failed") ||
+    normalized.includes("load failed")
+  );
+}
+
+function isTransientApiError(caught: unknown): boolean {
+  if (caught instanceof ApiError) return caught.isTransient;
+  if (caught instanceof Error) return isTransientApiProblem(0, caught.message);
+  return typeof caught === "string" && isTransientApiProblem(0, caught);
+}
+
+function apiErrorMessage(caught: unknown, fallback: string): string {
+  if (caught instanceof ApiError) return caught.message || fallback;
+  if (caught instanceof Error) {
+    if (isTransientApiProblem(0, caught.message)) return EXTERNAL_AI_TRANSIENT_MESSAGE;
+    return caught.message || fallback;
+  }
+  if (typeof caught === "string") {
+    return isTransientApiProblem(0, caught) ? EXTERNAL_AI_TRANSIENT_MESSAGE : caught || fallback;
+  }
+  return fallback;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await safeFetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: requestHeaders(options.headers),
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    let message = text || response.statusText;
-    try {
-      const parsed = JSON.parse(text) as { detail?: unknown };
-      if (parsed.detail) {
-        message = typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail);
-      }
-    } catch {
-      // Keep raw text.
-    }
+    const message = await readErrorMessage(response);
     throw new ApiError(response.status, message);
   }
 
@@ -85,15 +147,14 @@ async function streamNdjson<TEvent>(
   body: JsonBody,
   onEvent: (event: TEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await safeFetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: requestHeaders(),
     body: JSON.stringify(body),
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new ApiError(response.status, text || response.statusText);
+    throw new ApiError(response.status, await readErrorMessage(response));
   }
   if (!response.body) {
     throw new ApiError(response.status, "Streaming response is not available.");
@@ -131,15 +192,14 @@ async function streamSse<TEvent>(
   body: JsonBody,
   onEvent: (event: TEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await safeFetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: requestHeaders({ Accept: "text/event-stream" }),
     body: JSON.stringify(body),
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new ApiError(response.status, text || response.statusText);
+    throw new ApiError(response.status, await readErrorMessage(response));
   }
   if (!response.body) {
     throw new ApiError(response.status, "Streaming response is not available.");
@@ -459,7 +519,7 @@ export const api = {
   listPendingReviews: () => request<ReviewTask[]>("/reviews/pending?limit=100"),
 };
 
-export { ApiError };
+export { ApiError, EXTERNAL_AI_TRANSIENT_MESSAGE, apiErrorMessage, isTransientApiError };
 
 function requestHeaders(headers: HeadersInit = {}): HeadersInit {
   const accessToken = getAccessToken();

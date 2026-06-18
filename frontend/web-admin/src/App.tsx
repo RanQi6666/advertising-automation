@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError, api, getAccessToken } from "./lib/api";
+import { ApiError, api, apiErrorMessage, getAccessToken, isTransientApiError } from "./lib/api";
 import type { CreativeStreamEvent, TopicStreamEvent, VideoStoryboardTextStreamEvent } from "./lib/api";
 import type {
   AdGenerationJob,
@@ -31,6 +31,12 @@ import type {
 } from "./types/domain";
 
 type ViewKey = "dashboard" | "work-orders" | "workflow" | "topics" | "copy" | "creatives" | "videos";
+type ErrorScope = "global" | "refresh" | "work-order" | "topic" | "copy" | "image" | "video" | "final";
+type ScopedAppError = {
+  scope: ErrorScope;
+  message: string;
+  transient: boolean;
+};
 type WorkflowStepStatus = "done" | "active" | "blocked";
 type DeliveryExtractionCacheEntry = {
   key: string;
@@ -48,6 +54,10 @@ type CreativeGenerationSlot = {
   status: "loading" | "done" | "error";
   asset?: CreativeAsset;
   message?: string;
+};
+type VideoPollWarning = {
+  message: string;
+  updatedAt: number;
 };
 type VideoStoryboardDraftCache = {
   campaignId: string;
@@ -142,6 +152,7 @@ function App() {
   const [creativeRewriteFeedbacks, setCreativeRewriteFeedbacks] = useState<Record<string, string>>({});
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+  const [videoPollWarnings, setVideoPollWarnings] = useState<Record<string, VideoPollWarning>>({});
 
   const [rawWorkOrder, setRawWorkOrder] = useState(() => sampleWorkOrder);
   const [deliveryExtractionCache, setDeliveryExtractionCache] =
@@ -168,7 +179,7 @@ function App() {
   const [finalReviewNotes, setFinalReviewNotes] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [operationElapsedSeconds, setOperationElapsedSeconds] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<ScopedAppError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const selectedJob = useMemo(
@@ -345,19 +356,52 @@ function App() {
       inFlight = true;
       try {
         const refreshed = await Promise.all(
-          generatingIds.map(async (videoId) => {
+          generatingIds.map(async (videoId): Promise<{
+            videoId: string;
+            video: VideoAsset | null;
+            caught: unknown | null;
+          }> => {
             try {
-              return await api.refreshVideoGeneration(videoId);
-            } catch {
-              return null;
+              return { videoId, video: await api.refreshVideoGeneration(videoId), caught: null };
+            } catch (caught) {
+              return { videoId, video: null, caught };
             }
           }),
         );
         if (cancelled) return;
-        refreshed.forEach((video) => {
-          if (video) {
-            setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
+        const refreshedVideos = refreshed
+          .map((result) => result.video)
+          .filter((video): video is VideoAsset => Boolean(video));
+        if (refreshedVideos.length) {
+          clearError("video");
+          setVideos((current) =>
+            current.map((item) => refreshedVideos.find((video) => video.id === item.id) ?? item),
+          );
+        }
+        const authError = refreshed.find((result) => result.caught && isAuthApiError(result.caught));
+        if (authError?.caught) {
+          setCaughtError("video", authError.caught, "视频状态刷新失败");
+        }
+        setVideoPollWarnings((current) => {
+          let next = current;
+          const copy = () => {
+            if (next === current) next = { ...current };
+            return next;
+          };
+          for (const result of refreshed) {
+            if (result.video) {
+              if (next[result.videoId]) {
+                delete copy()[result.videoId];
+              }
+              continue;
+            }
+            if (!result.caught || isAuthApiError(result.caught)) continue;
+            copy()[result.videoId] = {
+              message: apiErrorMessage(result.caught, "视频状态刷新暂时失败，系统会继续自动刷新。"),
+              updatedAt: Date.now(),
+            };
           }
+          return next;
         });
       } finally {
         inFlight = false;
@@ -372,18 +416,64 @@ function App() {
     };
   }, [videos.map((video) => `${video.id}:${video.status}:${video.provider_job_id ?? ""}`).join("|")]);
 
+  function setError(message: string | null, scope: ErrorScope = "global", transient = false) {
+    if (!message) {
+      clearError();
+      return;
+    }
+    setErrorState({ scope, message, transient });
+  }
+
+  function clearError(scope?: ErrorScope | ErrorScope[]) {
+    if (!scope) {
+      setErrorState(null);
+      return;
+    }
+    const scopes = Array.isArray(scope) ? scope : [scope];
+    setErrorState((current) => (current && scopes.includes(current.scope) ? null : current));
+  }
+
+  function setCaughtError(scope: ErrorScope, caught: unknown, fallback: string): string {
+    const effectiveScope =
+      caught instanceof ApiError && [401, 403].includes(caught.status) ? "global" : scope;
+    const message = apiErrorMessage(caught, fallback);
+    const transient = isTransientApiError(caught);
+    if (effectiveScope === "refresh" && transient) return message;
+    setErrorState({ scope: effectiveScope, message, transient });
+    return message;
+  }
+
+  function setVideoPollWarning(videoId: string, message: string) {
+    setVideoPollWarnings((current) => ({
+      ...current,
+      [videoId]: {
+        message,
+        updatedAt: Date.now(),
+      },
+    }));
+  }
+
+  function clearVideoPollWarning(videoId: string) {
+    setVideoPollWarnings((current) => {
+      if (!current[videoId]) return current;
+      const next = { ...current };
+      delete next[videoId];
+      return next;
+    });
+  }
+
   async function run<T>(key: string, task: () => Promise<T>, success?: string): Promise<T | null> {
+    const scope = errorScopeForOperationKey(key);
     setLoading(key);
-    setError(null);
+    clearError(scope);
     setNotice(null);
     try {
       const result = await task();
+      clearError(scope);
       if (success) setNotice(success);
       return result;
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "操作失败";
-      setError(message);
+      setCaughtError(scope, caught, "操作失败");
       return null;
     } finally {
       setLoading(null);
@@ -401,6 +491,7 @@ function App() {
     setSelectedCreativeIds([]);
     setCreativeRewriteFeedbacks({});
     setVideos([]);
+    setVideoPollWarnings({});
     setSelectedVideoId(null);
     setVideoStoryboard([]);
     setVideoStoryboardText("");
@@ -438,6 +529,12 @@ function App() {
     if (!job) return;
     setJobs((current) => upsertById(current, job));
     setSelectedJobId(job.id);
+    if (job.status === "failed") {
+      setError(adGenerationJobFailureMessage(job), "work-order");
+      setNotice(null);
+    } else {
+      clearError("work-order");
+    }
     const campaignId = adGenerationCampaignId(job);
     if (campaignId) {
       try {
@@ -463,6 +560,7 @@ function App() {
       setDrafts(nextDrafts);
       setCreatives(nextCreatives);
       setVideos(nextVideos);
+      setVideoPollWarnings({});
       setSelectedTopicId((current) =>
         current && nextTopics.some((item) => item.id === current)
           ? current
@@ -489,7 +587,7 @@ function App() {
   async function handleCreateWorkOrder() {
     const content = rawWorkOrder.trim();
     if (!content) {
-      setError("请先粘贴工单内容。");
+      setError("请先粘贴工单内容。", "work-order");
       return;
     }
     if (deliveryExtraction && deliveryConfirmRawContent === content) {
@@ -533,7 +631,7 @@ function App() {
     if (!deliveryExtraction) return;
     const validationError = validateDeliveryConfirmForm(deliveryConfirmForm);
     if (validationError) {
-      setError(validationError);
+      setError(validationError, "work-order");
       return;
     }
     const reviewedFields = normalizeReviewedDeliveryFields(deliveryConfirmForm);
@@ -636,7 +734,7 @@ function App() {
     if (topicGenerationSlots.some((slot) => slot.status === "loading")) return;
     setActiveView("topics");
     setLoading("topics");
-    setError(null);
+    clearError("topic");
     setNotice(null);
     setTopics([]);
     setSelectedTopicId(null);
@@ -666,6 +764,7 @@ function App() {
           }
           if (event.type === "topic") {
             streamedTopics.push(event.topic);
+            clearError("topic");
             setTopics((current) => appendOrReplaceById(current, event.topic));
             setSelectedTopicId((current) => current ?? event.topic.id);
             updateTopicGenerationSlot(event.index, {
@@ -676,7 +775,7 @@ function App() {
             return;
           }
           if (event.type === "error") {
-            markLoadingTopicSlotsFailed(event.message, event.index);
+            markLoadingTopicSlotsFailed(apiErrorMessage(event.message, "此候选生成失败，请重试。"), event.index);
             return;
           }
           if (event.type === "done") {
@@ -693,12 +792,13 @@ function App() {
       );
 
       if (!streamedTopics.length) {
-        setError("选题生成失败，请稍后重试。");
+        setError("选题生成失败，请稍后重试。", "topic");
         markLoadingTopicSlotsFailed("模型未返回候选，请重新生成。");
         return;
       }
 
       if (revisionFeedback) setTopicFeedback("");
+      clearError("topic");
       setNotice(
         streamedTopics.length === TOPIC_GENERATION_LIMIT
           ? revisionFeedback
@@ -708,9 +808,12 @@ function App() {
       );
       void saveWorkflowStage("topic_review");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "选题生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "选题生成失败");
+      if (streamedTopics.length) {
+        clearError("topic");
+      } else {
+        setCaughtError("topic", caught, "选题生成失败");
+      }
       markLoadingTopicSlotsFailed(message || "选题生成中断，请重试。");
       if (streamedTopics.length) {
         setNotice(`已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`);
@@ -726,7 +829,7 @@ function App() {
     if (loading?.startsWith("topic-retry-")) return;
     const revisionFeedback = topicFeedback.trim();
     setLoading(`topic-retry-${slotIndex}`);
-    setError(null);
+    clearError("topic");
     setNotice(null);
     updateTopicGenerationSlot(slotIndex, {
       status: "loading",
@@ -755,7 +858,7 @@ function App() {
           if (event.type === "error") {
             updateTopicGenerationSlot(slotIndex, {
               status: "error",
-              message: event.message || "此候选生成失败，请重试。",
+              message: apiErrorMessage(event.message, "此候选生成失败，请重试。"),
             });
           }
         },
@@ -770,13 +873,15 @@ function App() {
       }
 
       setNotice(`候选 ${slotIndex} 已重新生成`);
+      clearError("topic");
       setTopicGenerationSlots((current) =>
         current.length && current.every((slot) => slot.status === "done") ? [] : current,
       );
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "此候选生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "此候选生成失败");
+      if (isAuthApiError(caught)) {
+        setCaughtError("topic", caught, "此候选生成失败");
+      }
       updateTopicGenerationSlot(slotIndex, {
         status: "error",
         message,
@@ -807,7 +912,7 @@ function App() {
   async function handleGenerateCopy() {
     const topic = topics.find((item) => item.status === "selected") ?? selectedTopic;
     if (!topic) {
-      setError("请先选择一个选题。");
+      setError("请先选择一个选题。", "copy");
       return;
     }
     const draft = await run("copy", () => api.generateCopy(topic.id, "Learn More"), "文案已生成");
@@ -877,13 +982,13 @@ function App() {
   async function handleGenerateCreatives() {
     const draft = approvedDraft ?? selectedDraft;
     if (!draft) {
-      setError("请先生成并审核通过一条文案。");
+      setError("请先生成并审核通过一条文案。", "image");
       return;
     }
     if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
     setActiveView("creatives");
     setLoading("creatives");
-    setError(null);
+    clearError("image");
     setNotice(null);
     setCreativeGenerationSlots(initialCreativeSlots(CREATIVE_GENERATION_LIMIT));
 
@@ -908,6 +1013,7 @@ function App() {
           }
           if (event.type === "asset") {
             streamedAssets.push(event.asset);
+            clearError("image");
             setCreatives((current) => prependOrReplaceById(current, event.asset));
             setSelectedCreativeIds((current) =>
               current.includes(event.asset.id) ? current : [...current, event.asset.id],
@@ -920,7 +1026,7 @@ function App() {
             return;
           }
           if (event.type === "error") {
-            markLoadingCreativeSlotsFailed(event.message, event.index);
+            markLoadingCreativeSlotsFailed(apiErrorMessage(event.message, "此图片生成失败，请重试。"), event.index);
             return;
           }
           if (event.type === "done") {
@@ -936,11 +1042,12 @@ function App() {
       );
 
       if (!streamedAssets.length) {
-        setError("图片生成失败，请稍后重试。");
+        setError("图片生成失败，请稍后重试。", "image");
         markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
         return;
       }
 
+      clearError("image");
       setNotice(
         streamedAssets.length === CREATIVE_GENERATION_LIMIT
           ? "3 张图片已生成"
@@ -948,9 +1055,12 @@ function App() {
       );
       void saveWorkflowStage("image_review");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "图片生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "图片生成失败");
+      if (streamedAssets.length) {
+        clearError("image");
+      } else {
+        setCaughtError("image", caught, "图片生成失败");
+      }
       markLoadingCreativeSlotsFailed(message || "图片生成中断，请重试。");
       if (streamedAssets.length) {
         setNotice(`已生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`);
@@ -964,12 +1074,12 @@ function App() {
   async function handleRetryCreativeSlot(slotIndex: number) {
     const draft = approvedDraft ?? selectedDraft;
     if (!draft) {
-      setError("请先生成并审核通过一条文案。");
+      setError("请先生成并审核通过一条文案。", "image");
       return;
     }
     if (loading?.startsWith("creative-retry-")) return;
     setLoading(`creative-retry-${slotIndex}`);
-    setError(null);
+    clearError("image");
     setNotice(null);
     updateCreativeGenerationSlot(slotIndex, {
       status: "loading",
@@ -1000,7 +1110,7 @@ function App() {
           if (event.type === "error") {
             updateCreativeGenerationSlot(slotIndex, {
               status: "error",
-              message: event.message || "此图片生成失败，请重试。",
+              message: apiErrorMessage(event.message, "此图片生成失败，请重试。"),
             });
           }
         },
@@ -1015,11 +1125,13 @@ function App() {
         return;
       }
       setNotice(`图片 ${slotIndex} 已重新生成`);
+      clearError("image");
       void saveWorkflowStage("image_review");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "此图片生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "此图片生成失败");
+      if (isAuthApiError(caught)) {
+        setCaughtError("image", caught, "此图片生成失败");
+      }
       updateCreativeGenerationSlot(slotIndex, {
         status: "error",
         message,
@@ -1032,12 +1144,12 @@ function App() {
   async function handleRegenerateCreative(asset: CreativeAsset) {
     const feedback = creativeRewriteFeedbacks[asset.id]?.trim();
     if (!feedback) {
-      setError("请先填写这张图片的改写要求。");
+      setError("请先填写这张图片的改写要求。", "image");
       return;
     }
     const slotIndex = creativeImageIndex(asset, 1);
     setLoading(`creative-regenerate-${asset.id}`);
-    setError(null);
+    clearError("image");
     setNotice(null);
     updateCreativeGenerationSlot(slotIndex, {
       status: "loading",
@@ -1064,11 +1176,13 @@ function App() {
         return next;
       });
       setNotice(`图片 ${slotIndex} 已生成新版本`);
+      clearError("image");
       void saveWorkflowStage("image_review");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "图片改写失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "图片改写失败");
+      if (caught instanceof ApiError && [401, 403].includes(caught.status)) {
+        setCaughtError("image", caught, "图片改写失败");
+      }
       updateCreativeGenerationSlot(slotIndex, {
         status: "error",
         asset,
@@ -1082,17 +1196,17 @@ function App() {
     if (!selectedCampaign) return;
     const sourceIds = selectedCreativeIdsForVideo();
     if (!sourceIds.length) {
-      setError("请先审核通过并选择至少一张图片。");
+      setError("请先审核通过并选择至少一张图片。", "video");
       return;
     }
     if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`);
+      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`, "video");
       return;
     }
     const previousText = videoStoryboardText;
     let streamedText = "";
     setLoading("video-storyboard");
-    setError(null);
+    clearError("video");
     setNotice(null);
     setVideoStoryboard([]);
     setVideoStoryboardText("");
@@ -1133,9 +1247,13 @@ function App() {
       }
       setNotice("视频脚本已生成");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频脚本生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "视频脚本生成失败");
+      if (streamedText.trim() && isTransientApiError(caught)) {
+        clearError("video");
+        setNotice(`已保留当前脚本内容。${message}`);
+      } else {
+        setCaughtError("video", caught, "视频脚本生成失败");
+      }
       if (!streamedText.trim() && previousText.trim()) {
         setVideoStoryboardText(previousText);
       }
@@ -1149,19 +1267,19 @@ function App() {
     const sourceIds = selectedCreativeIdsForVideo();
     const feedback = videoStoryboardFeedback.trim();
     if (!sourceIds.length) {
-      setError("请先审核通过并选择至少一张图片。");
+      setError("请先审核通过并选择至少一张图片。", "video");
       return;
     }
     if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`);
+      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`, "video");
       return;
     }
     if (!videoStoryboardText.trim()) {
-      setError("请先生成或填写视频脚本。");
+      setError("请先生成或填写视频脚本。", "video");
       return;
     }
     if (!feedback) {
-      setError("请先填写脚本修改意见。");
+      setError("请先填写脚本修改意见。", "video");
       return;
     }
     const storyboardPayload = videoStoryboardDirty
@@ -1170,7 +1288,7 @@ function App() {
     const previousText = videoStoryboardText;
     let streamedText = "";
     setLoading("video-storyboard-rewrite");
-    setError(null);
+    clearError("video");
     setNotice(null);
     setVideoStoryboard([]);
     setVideoStoryboardText("");
@@ -1216,9 +1334,13 @@ function App() {
       setVideoStoryboardFeedback("");
       setNotice("脚本已按意见改写");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频脚本改写失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "视频脚本改写失败");
+      if (streamedText.trim() && isTransientApiError(caught)) {
+        clearError("video");
+        setNotice(`已保留当前改写内容。${message}`);
+      } else {
+        setCaughtError("video", caught, "视频脚本改写失败");
+      }
       if (!streamedText.trim()) {
         setVideoStoryboardText(previousText);
       }
@@ -1231,19 +1353,20 @@ function App() {
     if (!selectedCampaign) return;
     const sourceIds = selectedCreativeIdsForVideo();
     if (!sourceIds.length) {
-      setError("请先选择审核通过的图片。");
+      setError("请先选择审核通过的图片。", "video");
       return;
     }
     if (!videoStoryboardText.trim()) {
-      setError("请先生成或填写视频脚本。");
+      setError("请先生成或填写视频脚本。", "video");
       return;
     }
     const storyboardPayload = videoStoryboardDirty
       ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
       : videoStoryboard;
     setLoading("video");
-    setError(null);
+    clearError("video");
     setNotice(null);
+    let createdVideo: VideoAsset | null = null;
     try {
       const created = await api.createVideoFromImages({
         campaignId: selectedCampaign.id,
@@ -1254,6 +1377,7 @@ function App() {
         aspectRatio: videoAspectRatio,
         storyboard: storyboardPayload,
       });
+      createdVideo = created;
       setVideos((current) => prependOrReplaceById(current, created));
       setSelectedVideoId(created.id);
       setActiveView("videos");
@@ -1261,11 +1385,17 @@ function App() {
       const started = await api.startVideoGeneration(created.id);
       setVideos((current) => current.map((item) => (item.id === started.id ? started : item)));
       setSelectedVideoId(started.id);
+      clearVideoPollWarning(started.id);
+      clearError("video");
       setNotice("视频任务已创建，正在生成成片");
     } catch (caught) {
-      const message =
-        caught instanceof ApiError || caught instanceof Error ? caught.message : "视频任务创建或生成失败";
-      setError(message);
+      const message = apiErrorMessage(caught, "视频任务创建或生成失败");
+      if (createdVideo && !isAuthApiError(caught)) {
+        setVideoPollWarning(createdVideo.id, message);
+        setNotice("视频任务已创建，提交生成时遇到波动，可在任务卡片中重试。");
+      } else {
+        setCaughtError("video", caught, "视频任务创建或生成失败");
+      }
     } finally {
       setLoading((current) => (current === "video" ? null : current));
     }
@@ -1277,7 +1407,10 @@ function App() {
       () => api.startVideoGeneration(videoId),
       "视频生成任务已重新提交",
     );
-    if (video) setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
+    if (video) {
+      setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
+      clearVideoPollWarning(video.id);
+    }
   }
 
   function selectedCreativeIdsForVideo(): string[] {
@@ -1309,12 +1442,12 @@ function App() {
       selectedVideoId,
     });
     if (!result.ok) {
-      setError(result.message);
+      setError(result.message, "final");
       setNotice(null);
       return null;
     }
     setFinalPayloadDraft(JSON.stringify(result.value, null, 2));
-    setError(null);
+    clearError("final");
     setNotice("最终预审包已生成，请检查后确认回传。");
     return result.value;
   }
@@ -1357,12 +1490,12 @@ function App() {
     try {
       const parsed = JSON.parse(finalPayloadDraft || "{}");
       if (!isRecord(parsed)) {
-        setError("最终预审包必须是 JSON 对象。");
+        setError("最终预审包必须是 JSON 对象。", "final");
         return null;
       }
       return parsed;
     } catch {
-      setError("最终预审包不是有效 JSON，请检查逗号和引号。");
+      setError("最终预审包不是有效 JSON，请检查逗号和引号。", "final");
       return null;
     }
   }
@@ -1387,6 +1520,7 @@ function App() {
     creatives: approvedCreatives,
     videos: approvedVideos,
   });
+  const visibleError = error && shouldShowErrorBanner(error, activeView) ? error : null;
 
   return (
     <div className="app-shell">
@@ -1435,10 +1569,10 @@ function App() {
           </div>
         </header>
 
-        {(error || notice) && (
-          <div className={`banner ${error ? "error" : "success"}`}>
-            {error ? <X size={18} /> : <Check size={18} />}
-            <span>{error || notice}</span>
+        {(visibleError || notice) && (
+          <div className={`banner ${visibleError ? "error" : "success"}`}>
+            {visibleError ? <X size={18} /> : <Check size={18} />}
+            <span>{visibleError?.message || notice}</span>
           </div>
         )}
 
@@ -1555,6 +1689,7 @@ function App() {
             campaign={selectedCampaign}
             draft={approvedDraft ?? selectedDraft}
             videos={videos}
+            videoPollWarnings={videoPollWarnings}
             approvedCreatives={approvedCreatives}
             selectedCreativeIds={selectedCreativeIdsForVideo()}
             setSelectedCreativeIds={setSelectedCreativeIds}
@@ -3006,6 +3141,7 @@ function VideosView({
   campaign,
   draft,
   videos,
+  videoPollWarnings,
   approvedCreatives,
   selectedCreativeIds,
   setSelectedCreativeIds,
@@ -3031,6 +3167,7 @@ function VideosView({
   campaign: Campaign | null;
   draft: CopyDraft | null;
   videos: VideoAsset[];
+  videoPollWarnings: Record<string, VideoPollWarning>;
   approvedCreatives: CreativeAsset[];
   selectedCreativeIds: string[];
   setSelectedCreativeIds: (ids: string[]) => void;
@@ -3058,6 +3195,7 @@ function VideosView({
   loading: string | null;
 }) {
   const selectedVideo = videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null;
+  const selectedVideoPollWarning = selectedVideo ? videoPollWarnings[selectedVideo.id] : null;
   const approvedVideoCount = videos.filter((video) => video.status === "approved").length;
   const workingVideoCount = videos.filter((video) => video.status !== "approved").length;
   const storyboardStreaming = loading === "video-storyboard" || loading === "video-storyboard-rewrite";
@@ -3085,7 +3223,9 @@ function VideosView({
         : "等待成片生成"
     : "暂无视频任务";
   const previewEmptyHint = selectedVideo
-    ? selectedVideo.status === "failed"
+    ? selectedVideo.status !== "failed" && selectedVideoPollWarning
+      ? selectedVideoPollWarning.message
+      : selectedVideo.status === "failed"
       ? selectedVideo.error_message || "可以在右侧任务里重试生成。"
       : previewVideoGenerating
         ? `已等待 ${formatDuration(videoWaitSeconds(selectedVideo))}，完成后会自动切换为视频预览。`
@@ -3355,6 +3495,7 @@ function VideosView({
                 const isGenerating = isStarting || isVideoGeneratingStatus(video.status);
                 const canReview = video.status === "generated" && Boolean(video.url);
                 const canRetryGeneration = ["requested", "failed", "needs_revision"].includes(video.status);
+                const pollWarning = videoPollWarnings[video.id];
                 return (
                   <article className={`video-card ${selected ? "selected" : ""}`} key={video.id}>
                     <div className="video-card-head">
@@ -3404,6 +3545,9 @@ function VideosView({
                       </div>
                     </div>
                     {video.error_message && <p className="video-error-text">{video.error_message}</p>}
+                    {pollWarning && video.status !== "failed" && (
+                      <p className="video-error-text">{pollWarning.message}</p>
+                    )}
                     <div className="video-task-actions">
                       {selected ? (
                         <div className="video-selection-indicator">
@@ -4266,6 +4410,10 @@ function adGenerationJobTitle(job: AdGenerationJob): string {
   );
 }
 
+function adGenerationJobFailureMessage(job: AdGenerationJob): string {
+  return `AI 工单已失败：${apiErrorMessage(job.error_message || "", "请检查任务日志或重新创建。")}`;
+}
+
 function adGenerationJobFields(job: AdGenerationJob, campaign: Campaign | null): Record<string, unknown> {
   const result = job.result_payload ?? {};
   const adsetPayload = isRecord(result.adset_payload) ? result.adset_payload : {};
@@ -4389,6 +4537,40 @@ function statusLabel(status: string): string {
 
 function isVideoGeneratingStatus(status: string): boolean {
   return status === "generating";
+}
+
+function isAuthApiError(caught: unknown): boolean {
+  return caught instanceof ApiError && [401, 403].includes(caught.status);
+}
+
+function errorScopeForOperationKey(key: string): ErrorScope {
+  if (key.includes("refresh")) return "refresh";
+  if (key.includes("topic")) return "topic";
+  if (key.includes("copy") || key.includes("draft")) return "copy";
+  if (key.includes("creative") || key === "creatives") return "image";
+  if (key.includes("video")) return "video";
+  if (key.includes("final") || key.includes("confirm-return")) return "final";
+  if (key.includes("work-order") || key.includes("ad-generation") || key.startsWith("delete-job")) {
+    return "work-order";
+  }
+  return "global";
+}
+
+function shouldShowErrorBanner(error: ScopedAppError, activeView: ViewKey): boolean {
+  if (error.scope === "refresh" && error.transient) return false;
+  if (error.scope === "global" || error.scope === "refresh") return true;
+  if (activeView === "workflow") return true;
+
+  const activeScopes: Record<ViewKey, ErrorScope[]> = {
+    dashboard: ["global", "refresh"],
+    "work-orders": ["work-order"],
+    workflow: ["work-order", "topic", "copy", "image", "video", "final"],
+    topics: ["topic"],
+    copy: ["copy"],
+    creatives: ["image"],
+    videos: ["video"],
+  };
+  return activeScopes[activeView].includes(error.scope);
 }
 
 function mediaPreviewAspectClass(value: string | null | undefined): string {
