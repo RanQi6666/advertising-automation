@@ -61,6 +61,11 @@ type VideoStoryboardDraftCache = {
   storyboardFeedback: string;
   savedAt: string;
 };
+type AdGenerationIntegrationParams = {
+  externalOrderId: string | null;
+  returnUrl: string | null;
+  callbackUrl: string | null;
+};
 
 const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
@@ -532,6 +537,7 @@ function App() {
       return;
     }
     const reviewedFields = normalizeReviewedDeliveryFields(deliveryConfirmForm);
+    const integrationParams = adGenerationIntegrationParamsFromUrl();
     const accepted = await run(
       "create-ad-generation",
       () =>
@@ -539,6 +545,9 @@ function App() {
           rawContent: deliveryConfirmRawContent || rawWorkOrder.trim(),
           structuredFields: { ...reviewedFields },
           deliveryExtraction,
+          externalOrderId: integrationParams.externalOrderId,
+          returnUrl: integrationParams.returnUrl,
+          callbackUrl: integrationParams.callbackUrl,
         }),
       "AI 工单已创建，正在进入 AI 生产",
     );
@@ -4321,6 +4330,25 @@ function initialViewFromUrl(): ViewKey {
   if (window.location.pathname.startsWith("/work-orders/new")) return "work-orders";
   const value = new URLSearchParams(window.location.search).get("view");
   return navItems.some((item) => item.key === value) ? (value as ViewKey) : "dashboard";
+}
+
+function adGenerationIntegrationParamsFromUrl(): AdGenerationIntegrationParams {
+  const params = new URLSearchParams(window.location.search);
+  const returnUrl = queryTextParam(params, "return_url", "returnUrl");
+  const callbackUrl = queryTextParam(params, "callback_url", "callbackUrl");
+  return {
+    externalOrderId: queryTextParam(params, "external_order_id", "externalOrderId"),
+    returnUrl: returnUrl && isHttpUrl(returnUrl) ? returnUrl : null,
+    callbackUrl: callbackUrl && isHttpUrl(callbackUrl) ? callbackUrl : null,
+  };
+}
+
+function queryTextParam(params: URLSearchParams, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = params.get(key)?.trim();
+    if (value) return value;
+  }
+  return null;
 }
 
 function adGenerationJobIdFromUrl(): string | null {

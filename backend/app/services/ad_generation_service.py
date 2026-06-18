@@ -4,6 +4,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
+import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,6 +116,9 @@ WORKFLOW_STATUSES = {
     "final_review",
     "reviewing",
 }
+CALLBACK_HISTORY_LIMIT = 5
+CALLBACK_RESPONSE_TEXT_LIMIT = 2000
+CALLBACK_TIMEOUT_SECONDS = 15.0
 
 
 class AdGenerationService:
@@ -291,6 +295,11 @@ class AdGenerationService:
             self.settings.ai_ads_return_url
         )
 
+    def result_url_for_job(self, job_id: str) -> str:
+        base_url = self.settings.public_base_url.rstrip("/")
+        prefix = self.settings.api_v1_prefix.rstrip("/")
+        return f"{base_url}{prefix}/integrations/publishing/ad-generation/jobs/{job_id}/result"
+
     async def run_job(self, job_id: str) -> None:
         async with AsyncSessionLocal() as session:
             await self.process_job(session, job_id)
@@ -372,7 +381,66 @@ class AdGenerationService:
         }
         await session.commit()
         await session.refresh(job)
+        await self._notify_callback(session, job)
+        await session.refresh(job)
         return job
+
+    async def _notify_callback(self, session: AsyncSession, job: AdGenerationJob) -> None:
+        if not job.callback_url:
+            return
+
+        payload = self._callback_payload(job)
+        callback_result = await self._post_callback(job.callback_url, payload)
+        job.metadata_json = _with_callback_result(job.metadata_json, callback_result)
+        await session.commit()
+
+    def _callback_payload(self, job: AdGenerationJob) -> dict[str, Any]:
+        return {
+            "event": "ad_generation.returned",
+            "job_id": job.id,
+            "external_order_id": job.external_order_id,
+            "status": job.status,
+            "result_url": self.result_url_for_job(job.id),
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+
+    async def _post_callback(self, callback_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        started_at = utcnow()
+        result: dict[str, Any] = {
+            "url": callback_url,
+            "status": "pending",
+            "request_payload": payload,
+            "started_at": started_at.isoformat(),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT_SECONDS) as client:
+                response = await client.post(callback_url, json=payload)
+        except httpx.HTTPError as exc:
+            return {
+                **result,
+                "status": "failed",
+                "error": str(exc),
+                "finished_at": utcnow().isoformat(),
+            }
+
+        response_text = _trim_response_text(response.text)
+        if 200 <= response.status_code < 300:
+            return {
+                **result,
+                "status": "succeeded",
+                "status_code": response.status_code,
+                "response_text": response_text,
+                "finished_at": utcnow().isoformat(),
+            }
+
+        return {
+            **result,
+            "status": "failed",
+            "status_code": response.status_code,
+            "response_text": response_text,
+            "error": f"Callback endpoint returned HTTP {response.status_code}.",
+            "finished_at": utcnow().isoformat(),
+        }
 
     async def _generate_result(
         self,
@@ -805,6 +873,39 @@ def _has_multiple_country_values(fields: dict) -> bool:
     if isinstance(value, str) and re.search(r"[,;/|]", value):
         return True
     return False
+
+
+def _with_callback_result(metadata: dict | None, callback_result: dict[str, Any]) -> dict:
+    current = dict(metadata or {})
+    previous = current.get("callback_delivery")
+    previous = previous if isinstance(previous, dict) else {}
+    try:
+        attempts = int(previous.get("attempts") or 0) + 1
+    except (TypeError, ValueError):
+        attempts = 1
+
+    last_result = {**callback_result, "attempt": attempts}
+    history = previous.get("history") if isinstance(previous.get("history"), list) else []
+    history = [item for item in history if isinstance(item, dict)]
+    history = [*history, last_result][-CALLBACK_HISTORY_LIMIT:]
+
+    return {
+        **current,
+        "callback_delivery": {
+            "status": callback_result.get("status"),
+            "attempts": attempts,
+            "last_status_code": callback_result.get("status_code"),
+            "last_attempted_at": callback_result.get("started_at"),
+            "last_result": last_result,
+            "history": history,
+        },
+    }
+
+
+def _trim_response_text(value: str) -> str:
+    if len(value) <= CALLBACK_RESPONSE_TEXT_LIMIT:
+        return value
+    return value[: CALLBACK_RESPONSE_TEXT_LIMIT - 3].rstrip() + "..."
 
 
 def _trim(value: str, length: int) -> str:

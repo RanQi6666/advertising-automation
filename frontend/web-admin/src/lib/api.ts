@@ -197,11 +197,17 @@ export const api = {
     rawContent: string;
     structuredFields: Record<string, unknown>;
     deliveryExtraction?: WorkOrderDeliveryExtraction | null;
+    externalOrderId?: string | null;
+    returnUrl?: string | null;
+    callbackUrl?: string | null;
     creativeType?: "image" | "video" | "carousel";
     imageCount?: number;
     dailyBudget?: number | null;
   }) =>
     post<AdGenerationJobAccepted>("/integrations/publishing/ad-generation/jobs", {
+      ...(payload.externalOrderId ? { external_order_id: payload.externalOrderId } : {}),
+      ...(payload.returnUrl ? { return_url: payload.returnUrl } : {}),
+      ...(payload.callbackUrl ? { callback_url: payload.callbackUrl } : {}),
       work_order: {
         raw_content: payload.rawContent,
         structured_fields: payload.structuredFields,

@@ -784,3 +784,157 @@ async def test_publishing_ad_generation_review_confirm_marks_job_reviewed() -> N
     assert reviewed.metadata_json["return_url"] == "https://publishing.example/ai-return"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publishing_ad_generation_confirm_posts_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://ai.example.test")
+    get_settings.cache_clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        captured: dict = {}
+
+        async def fake_post_callback(callback_url: str, payload: dict) -> dict:
+            captured["callback_url"] = callback_url
+            captured["payload"] = payload
+            return {
+                "url": callback_url,
+                "status": "succeeded",
+                "status_code": 204,
+                "request_payload": payload,
+                "response_text": "",
+                "started_at": "2026-06-18T00:00:00+00:00",
+                "finished_at": "2026-06-18T00:00:01+00:00",
+            }
+
+        monkeypatch.setattr(service, "_post_callback", fake_post_callback)
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-callback",
+                callback_url="https://publishing.example/api/ai-callback",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: callback flow\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: purchase\n"
+                        "Landing: https://example.com/callback"
+                    ),
+                    structured_fields={
+                        "project_name": "Callback Flow",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "purchase",
+                        "landing_url": "https://example.com/callback",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        generated = await service.process_job(session, job.id)
+
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(
+                result_payload=generated.result_payload,
+                review_notes="Callback ready.",
+            ),
+        )
+
+    assert returned.status == "returned"
+    assert captured["callback_url"] == "https://publishing.example/api/ai-callback"
+    assert captured["payload"]["event"] == "ad_generation.returned"
+    assert captured["payload"]["job_id"] == returned.id
+    assert captured["payload"]["external_order_id"] == "order-callback"
+    assert captured["payload"]["status"] == "returned"
+    assert (
+        captured["payload"]["result_url"]
+        == f"https://ai.example.test/api/v1/integrations/publishing/ad-generation/jobs/{returned.id}/result"
+    )
+    callback_delivery = returned.metadata_json["callback_delivery"]
+    assert callback_delivery["status"] == "succeeded"
+    assert callback_delivery["attempts"] == 1
+    assert callback_delivery["last_status_code"] == 204
+    assert callback_delivery["last_result"]["request_payload"] == captured["payload"]
+
+    get_settings.cache_clear()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publishing_ad_generation_callback_failure_does_not_block_returned_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+
+        async def fake_post_callback(callback_url: str, payload: dict) -> dict:
+            return {
+                "url": callback_url,
+                "status": "failed",
+                "status_code": 500,
+                "request_payload": payload,
+                "response_text": "temporary failure",
+                "error": "Callback endpoint returned HTTP 500.",
+                "started_at": "2026-06-18T00:00:00+00:00",
+                "finished_at": "2026-06-18T00:00:01+00:00",
+            }
+
+        monkeypatch.setattr(service, "_post_callback", fake_post_callback)
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                callback_url="https://publishing.example/api/ai-callback",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: failed callback flow\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: purchase\n"
+                        "Landing: https://example.com/callback-failure"
+                    ),
+                    structured_fields={
+                        "project_name": "Failed Callback Flow",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "purchase",
+                        "landing_url": "https://example.com/callback-failure",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        generated = await service.process_job(session, job.id)
+
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(result_payload=generated.result_payload),
+        )
+
+    assert returned.status == "returned"
+    assert returned.result_payload["status"] == "returned"
+    callback_delivery = returned.metadata_json["callback_delivery"]
+    assert callback_delivery["status"] == "failed"
+    assert callback_delivery["attempts"] == 1
+    assert callback_delivery["last_status_code"] == 500
+    assert callback_delivery["last_result"]["error"] == "Callback endpoint returned HTTP 500."
+
+    await engine.dispose()
