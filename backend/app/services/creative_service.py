@@ -18,6 +18,8 @@ from backend.app.services.creative_asset_urls import repair_creative_asset_urls
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.utils import get_required
 
+STREAM_HEARTBEAT_SECONDS = 5.0
+
 
 class CreativeService:
     def __init__(self) -> None:
@@ -68,11 +70,25 @@ class CreativeService:
             yield {"type": "slot", "index": index}
 
         try:
-            briefs = await self.llm.generate_image_briefs(
-                draft=draft,  # type: ignore[arg-type]
-                count=len(slot_indices),
-                size=payload.size,
+            brief_task = asyncio.create_task(
+                self.llm.generate_image_briefs(
+                    draft=draft,  # type: ignore[arg-type]
+                    count=len(slot_indices),
+                    size=payload.size,
+                )
             )
+            while True:
+                done, _ = await asyncio.wait(
+                    {brief_task},
+                    timeout=STREAM_HEARTBEAT_SECONDS,
+                )
+                if done:
+                    break
+                yield _heartbeat_event(
+                    stage="image_brief_generation",
+                    pending_indices=slot_indices,
+                )
+            briefs = await brief_task
         except Exception as exc:
             for index in slot_indices:
                 yield {"type": "error", "index": index, "message": f"图片 brief 生成失败：{exc}"}
@@ -92,22 +108,37 @@ class CreativeService:
             )
             for brief in briefs
         ]
+        task_indices = {task: brief.image_index for task, brief in zip(tasks, briefs, strict=False)}
 
         generated_count = 0
-        for task in asyncio.as_completed(tasks):
-            index, asset, message = await task
-            if asset is None:
-                yield {"type": "error", "index": index, "message": message or "图片生成失败。"}
+        pending_tasks = set(tasks)
+        while pending_tasks:
+            done_tasks, pending_tasks = await asyncio.wait(
+                pending_tasks,
+                timeout=STREAM_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done_tasks:
+                yield _heartbeat_event(
+                    stage="image_generation",
+                    pending_indices=_pending_task_indices(pending_tasks, task_indices),
+                )
                 continue
-            session.add(asset)
-            await session.commit()
-            await session.refresh(asset)
-            generated_count += 1
-            yield {
-                "type": "asset",
-                "index": index,
-                "asset": _creative_asset_payload(asset),
-            }
+
+            for task in sorted(done_tasks, key=lambda item: task_indices.get(item, 0)):
+                index, asset, message = await task
+                if asset is None:
+                    yield {"type": "error", "index": index, "message": message or "图片生成失败。"}
+                    continue
+                session.add(asset)
+                await session.commit()
+                await session.refresh(asset)
+                generated_count += 1
+                yield {
+                    "type": "asset",
+                    "index": index,
+                    "asset": _creative_asset_payload(asset),
+                }
 
         for index in missing_indices:
             yield {"type": "error", "index": index, "message": "模型未返回此图片 brief，请重试。"}
@@ -275,6 +306,22 @@ def _asset_image_index(asset: CreativeAsset, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return index if index > 0 else default
+
+
+def _heartbeat_event(stage: str, pending_indices: list[int]) -> dict:
+    return {
+        "type": "heartbeat",
+        "stage": stage,
+        "pending_indices": pending_indices,
+        "interval_seconds": STREAM_HEARTBEAT_SECONDS,
+    }
+
+
+def _pending_task_indices(
+    tasks: set[asyncio.Task],
+    task_indices: dict[asyncio.Task, int],
+) -> list[int]:
+    return sorted(task_indices.get(task, 0) for task in tasks)
 
 
 def _creative_asset_payload(asset: CreativeAsset) -> dict:

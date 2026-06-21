@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -9,6 +11,7 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import CreativeStatus
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.creative import CreativeGenerateRequest
+from backend.app.services import creative_service
 from backend.app.services.creative_service import CreativeService
 
 
@@ -59,6 +62,12 @@ class FakeImageProvider:
         ]
 
 
+class SlowFakeImageProvider(FakeImageProvider):
+    async def generate_images(self, briefs: list[ImageBrief]) -> list[GeneratedImage]:
+        await asyncio.sleep(0.02)
+        return await super().generate_images(briefs)
+
+
 @pytest.mark.asyncio
 async def test_stream_creatives_yields_three_assets_incrementally() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -102,6 +111,49 @@ async def test_stream_creatives_yields_three_assets_incrementally() -> None:
         assert len(stored_assets) == 3
         assert {asset.metadata_json["image_index"] for asset in stored_assets} == {1, 2, 3}
         assert all(asset.metadata_json["streamed"] is True for asset in stored_assets)
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stream_creatives_sends_heartbeat_while_images_are_pending(monkeypatch) -> None:
+    monkeypatch.setattr(creative_service, "STREAM_HEARTBEAT_SECONDS", 0.001)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        service = CreativeService()
+        service.llm = FakeLLMProvider()  # type: ignore[assignment]
+        service.image_provider = SlowFakeImageProvider()  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in service.stream_creatives(
+                session,
+                CreativeGenerateRequest(draft_id=draft.id, count=1, size="1:1"),
+            )
+        ]
+
+        heartbeats = [event for event in events if event["type"] == "heartbeat"]
+        assert heartbeats
+        assert heartbeats[0]["stage"] == "image_generation"
+        assert heartbeats[0]["pending_indices"] == [1]
+        assert len([event for event in events if event["type"] == "asset"]) == 1
+        assert events[-1] == {"type": "done", "generated": 1}
 
     await engine.dispose()
 

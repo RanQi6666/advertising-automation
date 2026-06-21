@@ -29,11 +29,13 @@ export type TopicStreamEvent =
 export type CreativeStreamEvent =
   | { type: "start"; limit: number; indices?: number[] }
   | { type: "slot"; index: number }
+  | { type: "heartbeat"; stage: string; pending_indices?: number[]; interval_seconds?: number }
   | { type: "asset"; index: number; asset: CreativeAsset }
   | { type: "error"; index?: number; message: string }
   | { type: "done"; generated?: number };
 export type VideoStoryboardTextStreamEvent =
   | { type: "start"; duration_seconds: number; aspect_ratio: string }
+  | { type: "heartbeat"; stage: string; interval_seconds?: number }
   | { type: "delta"; text: string }
   | { type: "error"; message: string }
   | { type: "done"; duration_seconds: number; aspect_ratio: string; text?: string };

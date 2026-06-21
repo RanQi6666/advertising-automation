@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     volcengine_video_min_duration_seconds: int = Field(default=4, ge=1, le=300)
     volcengine_video_max_duration_seconds: int = Field(default=12, ge=1, le=300)
     volcengine_video_max_reference_images: int = Field(default=2, ge=1, le=20)
-    volcengine_video_generate_audio: bool = False
+    volcengine_video_generate_audio: bool = True
     volcengine_video_watermark: bool = False
     volcengine_video_return_last_frame: bool = False
     volcengine_video_execution_expires_after: int = Field(default=172800, ge=3600, le=259200)

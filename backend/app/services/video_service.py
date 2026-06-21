@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 
 from sqlalchemy import select
@@ -27,6 +28,8 @@ from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
+
+VIDEO_STREAM_HEARTBEAT_SECONDS = 5.0
 
 
 class VideoService:
@@ -152,19 +155,21 @@ class VideoService:
 
         full_text = ""
         try:
-            async for chunk in self.llm.stream_video_storyboard_text(
-                campaign=campaign,  # type: ignore[arg-type]
-                draft=draft,  # type: ignore[arg-type]
-                assets=assets,  # type: ignore[arg-type]
-                duration_seconds=payload.duration_seconds,
-                aspect_ratio=payload.aspect_ratio,
-                context=context,
-                instructions=payload.instructions,
+            async for event in _stream_text_with_heartbeat(
+                self.llm.stream_video_storyboard_text(
+                    campaign=campaign,  # type: ignore[arg-type]
+                    draft=draft,  # type: ignore[arg-type]
+                    assets=assets,  # type: ignore[arg-type]
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                    context=context,
+                    instructions=payload.instructions,
+                ),
+                stage="video_storyboard_generation",
             ):
-                if not chunk:
-                    continue
-                full_text += chunk
-                yield {"type": "delta", "text": chunk}
+                if event["type"] == "delta":
+                    full_text += event["text"]
+                yield event
         except Exception as exc:
             yield {"type": "error", "message": f"视频脚本生成中断：{exc}"}
             return
@@ -266,21 +271,23 @@ class VideoService:
 
         full_text = ""
         try:
-            async for chunk in self.llm.stream_video_storyboard_revision_text(
-                campaign=campaign,  # type: ignore[arg-type]
-                draft=draft,  # type: ignore[arg-type]
-                assets=assets,  # type: ignore[arg-type]
-                duration_seconds=payload.duration_seconds,
-                aspect_ratio=payload.aspect_ratio,
-                context=context,
-                current_storyboard=payload.storyboard,
-                current_storyboard_text=payload.storyboard_text,
-                feedback=feedback,
+            async for event in _stream_text_with_heartbeat(
+                self.llm.stream_video_storyboard_revision_text(
+                    campaign=campaign,  # type: ignore[arg-type]
+                    draft=draft,  # type: ignore[arg-type]
+                    assets=assets,  # type: ignore[arg-type]
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                    context=context,
+                    current_storyboard=payload.storyboard,
+                    current_storyboard_text=payload.storyboard_text,
+                    feedback=feedback,
+                ),
+                stage="video_storyboard_revision",
             ):
-                if not chunk:
-                    continue
-                full_text += chunk
-                yield {"type": "delta", "text": chunk}
+                if event["type"] == "delta":
+                    full_text += event["text"]
+                yield event
         except Exception as exc:
             yield {"type": "error", "message": f"视频脚本改写中断：{exc}"}
             return
@@ -522,6 +529,49 @@ def _storyboard_to_prompt(storyboard: list[dict]) -> str:
             )
         )
     return "\n".join(lines)
+
+
+async def _stream_text_with_heartbeat(
+    chunks: AsyncIterator[str],
+    stage: str,
+) -> AsyncIterator[dict]:
+    chunk_task = asyncio.create_task(anext(chunks))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {chunk_task},
+                timeout=VIDEO_STREAM_HEARTBEAT_SECONDS,
+            )
+            if not done:
+                yield _heartbeat_event(stage)
+                continue
+
+            try:
+                chunk = chunk_task.result()
+            except StopAsyncIteration:
+                break
+
+            if chunk:
+                yield {"type": "delta", "text": chunk}
+            chunk_task = asyncio.create_task(anext(chunks))
+    finally:
+        if not chunk_task.done():
+            chunk_task.cancel()
+            try:
+                await chunk_task
+            except asyncio.CancelledError:
+                pass
+        aclose = getattr(chunks, "aclose", None)
+        if aclose:
+            await aclose()
+
+
+def _heartbeat_event(stage: str) -> dict:
+    return {
+        "type": "heartbeat",
+        "stage": stage,
+        "interval_seconds": VIDEO_STREAM_HEARTBEAT_SECONDS,
+    }
 
 
 def _resolve_video_source_image_url(

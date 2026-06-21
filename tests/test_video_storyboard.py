@@ -1,3 +1,6 @@
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 
 from backend.app.core.config import Settings
@@ -5,12 +8,13 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
-from backend.app.schemas.video import VideoGenerateRequest
-from backend.app.schemas.video import VideoStoryboardRewriteRequest
+from backend.app.schemas.video import VideoGenerateRequest, VideoStoryboardRewriteRequest
+from backend.app.services import video_service
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     _redact_provider_request_payload,
     _resolve_video_source_image_url,
+    _stream_text_with_heartbeat,
 )
 
 
@@ -105,6 +109,31 @@ async def test_mock_provider_streams_video_storyboard_text() -> None:
     assert len(chunks) > 1
     assert "视频分镜脚本" in text
     assert "asset-1" in text
+
+
+@pytest.mark.asyncio
+async def test_video_storyboard_stream_sends_heartbeat_while_text_is_pending(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(video_service, "VIDEO_STREAM_HEARTBEAT_SECONDS", 0.001)
+
+    async def slow_chunks() -> AsyncIterator[str]:
+        await asyncio.sleep(0.02)
+        yield "Scene 1: Open with the core benefit."
+
+    events = [
+        event
+        async for event in _stream_text_with_heartbeat(
+            slow_chunks(),
+            stage="video_storyboard_generation",
+        )
+    ]
+
+    heartbeats = [event for event in events if event["type"] == "heartbeat"]
+    assert heartbeats
+    assert heartbeats[0]["stage"] == "video_storyboard_generation"
+    assert heartbeats[0]["interval_seconds"] == 0.001
+    assert {"type": "delta", "text": "Scene 1: Open with the core benefit."} in events
 
 
 def test_video_generate_request_accepts_storyboard() -> None:
