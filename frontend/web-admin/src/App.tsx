@@ -32,6 +32,8 @@ import type {
 
 type ViewKey = "dashboard" | "work-orders" | "workflow" | "topics" | "copy" | "creatives" | "videos";
 type ErrorScope = "global" | "refresh" | "work-order" | "topic" | "copy" | "image" | "video" | "final";
+type ReviewEntityType = "topic" | "copy_draft" | "creative_asset" | "video_asset";
+type ReviewDecision = "approved" | "rejected" | "needs_revision";
 type ScopedAppError = {
   scope: ErrorScope;
   message: string;
@@ -548,8 +550,8 @@ function App() {
     }
   }
 
-  async function refreshCampaignData(campaignId: string) {
-    await run("campaign-refresh", async () => {
+  async function refreshCampaignData(campaignId: string, options: { silent?: boolean } = {}) {
+    const refresh = async () => {
       const [nextTopics, nextDrafts, nextCreatives, nextVideos] = await Promise.all([
         api.listTopics(campaignId),
         api.listDrafts(campaignId),
@@ -559,6 +561,7 @@ function App() {
       setTopics(nextTopics);
       setDrafts(nextDrafts);
       setCreatives(nextCreatives);
+      setCreativeGenerationSlots((current) => syncCreativeSlotsWithAssets(current, nextCreatives));
       setVideos(nextVideos);
       setVideoPollWarnings({});
       setSelectedTopicId((current) =>
@@ -581,7 +584,19 @@ function App() {
           ? current
           : nextVideos.find((item) => item.status === "approved")?.id ?? nextVideos[0]?.id ?? null,
       );
-    });
+    };
+
+    if (options.silent) {
+      try {
+        await refresh();
+        clearError("refresh");
+      } catch (caught) {
+        setCaughtError("refresh", caught, "Campaign data refresh failed.");
+      }
+      return;
+    }
+
+    await run("campaign-refresh", refresh);
   }
 
   async function handleCreateWorkOrder() {
@@ -938,23 +953,101 @@ function App() {
     }
   }
 
-  async function handleReview(
-    entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
-    entityId: string,
-    decision: "approved" | "rejected" | "needs_revision",
-  ) {
+  async function handleReview(entityType: ReviewEntityType, entityId: string, decision: ReviewDecision) {
     if (!selectedCampaign) return;
+    const rollbackReview = applyOptimisticReview(entityType, entityId, decision);
     const review = await run(
       `review-${entityType}-${decision}`,
       () => api.submitReview(entityType, entityId, decision, selectedCampaign.id, copyFeedback || undefined),
       "审核结果已提交",
     );
+    if (!review) {
+      rollbackReview();
+      return;
+    }
     if (review) {
-      await refreshCampaignData(selectedCampaign.id);
+      void refreshCampaignData(selectedCampaign.id, { silent: true });
       if (entityType === "copy_draft" && decision === "approved") void saveWorkflowStage("image_review");
-      if (entityType === "creative_asset" && decision === "approved") void saveWorkflowStage("video_review");
+      if (entityType === "creative_asset" && decision === "approved") {
+        void saveWorkflowStage(adGenerationRequiresVideo(selectedJob) ? "video_review" : "final_review");
+      }
       if (entityType === "video_asset" && decision === "approved") void saveWorkflowStage("final_review");
     }
+  }
+
+  function applyOptimisticReview(
+    entityType: ReviewEntityType,
+    entityId: string,
+    decision: ReviewDecision,
+  ): () => void {
+    const nextStatus = reviewStatusFromDecision(entityType, decision);
+
+    if (entityType === "topic") {
+      const previous = topics.find((item) => item.id === entityId);
+      setTopics((current) =>
+        current.map((item) => (item.id === entityId ? { ...item, status: nextStatus } : item)),
+      );
+      if (decision === "approved") setSelectedTopicId(entityId);
+      return () => {
+        if (!previous) return;
+        setTopics((current) =>
+          current.map((item) => (item.id === entityId ? { ...item, status: previous.status } : item)),
+        );
+      };
+    }
+
+    if (entityType === "copy_draft") {
+      const previous = drafts.find((item) => item.id === entityId);
+      setDrafts((current) =>
+        current.map((item) => (item.id === entityId ? { ...item, status: nextStatus } : item)),
+      );
+      if (decision === "approved") setSelectedDraftId(entityId);
+      return () => {
+        if (!previous) return;
+        setDrafts((current) =>
+          current.map((item) => (item.id === entityId ? { ...item, status: previous.status } : item)),
+        );
+      };
+    }
+
+    if (entityType === "creative_asset") {
+      const previous = creatives.find((item) => item.id === entityId);
+      setCreatives((current) =>
+        current.map((item) => (item.id === entityId ? { ...item, status: nextStatus } : item)),
+      );
+      setCreativeGenerationSlots((current) =>
+        current.map((slot) =>
+          slot.asset?.id === entityId
+            ? { ...slot, asset: { ...slot.asset, status: nextStatus } }
+            : slot,
+        ),
+      );
+      return () => {
+        if (!previous) return;
+        setCreatives((current) =>
+          current.map((item) => (item.id === entityId ? { ...item, status: previous.status } : item)),
+        );
+        setCreativeGenerationSlots((current) =>
+          current.map((slot) =>
+            slot.asset?.id === entityId
+              ? { ...slot, asset: { ...slot.asset, status: previous.status } }
+              : slot,
+          ),
+        );
+      };
+    }
+
+    const previous = videos.find((item) => item.id === entityId);
+    setVideos((current) =>
+      current.map((item) => (item.id === entityId ? { ...item, status: nextStatus } : item)),
+    );
+    if (decision === "approved") setSelectedVideoId(entityId);
+    return () => {
+      if (!previous) return;
+      setVideos((current) =>
+        current.map((item) => (item.id === entityId ? { ...item, status: previous.status } : item)),
+      );
+    };
   }
 
   function updateCreativeGenerationSlot(index: number, update: Partial<CreativeGenerationSlot>) {
@@ -3062,16 +3155,23 @@ function CreativeSlotCard({
             <span>按意见重生</span>
           </button>
         </div>
-        <div className="button-row">
-          <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+        {asset.status === "approved" ? (
+          <div className="review-complete">
             <Check size={16} />
-            <span>通过</span>
-          </button>
-          <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
-            <X size={16} />
-            <span>拒绝</span>
-          </button>
-        </div>
+            <span>图片已通过</span>
+          </div>
+        ) : (
+          <div className="button-row">
+            <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+              <Check size={16} />
+              <span>通过</span>
+            </button>
+            <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
+              <X size={16} />
+              <span>拒绝</span>
+            </button>
+          </div>
+        )}
         <details className="asset-details">
           <summary>提示词</summary>
           <div className="asset-details-body">
@@ -3125,16 +3225,23 @@ function CreativeAssetMiniCard({
           />
           <span>用于视频</span>
         </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+        {asset.status === "approved" ? (
+          <div className="review-complete">
             <Check size={16} />
-            <span>通过</span>
-          </button>
-          <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
-            <X size={16} />
-            <span>拒绝</span>
-          </button>
-        </div>
+            <span>图片已通过</span>
+          </div>
+        ) : (
+          <div className="button-row">
+            <button className="secondary-button" onClick={() => onReview("creative_asset", asset.id, "approved")}>
+              <Check size={16} />
+              <span>通过</span>
+            </button>
+            <button className="secondary-button danger" onClick={() => onReview("creative_asset", asset.id, "rejected")}>
+              <X size={16} />
+              <span>拒绝</span>
+            </button>
+          </div>
+        )}
       </div>
     </article>
   );
@@ -3859,13 +3966,20 @@ function buildWorkflowSummary({
   const topicDone = Boolean(topic && topic.status === "selected");
   const copyDone = Boolean(draft && draft.status === "approved");
   const imageDone = creatives.length > 0;
-  const videoDone = videos.length > 0;
+  const videoRequired = adGenerationRequiresVideo(job);
+  const videoDone = !videoRequired || videos.length > 0;
   return {
     fields: stepSummary("fields", "参数确认", fieldsDone, fieldsDone ? "参数已确认" : "等待识别", Boolean(job)),
     topic: stepSummary("topic", "人工选题", topicDone, topic?.title || "未选择选题", fieldsDone),
     copy: stepSummary("copy", "审核文案", copyDone, draft?.headline || "未通过文案", topicDone),
     image: stepSummary("image", "审核图片", imageDone, imageDone ? `${creatives.length} 张已通过` : "无通过图片", copyDone),
-    video: stepSummary("video", "审核视频", videoDone, videoDone ? `${videos.length} 个已通过` : "无通过视频", imageDone),
+    video: stepSummary(
+      "video",
+      "审核视频",
+      videoDone,
+      videoRequired ? (videos.length ? `${videos.length} 个已通过` : "无通过视频") : "无需视频",
+      imageDone && videoRequired,
+    ),
     final: stepSummary("final", "最终预审", fieldsDone && topicDone && copyDone && imageDone && videoDone, "确认后回传投放系统", videoDone),
   };
 }
@@ -3910,15 +4024,20 @@ function buildFinalPayload({
   if (!topic || topic.status !== "selected") return { ok: false, message: "请先选择选题。" };
   if (!draft || draft.status !== "approved") return { ok: false, message: "请先审核通过文案。" };
   if (!creatives.length) return { ok: false, message: "请先审核通过图片。" };
-  if (!videos.length) return { ok: false, message: "请先审核通过视频。" };
+  const videoRequired = adGenerationRequiresVideo(job);
+  if (videoRequired && !videos.length) return { ok: false, message: "请先审核通过视频。" };
 
   const result = job.result_payload ?? {};
   const campaignPayload = isRecord(result.campaign_payload) ? result.campaign_payload : {};
   const adsetPayload = isRecord(result.adset_payload) ? result.adset_payload : {};
   const review = isRecord(result.review) ? result.review : {};
   const image = creatives.find((item) => selectedCreativeIds.includes(item.id)) ?? creatives[0];
-  const video = videos.find((item) => item.id === selectedVideoId) ?? videos[0];
+  const video = videos.find((item) => item.id === selectedVideoId) ?? videos[0] ?? null;
   const link = campaignLandingUrl(campaign);
+  const creativeType = video ? "video" : "image";
+  const imageUrl = image.url;
+  const videoUrl = video?.url ?? null;
+  const materialUrl = videoUrl || imageUrl;
 
   return {
     ok: true,
@@ -3945,17 +4064,20 @@ function buildFinalPayload({
         draft: 1,
       },
       creative_payload: {
-        name: `${campaign.name} - video`,
-        type: "video",
+        name: `${campaign.name} - ${creativeType}`,
+        type: creativeType,
         message: draft.primary_text || draft.body,
         link,
         ads_name: draft.headline || topic.title,
         description: draft.description,
         btn_type: "LEARN_MORE",
-        asset_url: video.url || image.url,
-        asset_id: null,
-        image_asset_url: image.url,
-        video_asset_url: video.url,
+        asset_url: materialUrl,
+        image_asset_url: imageUrl,
+        ...(videoUrl ? { video_asset_url: videoUrl } : {}),
+        material_url: materialUrl,
+        file_url: materialUrl,
+        image_url: imageUrl,
+        ...(videoUrl ? { video_url: videoUrl } : {}),
         draft: 1,
       },
       assets: {
@@ -3963,6 +4085,12 @@ function buildFinalPayload({
           id: asset.id,
           filename: filenameFromUrl(asset.url),
           url: asset.url,
+          asset_url: asset.url,
+          material_url: asset.url,
+          file_url: asset.url,
+          image_url: asset.url,
+          image_asset_url: asset.url,
+          type: "image",
           size: asset.size,
           prompt: asset.prompt,
           alt_text: asset.alt_text,
@@ -3970,6 +4098,12 @@ function buildFinalPayload({
         videos: videos.map((item) => ({
           id: item.id,
           url: item.url,
+          asset_url: item.url,
+          material_url: item.url,
+          file_url: item.url,
+          video_url: item.url,
+          video_asset_url: item.url,
+          type: "video",
           cover_url: null,
           duration_seconds: item.duration_seconds,
           storyboard: item.storyboard,
@@ -3981,7 +4115,7 @@ function buildFinalPayload({
           topic_reviewed: true,
           copy_reviewed: true,
           image_reviewed: true,
-          video_reviewed: true,
+          video_reviewed: !videoRequired || videos.length > 0,
         },
       },
       metadata_json: {
@@ -3996,6 +4130,14 @@ function buildFinalPayload({
       },
     },
   };
+}
+
+function adGenerationRequiresVideo(job: AdGenerationJob | null): boolean {
+  if (!job) return false;
+  const request = job.request_payload ?? {};
+  const preferences = isRecord(request.preferences) ? request.preferences : {};
+  if (typeof preferences.video_required === "boolean") return preferences.video_required;
+  return readText(preferences.creative_type).toLowerCase() === "video";
 }
 
 function loadDeliveryExtractionCache(rawContent: string): DeliveryExtractionCacheEntry | null {
@@ -4380,6 +4522,18 @@ function buildCreativeSlots(
   return slots;
 }
 
+function syncCreativeSlotsWithAssets(
+  slots: CreativeGenerationSlot[],
+  creatives: CreativeAsset[],
+): CreativeGenerationSlot[] {
+  if (!slots.length || !creatives.length) return slots;
+  return slots.map((slot) => {
+    if (!slot.asset) return slot;
+    const latestAsset = creatives.find((asset) => asset.id === slot.asset?.id);
+    return latestAsset ? { ...slot, asset: latestAsset } : slot;
+  });
+}
+
 function creativeImageIndex(asset: CreativeAsset, fallback: number): number {
   const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
   const rawIndex = metadata.image_index;
@@ -4536,6 +4690,15 @@ function statusLabel(status: string): string {
     video_review: "视频审核",
   };
   return labels[status] ?? status;
+}
+
+function reviewStatusFromDecision(entityType: ReviewEntityType, decision: ReviewDecision): string {
+  if (entityType === "topic") {
+    if (decision === "approved") return "selected";
+    if (decision === "rejected") return "rejected";
+    return "proposed";
+  }
+  return decision;
 }
 
 function isVideoGeneratingStatus(status: string): boolean {

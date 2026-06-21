@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
@@ -117,8 +118,222 @@ def _job_read(job: AdGenerationJob) -> PublishingAdGenerationJobRead:
 
 
 def _result_payload(job: AdGenerationJob) -> dict[str, Any]:
-    payload = dict(job.result_payload or {})
+    payload = deepcopy(job.result_payload or {})
+    _normalize_material_urls(payload)
+    _drop_empty_material_fields(payload)
     payload["job_id"] = job.id
     payload["external_order_id"] = job.external_order_id
     payload["status"] = job.status
     return payload
+
+
+def _normalize_material_urls(payload: dict[str, Any]) -> None:
+    creative_payload = payload.get("creative_payload")
+    if isinstance(creative_payload, dict):
+        _normalize_creative_material_urls(creative_payload)
+        _drop_transient_creative_fields(creative_payload)
+
+    assets = payload.get("assets")
+    if isinstance(assets, dict):
+        for image in _records(assets.get("images")):
+            _normalize_asset_material_urls(image, "image")
+            _drop_transient_asset_fields(image)
+        for video in _records(assets.get("videos")):
+            _normalize_asset_material_urls(video, "video")
+            _drop_transient_asset_fields(video)
+
+    _drop_transient_top_level_fields(payload)
+
+
+def _normalize_creative_material_urls(creative_payload: dict[str, Any]) -> None:
+    image_url = _text_or_none(
+        creative_payload.get("image_url")
+        or creative_payload.get("image_asset_url")
+        or creative_payload.get("imageUrl")
+        or creative_payload.get("imageAssetUrl")
+    )
+    video_url = _text_or_none(
+        creative_payload.get("video_url")
+        or creative_payload.get("video_asset_url")
+        or creative_payload.get("videoUrl")
+        or creative_payload.get("videoAssetUrl")
+    )
+    material_url = _text_or_none(
+        creative_payload.get("material_url")
+        or creative_payload.get("file_url")
+        or creative_payload.get("asset_url")
+        or creative_payload.get("materialUrl")
+        or creative_payload.get("fileUrl")
+        or creative_payload.get("assetUrl")
+        or creative_payload.get("source_url")
+        or creative_payload.get("download_url")
+        or video_url
+        or image_url
+    )
+
+    if material_url:
+        creative_payload["asset_url"] = creative_payload.get("asset_url") or material_url
+        creative_payload["material_url"] = creative_payload.get("material_url") or material_url
+        creative_payload["file_url"] = creative_payload.get("file_url") or material_url
+    if image_url:
+        creative_payload["image_asset_url"] = creative_payload.get("image_asset_url") or image_url
+        creative_payload["image_url"] = creative_payload.get("image_url") or image_url
+    if video_url:
+        creative_payload["video_asset_url"] = creative_payload.get("video_asset_url") or video_url
+        creative_payload["video_url"] = creative_payload.get("video_url") or video_url
+
+
+def _normalize_asset_material_urls(record: dict[str, Any], asset_type: str) -> None:
+    url = _text_or_none(
+        record.get("url")
+        or record.get("material_url")
+        or record.get("file_url")
+        or record.get("asset_url")
+        or record.get(f"{asset_type}_url")
+        or record.get(f"{asset_type}_asset_url")
+        or record.get("materialUrl")
+        or record.get("fileUrl")
+        or record.get("assetUrl")
+        or record.get(f"{asset_type}Url")
+        or record.get(f"{asset_type}AssetUrl")
+    )
+    if not url:
+        return
+    record["url"] = record.get("url") or url
+    record["asset_url"] = record.get("asset_url") or url
+    record["material_url"] = record.get("material_url") or url
+    record["file_url"] = record.get("file_url") or url
+    record[f"{asset_type}_url"] = record.get(f"{asset_type}_url") or url
+    record[f"{asset_type}_asset_url"] = record.get(f"{asset_type}_asset_url") or url
+    record["type"] = record.get("type") or asset_type
+
+
+def _records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _drop_transient_top_level_fields(payload: dict[str, Any]) -> None:
+    _drop_keys(
+        payload,
+        (
+            "asset_url",
+            "material_url",
+            "file_url",
+            "url",
+            "src",
+            "assetUrl",
+            "materialUrl",
+            "fileUrl",
+            "source_url",
+            "download_url",
+            "material_address",
+            "materialAddress",
+            "media_url",
+            "mediaUrl",
+            "materials",
+        ),
+    )
+
+
+def _drop_transient_creative_fields(record: dict[str, Any]) -> None:
+    _drop_keys(
+        record,
+        (
+            "url",
+            "src",
+            "assetUrl",
+            "materialUrl",
+            "fileUrl",
+            "imageUrl",
+            "imageAssetUrl",
+            "videoUrl",
+            "videoAssetUrl",
+            "asset_file_url",
+            "assetFileUrl",
+            "material_file_url",
+            "materialFileUrl",
+            "source_url",
+            "download_url",
+            "material_address",
+            "materialAddress",
+            "media_url",
+            "mediaUrl",
+            "asset_payload",
+            "assetPayload",
+            "material_payload",
+            "materialPayload",
+            "material_info",
+            "materialInfo",
+            "materials",
+            "filename",
+            "file_name",
+            "fileName",
+        ),
+    )
+
+
+def _drop_transient_asset_fields(record: dict[str, Any]) -> None:
+    _drop_keys(
+        record,
+        (
+            "src",
+            "assetUrl",
+            "materialUrl",
+            "fileUrl",
+            "imageUrl",
+            "imageAssetUrl",
+            "videoUrl",
+            "videoAssetUrl",
+            "source_url",
+            "download_url",
+            "material_address",
+            "materialAddress",
+            "media_url",
+            "mediaUrl",
+        ),
+    )
+
+
+def _drop_empty_material_fields(payload: dict[str, Any]) -> None:
+    creative_payload = payload.get("creative_payload")
+    if isinstance(creative_payload, dict):
+        _drop_empty_keys(
+            creative_payload,
+            (
+                "asset_id",
+                "assetId",
+                "video_url",
+                "videoUrl",
+                "video_asset_url",
+                "videoAssetUrl",
+            ),
+        )
+
+    for key in ("materials",):
+        for record in _records(payload.get(key)):
+            _drop_empty_keys(record, ("asset_id", "assetId"))
+
+    assets = payload.get("assets")
+    if isinstance(assets, dict):
+        for record in [*_records(assets.get("images")), *_records(assets.get("videos"))]:
+            _drop_empty_keys(record, ("asset_id", "assetId"))
+
+
+def _drop_empty_keys(record: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if key in record and _text_or_none(record.get(key)) is None:
+            record.pop(key, None)
+
+
+def _drop_keys(record: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        record.pop(key, None)
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

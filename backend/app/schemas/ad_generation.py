@@ -104,6 +104,10 @@ class PublishingCreativePayload(BaseModel):
     asset_id: str | None = None
     image_asset_url: str | None = None
     video_asset_url: str | None = None
+    material_url: str | None = None
+    file_url: str | None = None
+    image_url: str | None = None
+    video_url: str | None = None
     draft: int = 1
 
 
@@ -111,6 +115,12 @@ class PublishingGeneratedImage(BaseModel):
     id: str | None = None
     filename: str | None = None
     url: str | None = None
+    asset_url: str | None = None
+    material_url: str | None = None
+    file_url: str | None = None
+    image_url: str | None = None
+    image_asset_url: str | None = None
+    type: str | None = None
     size: str | None = None
     prompt: str | None = None
     alt_text: str | None = None
@@ -119,6 +129,12 @@ class PublishingGeneratedImage(BaseModel):
 class PublishingGeneratedVideo(BaseModel):
     id: str | None = None
     url: str | None = None
+    asset_url: str | None = None
+    material_url: str | None = None
+    file_url: str | None = None
+    video_url: str | None = None
+    video_asset_url: str | None = None
+    type: str | None = None
     cover_url: str | None = None
     duration_seconds: int | None = None
     storyboard: list[dict] = Field(default_factory=list)
