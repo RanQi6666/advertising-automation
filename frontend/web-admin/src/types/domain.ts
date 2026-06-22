@@ -109,6 +109,54 @@ export interface AdGenerationJobAccepted {
   review_url: string;
 }
 
+export type AdPerformanceConfidence = "low" | "medium" | "high" | string;
+export type AdPerformanceSeverity = "info" | "warning" | "critical" | string;
+export type AdPerformancePriority = "low" | "medium" | "high" | string;
+
+export interface AdPerformanceProblem {
+  code: string;
+  severity: AdPerformanceSeverity;
+  area: string;
+  title: string;
+  evidence: string[];
+  diagnosis: string;
+}
+
+export interface AdPerformanceRecommendation {
+  code: string;
+  priority: AdPerformancePriority;
+  area: string;
+  action: string;
+  detail: string;
+}
+
+export interface AdPerformanceAnalysisResult {
+  summary: string;
+  confidence: AdPerformanceConfidence;
+  problems: AdPerformanceProblem[];
+  recommendations: AdPerformanceRecommendation[];
+  next_checks: string[];
+}
+
+export interface AdPerformanceAnalysis extends Timestamped {
+  analysis_id: string;
+  external_user_id: string | null;
+  source_type: string;
+  status: string;
+  campaign_external_id: string | null;
+  campaign_name: string | null;
+  adset_external_id: string | null;
+  adset_name: string | null;
+  creative_external_id: string | null;
+  creative_name: string | null;
+  date_start: string | null;
+  date_stop: string | null;
+  request_payload: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  analysis_result: AdPerformanceAnalysisResult;
+  error_message: string | null;
+}
+
 export interface LandingPageSnapshot extends Timestamped {
   campaign_id: string;
   work_order_id: string | null;

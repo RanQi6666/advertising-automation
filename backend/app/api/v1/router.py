@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from backend.app.api.deps import require_ai_ads_access_token
 from backend.app.api.v1.endpoints import (
     ad_generation,
+    ad_performance,
     campaigns,
     copywriting,
     creatives,
@@ -22,6 +23,11 @@ api_router.include_router(health.router, tags=["health"])
 api_router.include_router(
     ad_generation.router,
     tags=["ad-generation"],
+    dependencies=protected_dependencies,
+)
+api_router.include_router(
+    ad_performance.router,
+    tags=["ad-performance"],
     dependencies=protected_dependencies,
 )
 api_router.include_router(

@@ -1,6 +1,7 @@
 import type {
   AdGenerationJob,
   AdGenerationJobAccepted,
+  AdPerformanceAnalysis,
   Campaign,
   CopyDraft,
   CreativeAsset,
@@ -245,6 +246,10 @@ export const api = {
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
   listAdGenerationJobs: (limit = 50) =>
     request<AdGenerationJob[]>(`/integrations/publishing/ad-generation/jobs?limit=${limit}`),
+  listAdPerformanceAnalyses: (limit = 50) =>
+    request<AdPerformanceAnalysis[]>(`/integrations/ad-performance/analyses?limit=${limit}`),
+  getAdPerformanceAnalysis: (analysisId: string) =>
+    request<AdPerformanceAnalysis>(`/integrations/ad-performance/analyses/${analysisId}`),
   getAdGenerationJob: (jobId: string) =>
     request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}`),
   getAdGenerationResult: (jobId: string) =>
