@@ -38,6 +38,18 @@ type ScopedAppError = {
   scope: ErrorScope;
   message: string;
   transient: boolean;
+  createdAt: number;
+};
+type WorkflowArtifact = {
+  id: string;
+  created_at: string;
+  updated_at: string;
+};
+type WorkflowArtifactSnapshot = {
+  topics: Topic[];
+  drafts: CopyDraft[];
+  creatives: CreativeAsset[];
+  videos: VideoAsset[];
 };
 type WorkflowStepStatus = "done" | "active" | "blocked";
 type DeliveryExtractionCacheEntry = {
@@ -423,7 +435,7 @@ function App() {
       clearError();
       return;
     }
-    setErrorState({ scope, message, transient });
+    setErrorState({ scope, message, transient, createdAt: Date.now() });
   }
 
   function clearError(scope?: ErrorScope | ErrorScope[]) {
@@ -441,8 +453,48 @@ function App() {
     const message = apiErrorMessage(caught, fallback);
     const transient = isTransientApiError(caught);
     if (effectiveScope === "refresh" && transient) return message;
-    setErrorState({ scope: effectiveScope, message, transient });
+    setErrorState({ scope: effectiveScope, message, transient, createdAt: Date.now() });
     return message;
+  }
+
+  function clearResolvedTransientError(
+    next: WorkflowArtifactSnapshot,
+    previous: WorkflowArtifactSnapshot = { topics, drafts, creatives, videos },
+  ) {
+    setErrorState((current) => {
+      if (!current?.transient) return current;
+      if (
+        current.scope === "topic" &&
+        hasNewOrFreshArtifact(next.topics, previous.topics, current.createdAt)
+      ) {
+        return null;
+      }
+      if (
+        current.scope === "copy" &&
+        hasNewOrFreshArtifact(next.drafts, previous.drafts, current.createdAt)
+      ) {
+        return null;
+      }
+      if (
+        current.scope === "image" &&
+        hasNewOrFreshArtifact(next.creatives, previous.creatives, current.createdAt)
+      ) {
+        return null;
+      }
+      const resolvedVideos = next.videos.filter(
+        (video) => Boolean(video.url) || ["generated", "approved"].includes(video.status),
+      );
+      const previousResolvedVideos = previous.videos.filter(
+        (video) => Boolean(video.url) || ["generated", "approved"].includes(video.status),
+      );
+      if (
+        current.scope === "video" &&
+        hasNewOrFreshArtifact(resolvedVideos, previousResolvedVideos, current.createdAt)
+      ) {
+        return null;
+      }
+      return current;
+    });
   }
 
   function setVideoPollWarning(videoId: string, message: string) {
@@ -584,6 +636,12 @@ function App() {
           ? current
           : nextVideos.find((item) => item.status === "approved")?.id ?? nextVideos[0]?.id ?? null,
       );
+      clearResolvedTransientError({
+        topics: nextTopics,
+        drafts: nextDrafts,
+        creatives: nextCreatives,
+        videos: nextVideos,
+      });
     };
 
     if (options.silent) {
@@ -1617,6 +1675,7 @@ function App() {
     videos: approvedVideos,
   });
   const visibleError = error && shouldShowErrorBanner(error, activeView) ? error : null;
+  const bannerTone = visibleError ? (visibleError.transient ? "warning" : "error") : "success";
 
   return (
     <div className="app-shell">
@@ -1666,8 +1725,16 @@ function App() {
         </header>
 
         {(visibleError || notice) && (
-          <div className={`banner ${visibleError ? "error" : "success"}`}>
-            {visibleError ? <X size={18} /> : <Check size={18} />}
+          <div className={`banner ${bannerTone}`}>
+            {visibleError ? (
+              visibleError.transient ? (
+                <Clock3 size={18} />
+              ) : (
+                <X size={18} />
+              )
+            ) : (
+              <Check size={18} />
+            )}
             <span>{visibleError?.message || notice}</span>
           </div>
         )}
@@ -4467,6 +4534,20 @@ function prependOrReplaceById<T extends { id: string }>(items: T[], next: T): T[
   return items.some((item) => item.id === next.id)
     ? items.map((item) => (item.id === next.id ? next : item))
     : [next, ...items];
+}
+
+function hasNewOrFreshArtifact<T extends WorkflowArtifact>(
+  nextItems: T[],
+  previousItems: T[],
+  since: number,
+): boolean {
+  const previousIds = new Set(previousItems.map((item) => item.id));
+  return nextItems.some((item) => !previousIds.has(item.id) || artifactTimestamp(item) >= since - 10000);
+}
+
+function artifactTimestamp(item: WorkflowArtifact): number {
+  const timestamps = [Date.parse(item.updated_at), Date.parse(item.created_at)].filter(Number.isFinite);
+  return timestamps.length ? Math.max(...timestamps) : 0;
 }
 
 function initialTopicSlots(limit: number): TopicGenerationSlot[] {
