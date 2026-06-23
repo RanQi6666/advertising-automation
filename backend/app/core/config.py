@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4.1-mini"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
+    ad_performance_video_input_fps: float = Field(default=1.0, ge=0.2, le=5.0)
     ark_api_key: str | None = None
     volcengine_api_key: str | None = None
     volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"

@@ -20,3 +20,4 @@ artifacts/*
 .tools/
 node_modules/
 frontend/web-admin/dist/
+AGENTS.md

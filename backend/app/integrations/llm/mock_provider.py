@@ -1,3 +1,4 @@
+import json
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -151,6 +152,121 @@ class MockLLMProvider:
                 ],
             },
         }
+
+    async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
+        metrics = context.get("metrics") if isinstance(context.get("metrics"), dict) else {}
+        rule_analysis = (
+            context.get("rule_analysis") if isinstance(context.get("rule_analysis"), dict) else {}
+        )
+        creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+        image_url = (
+            creative.get("image_url")
+            or creative.get("imageUrl")
+            or creative.get("asset_image_url")
+            or creative.get("thumbnail_url")
+        )
+        video_url = (
+            creative.get("video_url")
+            or creative.get("videoUrl")
+            or creative.get("asset_video_url")
+            or creative.get("source_video_url")
+        )
+        creative_name = creative.get("name") or creative.get("ad_name") or "该广告"
+        problems = (
+            rule_analysis.get("problems")
+            if isinstance(rule_analysis.get("problems"), list)
+            else []
+        )
+        problem_titles = [
+            item.get("title")
+            for item in problems
+            if isinstance(item, dict) and isinstance(item.get("title"), str)
+        ]
+        root_causes = problem_titles[:4] or ["当前数据没有触发明显异常，建议继续观察核心指标。"]
+        impressions = metrics.get("impressions")
+        spend = metrics.get("spend")
+        ctr = metrics.get("ctr")
+        landing_rate = metrics.get("landing_page_view_rate")
+
+        return {
+            "summary": (
+                f"{creative_name} 的 AI 分析已基于投放指标生成。"
+                f"当前曝光 {impressions or '-'}，花费 {spend or '-'}，CTR {ctr or '-'}，"
+                f"落地页到达率 {landing_rate or '-'}。"
+            ),
+            "root_causes": root_causes,
+            "recommended_actions": [
+                "先确认样本量、投放状态、目标事件和落地页链路，再判断素材本身是否需要重做。",
+                "把标题、文案、图片或视频拆成 2-3 个差异明显的方向做小预算测试。",
+                "让外部系统继续回传 purchase、add_to_cart、lead 等转化数据，以便判断真实业务效果。",
+            ],
+            "next_tests": [
+                "保留当前广告组设置，仅替换首屏素材或前三秒钩子做 A/B 测试。",
+                "保留素材不变，单独测试更贴近业务目标的优化事件。",
+            ],
+            "creative_feedback": [
+                "如果 CTR 偏低，优先检查首屏视觉、标题利益点和前三秒表达。",
+                "如果 CTR 不低但后续转化差，暂时不要急着否定素材。",
+            ],
+            "audience_feedback": [
+                "当前人群需要结合国家、年龄、兴趣和版位继续拆分观察。",
+            ],
+            "landing_page_feedback": [
+                "点击表现好但落地页浏览低时，优先检查页面速度、跳转链路和像素事件。",
+            ],
+            "budget_delivery_feedback": [
+                "低曝光或零花费时，只能先判断投放是否开始跑量，不能判断素材好坏。",
+            ],
+            "risk_notes": [
+                "样本过小时，大模型结论只能作为排查方向，不能作为最终优化依据。",
+            ],
+            "visual_analysis": (
+                {
+                    "summary": "Mock 已识别到图片素材 URL，真实 provider 会直接读取图片画面。",
+                    "observed_elements": ["图片广告素材", "落地页链接", "广告正文"],
+                    "strengths": ["素材 URL 已传入，可进行画面层面的判断。"],
+                    "weaknesses": ["Mock 环境不会真正识图，只验证数据链路。"],
+                    "recommendations": [
+                        "真实环境使用支持视觉输入的模型后再判断构图、产品露出和首屏吸引力。"
+                    ],
+                    "risk_notes": ["如果 image_url 无法公网访问，真实模型也无法看到图片。"],
+                    "source_image_url": str(image_url),
+                    "source_video_url": None,
+                    "confidence_note": "Mock visual analysis",
+                }
+                if image_url
+                else {
+                    "summary": "Mock 已识别到视频素材 URL，真实 provider 会直接读取视频内容。",
+                    "observed_elements": ["视频广告素材", "广告正文"],
+                    "strengths": ["视频 URL 已传入，可进行视频画面层面的判断。"],
+                    "weaknesses": ["Mock 环境不会真正看视频，只验证数据链路。"],
+                    "recommendations": [
+                        "真实环境使用支持视频输入的模型后再判断前三秒钩子、节奏和素材匹配度。"
+                    ],
+                    "risk_notes": ["如果 video_url 无法公网访问，真实模型也无法看到视频。"],
+                    "source_image_url": None,
+                    "source_video_url": str(video_url),
+                    "confidence_note": "Mock video analysis",
+                }
+                if video_url
+                else None
+            ),
+            "optimization_work_order": _mock_ad_performance_optimization_work_order(
+                creative_name=creative_name,
+                creative=creative,
+                metrics=metrics,
+            ),
+            "confidence_note": "Mock 分析用于本地开发；真实环境会调用配置的大模型 provider。",
+        }
+
+    async def stream_ad_performance_analysis(
+        self, context: dict
+    ) -> AsyncIterator[dict[str, Any]]:
+        analysis = await self.analyze_ad_performance(context)
+        text = json.dumps(analysis, ensure_ascii=False)
+        for chunk in _chunk_text(text, size=36):
+            yield {"type": "delta", "text": chunk}
+        yield {"type": "done", "analysis": analysis, "text": text}
 
     async def generate_topics(
         self,
@@ -520,6 +636,168 @@ class MockLLMProvider:
             yield chunk
 
 
+def _mock_ad_performance_optimization_work_order(
+    creative_name: str,
+    creative: dict[str, Any],
+    metrics: dict[str, Any],
+) -> dict[str, Any]:
+    headline = creative.get("headline") or creative.get("title")
+    primary_text = (
+        creative.get("message")
+        or creative.get("primary_text")
+        or creative.get("body")
+        or creative.get("text")
+    )
+    landing_url = creative.get("link") or creative.get("landing_url")
+    image_url = (
+        creative.get("image_url")
+        or creative.get("imageUrl")
+        or creative.get("asset_image_url")
+        or creative.get("thumbnail_url")
+    )
+    return {
+        "schema_version": "ad_performance_optimization_work_order_v1",
+        "operator_summary": f"Mock AI work order for {creative_name}",
+        "priority": "high",
+        "overall_action": "check_landing_page_first",
+        "next_step": "Check the landing page path first, then generate a clearer creative draft.",
+        "modules_to_change": [
+            "campaign objective",
+            "optimization event",
+            "headline",
+            "landing page",
+        ],
+        "modules_to_keep": ["adset name"],
+        "modules_to_watch": ["daily budget"],
+        "campaign": [
+            _mock_optimization_field(
+                field="objective",
+                label="campaign objective",
+                current_value=metrics.get("campaign_objective"),
+                action="rewrite",
+                priority="high",
+                reason=(
+                    "Mock AI suggests aligning the campaign objective with the "
+                    "business conversion goal."
+                ),
+                suggested_value="PURCHASE / LEAD / OFFSITE_CONVERSIONS",
+            )
+        ],
+        "adset": [
+            _mock_optimization_field(
+                field="optimization_event",
+                label="optimization event",
+                current_value=None,
+                action="missing",
+                priority="high",
+                reason="Mock AI did not receive a concrete purchase, add_to_cart, or lead event.",
+                suggested_value="PURCHASE",
+                missing=True,
+            ),
+            _mock_optimization_field(
+                field="daily_budget",
+                label="daily budget",
+                current_value=creative.get("daily_budget"),
+                action="watch",
+                priority="medium",
+                reason=(
+                    "Keep budget stable until the landing page check and creative "
+                    "draft are reviewed."
+                ),
+            ),
+        ],
+        "creative": [
+            _mock_optimization_field(
+                field="landing_page_url",
+                label="landing page URL",
+                current_value=landing_url,
+                action="check",
+                priority="high",
+                reason=(
+                    "Clicks are useful only if the landing page loads and events fire "
+                    "correctly."
+                ),
+                suggested_value=landing_url,
+            ),
+            _mock_optimization_field(
+                field="headline",
+                label="headline",
+                current_value=headline,
+                action="regenerate",
+                priority="high",
+                reason="Mock AI recommends testing a stronger benefit or challenge-led headline.",
+                suggested_direction="Lead with the result, challenge, or clear benefit.",
+                generation_prompt=(
+                    "Generate 5 Meta ad headlines with a clear result, challenge, "
+                    "or benefit."
+                ),
+                can_apply_to_generation=True,
+                missing=headline is None,
+            ),
+            _mock_optimization_field(
+                field="primary_text",
+                label="primary text",
+                current_value=primary_text,
+                action="rewrite",
+                priority="medium",
+                reason="Mock AI recommends making the first sentence more direct and testable.",
+                suggested_direction="State the user outcome first, then add one reason to click.",
+                generation_prompt=(
+                    "Rewrite the Meta ad primary text with a stronger first sentence "
+                    "and action reason."
+                ),
+                can_apply_to_generation=True,
+                missing=primary_text is None,
+            ),
+            _mock_optimization_field(
+                field="image_material",
+                label="image material",
+                current_value=image_url,
+                action="keep" if image_url else "missing",
+                priority="medium",
+                reason=(
+                    "Mock AI keeps the image if the URL is present; real providers "
+                    "inspect the image directly."
+                ),
+                missing=image_url is None,
+            ),
+        ],
+        "warnings": [
+            "Mock work orders are deterministic and only validate the data path.",
+            "Use a real LLM provider for production-grade creative judgment.",
+        ],
+    }
+
+
+def _mock_optimization_field(
+    field: str,
+    label: str,
+    current_value: Any,
+    action: str,
+    priority: str,
+    reason: str,
+    suggested_value: Any | None = None,
+    suggested_direction: str | None = None,
+    generation_prompt: str | None = None,
+    can_apply_to_generation: bool = False,
+    missing: bool = False,
+) -> dict[str, Any]:
+    return {
+        "field": field,
+        "label": label,
+        "current_value": current_value,
+        "action": action,
+        "priority": priority,
+        "suggested_value": suggested_value,
+        "suggested_direction": suggested_direction,
+        "generation_prompt": generation_prompt,
+        "reason": reason,
+        "source": "ai",
+        "can_apply_to_generation": can_apply_to_generation,
+        "missing": missing,
+    }
+
+
 def _append_context(
     angle: str,
     country: str | None,
@@ -602,7 +880,9 @@ def _storyboard_script_text(storyboard: VideoStoryboardCandidate) -> str:
         "",
     ]
     for scene in storyboard.scenes:
-        time_range = f"{scene.start_second if scene.start_second is not None else '-'}-{scene.end_second if scene.end_second is not None else '-'}s"
+        start_second = scene.start_second if scene.start_second is not None else "-"
+        end_second = scene.end_second if scene.end_second is not None else "-"
+        time_range = f"{start_second}-{end_second}s"
         source_ids = ", ".join(scene.source_asset_ids) if scene.source_asset_ids else "无"
         lines.extend(
             [

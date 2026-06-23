@@ -24,5 +24,7 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
             api_key=settings.volcengine_api_key,
             model=settings.volcengine_model,
             base_url=settings.volcengine_base_url,
+            supports_video_input=True,
+            video_input_fps=settings.ad_performance_video_input_fps,
         )
     raise ProviderError(f"Unsupported LLM provider: {settings.llm_provider}")

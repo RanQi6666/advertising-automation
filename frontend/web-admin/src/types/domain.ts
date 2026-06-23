@@ -112,6 +112,18 @@ export interface AdGenerationJobAccepted {
 export type AdPerformanceConfidence = "low" | "medium" | "high" | string;
 export type AdPerformanceSeverity = "info" | "warning" | "critical" | string;
 export type AdPerformancePriority = "low" | "medium" | "high" | string;
+export type AdPerformanceOptimizationAction =
+  | "keep"
+  | "regenerate"
+  | "rewrite"
+  | "check"
+  | "watch"
+  | "reduce"
+  | "increase"
+  | "pause"
+  | "create_draft"
+  | "missing"
+  | string;
 
 export interface AdPerformanceProblem {
   code: string;
@@ -130,12 +142,85 @@ export interface AdPerformanceRecommendation {
   detail: string;
 }
 
+export interface AdPerformanceVisualAnalysis {
+  summary: string | null;
+  observed_elements: string[];
+  strengths: string[];
+  weaknesses: string[];
+  recommendations: string[];
+  risk_notes: string[];
+  source_image_url: string | null;
+  source_video_url: string | null;
+  confidence_note: string | null;
+}
+
+export interface AdPerformanceAIAnalysis {
+  summary: string;
+  root_causes: string[];
+  recommended_actions: string[];
+  next_tests: string[];
+  creative_feedback: string[];
+  audience_feedback: string[];
+  landing_page_feedback: string[];
+  budget_delivery_feedback: string[];
+  risk_notes: string[];
+  visual_analysis: AdPerformanceVisualAnalysis | null;
+  optimization_work_order: AdPerformanceOptimizationWorkOrder | null;
+  confidence_note: string | null;
+}
+
+export interface AdPerformanceDataCompleteness {
+  level: "unknown" | "low" | "medium" | "high" | string;
+  score: number;
+  available: string[];
+  missing: string[];
+  can_analyze: string[];
+  cannot_analyze: string[];
+  notes: string[];
+}
+
+export interface AdPerformanceOptimizationFieldAdvice {
+  field: string;
+  label: string;
+  current_value: unknown;
+  action: AdPerformanceOptimizationAction;
+  priority: AdPerformancePriority;
+  suggested_value: unknown;
+  suggested_direction: string | null;
+  generation_prompt: string | null;
+  reason: string;
+  source: "rules" | "ai" | "rules_and_ai" | string;
+  can_apply_to_generation: boolean;
+  missing: boolean;
+}
+
+export interface AdPerformanceOptimizationWorkOrder {
+  schema_version: string;
+  operator_summary: string;
+  priority: AdPerformancePriority;
+  overall_action: string;
+  next_step: string | null;
+  modules_to_change: string[];
+  modules_to_keep: string[];
+  modules_to_watch: string[];
+  campaign: AdPerformanceOptimizationFieldAdvice[];
+  adset: AdPerformanceOptimizationFieldAdvice[];
+  creative: AdPerformanceOptimizationFieldAdvice[];
+  warnings: string[];
+}
+
 export interface AdPerformanceAnalysisResult {
   summary: string;
   confidence: AdPerformanceConfidence;
+  analysis_mode: "llm_only" | "llm_failed" | "rules_only" | "rules_and_llm" | "rules_with_llm_fallback" | string;
+  data_completeness: AdPerformanceDataCompleteness;
+  optimization_work_order: AdPerformanceOptimizationWorkOrder;
   problems: AdPerformanceProblem[];
   recommendations: AdPerformanceRecommendation[];
   next_checks: string[];
+  ai_analysis: AdPerformanceAIAnalysis | null;
+  rule_summary: string | null;
+  llm_error: string | null;
 }
 
 export interface AdPerformanceAnalysis extends Timestamped {

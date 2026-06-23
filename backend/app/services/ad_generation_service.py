@@ -298,7 +298,9 @@ class AdGenerationService:
     def result_url_for_job(self, job_id: str) -> str:
         base_url = self.settings.public_base_url.rstrip("/")
         prefix = self.settings.api_v1_prefix.rstrip("/")
-        result_url = f"{base_url}{prefix}/integrations/publishing/ad-generation/jobs/{job_id}/result"
+        result_url = (
+            f"{base_url}{prefix}/integrations/publishing/ad-generation/jobs/{job_id}/result"
+        )
         return _with_access_token(result_url, self.settings.ai_ads_access_token)
 
     async def run_job(self, job_id: str) -> None:

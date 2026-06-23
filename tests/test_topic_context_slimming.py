@@ -138,7 +138,9 @@ async def test_topic_service_fetches_landing_snapshot_before_generation() -> Non
 
 
 @pytest.mark.asyncio
-async def test_openai_topic_generation_sends_compact_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_openai_topic_generation_sends_compact_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = OpenAILLMProvider(api_key="test-key", model="test-model")
     captured: dict[str, object] = {}
 

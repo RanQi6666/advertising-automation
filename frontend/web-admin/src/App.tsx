@@ -16,10 +16,19 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, api, apiErrorMessage, getAccessToken, isTransientApiError } from "./lib/api";
-import type { CreativeStreamEvent, TopicStreamEvent, VideoStoryboardTextStreamEvent } from "./lib/api";
+import type {
+  AdPerformanceAnalysisStreamEvent,
+  CreativeStreamEvent,
+  TopicStreamEvent,
+  VideoStoryboardTextStreamEvent,
+} from "./lib/api";
 import type {
   AdGenerationJob,
   AdPerformanceAnalysis,
+  AdPerformanceDataCompleteness,
+  AdPerformanceOptimizationFieldAdvice,
+  AdPerformanceOptimizationWorkOrder,
+  AdPerformanceVisualAnalysis,
   Campaign,
   CopyDraft,
   CreativeAsset,
@@ -40,7 +49,16 @@ type ViewKey =
   | "creatives"
   | "videos"
   | "performance";
-type ErrorScope = "global" | "refresh" | "work-order" | "topic" | "copy" | "image" | "video" | "final";
+type ErrorScope =
+  | "global"
+  | "refresh"
+  | "work-order"
+  | "topic"
+  | "copy"
+  | "image"
+  | "video"
+  | "performance"
+  | "final";
 type ReviewEntityType = "topic" | "copy_draft" | "creative_asset" | "video_asset";
 type ReviewDecision = "approved" | "rejected" | "needs_revision";
 type ScopedAppError = {
@@ -134,7 +152,7 @@ const navItems: Array<{ key: ViewKey; label: string; icon: typeof BarChart3 }> =
 ];
 
 const viewSubtitles: Record<ViewKey, string> = {
-  performance: "查看外部系统回传的广告效果分析、问题原因和调整建议",
+  performance: "查看外部系统回传的广告效果分析和 AI 优化建议",
   dashboard: "查看 AI 工单、生产阶段和回传状态",
   "work-orders": "接收投放系统跳转，创建 AI 工单并确认投放参数",
   workflow: "按参数确认、选题、文案、图片、视频和最终预审推进任务",
@@ -636,6 +654,30 @@ function App() {
     setSelectedPerformanceAnalysisId((current) =>
       current && analyses.some((item) => item.id === current) ? current : analyses[0]?.id ?? null,
     );
+  }
+
+  async function handleDeletePerformanceAnalysis(analysisId: string) {
+    const analysis = performanceAnalyses.find((item) => item.id === analysisId);
+    const title = analysis ? performanceAnalysisTitle(analysis) : shortId(analysisId);
+    const confirmed = window.confirm(
+      `确认删除投放分析记录「${title}」吗？删除后该条效果数据和分析结果会从本系统移除。`,
+    );
+    if (!confirmed) return;
+
+    const deleted = await run(
+      `delete-performance-${analysisId}`,
+      () => api.deleteAdPerformanceAnalysis(analysisId),
+      "投放分析记录已删除",
+    );
+    if (deleted === null) return;
+
+    setPerformanceAnalyses((current) => {
+      const nextAnalyses = current.filter((item) => item.id !== analysisId);
+      if (selectedPerformanceAnalysisId === analysisId) {
+        setSelectedPerformanceAnalysisId(nextAnalyses[0]?.id ?? null);
+      }
+      return nextAnalyses;
+    });
   }
 
   async function refreshCampaignData(campaignId: string, options: { silent?: boolean } = {}) {
@@ -1790,6 +1832,7 @@ function App() {
             analyses={performanceAnalyses}
             selectedAnalysis={selectedPerformanceAnalysis}
             setSelectedAnalysisId={setSelectedPerformanceAnalysisId}
+            onDeleteAnalysis={(analysisId) => void handleDeletePerformanceAnalysis(analysisId)}
             onRefresh={() => void refreshPerformanceAnalyses()}
             loading={loading}
           />
@@ -4015,12 +4058,20 @@ function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status}`}>{statusLabel(status)}</span>;
 }
 
-function KeyValueTable({ data }: { data: Record<string, unknown> }) {
+function KeyValueTable({
+  data,
+  className = "",
+  labelForKey,
+}: {
+  data: Record<string, unknown>;
+  className?: string;
+  labelForKey?: (key: string) => string;
+}) {
   return (
-    <div className="kv-table">
+    <div className={`kv-table ${className}`.trim()}>
       {Object.entries(data).map(([key, value]) => (
         <div className="kv-row" key={key}>
-          <span>{key}</span>
+          <span title={key}>{labelForKey ? labelForKey(key) : key}</span>
           <strong>{value == null || value === "" ? "-" : stringifyValue(value)}</strong>
         </div>
       ))}
@@ -4036,19 +4087,66 @@ function PerformanceAnalysisView({
   analyses,
   selectedAnalysis,
   setSelectedAnalysisId,
+  onDeleteAnalysis,
   onRefresh,
   loading,
 }: {
   analyses: AdPerformanceAnalysis[];
   selectedAnalysis: AdPerformanceAnalysis | null;
   setSelectedAnalysisId: (id: string) => void;
+  onDeleteAnalysis: (analysisId: string) => void;
   onRefresh: () => void;
   loading: string | null;
 }) {
   const result = selectedAnalysis?.analysis_result;
-  const problems = result?.problems ?? [];
-  const recommendations = result?.recommendations ?? [];
-  const nextChecks = result?.next_checks ?? [];
+  const aiAnalysis = result?.ai_analysis ?? null;
+  const visualAnalysis = aiAnalysis?.visual_analysis ?? null;
+  const dataCompleteness = result?.data_completeness ?? null;
+  const optimizationWorkOrder = result?.optimization_work_order ?? null;
+  const [streamingAnalysisId, setStreamingAnalysisId] = useState<string | null>(null);
+  const [performanceStreamAnalysisId, setPerformanceStreamAnalysisId] = useState<string | null>(null);
+  const [performanceStreamText, setPerformanceStreamText] = useState("");
+  const [performanceStreamError, setPerformanceStreamError] = useState<string | null>(null);
+  const isStreamingSelected = Boolean(
+    selectedAnalysis && streamingAnalysisId === selectedAnalysis.id,
+  );
+  const hasStreamForSelected = Boolean(
+    selectedAnalysis && performanceStreamAnalysisId === selectedAnalysis.id,
+  );
+
+  async function handleStreamAiAnalysis() {
+    if (!selectedAnalysis || isStreamingSelected) return;
+    const analysisId = selectedAnalysis.id;
+    setStreamingAnalysisId(analysisId);
+    setPerformanceStreamAnalysisId(analysisId);
+    setPerformanceStreamText("");
+    setPerformanceStreamError(null);
+    try {
+      await api.streamAdPerformanceAnalysis(
+        analysisId,
+        (event: AdPerformanceAnalysisStreamEvent) => {
+          if (event.type === "start") {
+            setPerformanceStreamText("");
+            return;
+          }
+          if (event.type === "delta") {
+            setPerformanceStreamText((current) => current + event.text);
+            return;
+          }
+          if (event.type === "error") {
+            throw new Error(event.message);
+          }
+          if (event.type === "done") {
+            onRefresh();
+          }
+        },
+      );
+    } catch (caught) {
+      setPerformanceStreamError(apiErrorMessage(caught, "流式 AI 分析失败"));
+    } finally {
+      setStreamingAnalysisId(null);
+    }
+  }
 
   return (
     <section className="performance-layout two-column">
@@ -4065,15 +4163,42 @@ function PerformanceAnalysisView({
         </div>
         <DataList emptyText="还没有收到广告效果数据">
           {analyses.map((analysis) => (
-            <button
-              className={`list-button ${selectedAnalysis?.id === analysis.id ? "active" : ""}`}
+            <div
+              className={`list-button performance-list-item ${selectedAnalysis?.id === analysis.id ? "active" : ""}`}
               key={analysis.id}
               onClick={() => setSelectedAnalysisId(analysis.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setSelectedAnalysisId(analysis.id);
+                }
+              }}
+              role="button"
+              tabIndex={0}
             >
-              <strong>{performanceAnalysisTitle(analysis)}</strong>
-              <span>{performanceAnalysisMeta(analysis)}</span>
-              <span>{formatDate(analysis.created_at)}</span>
-            </button>
+              <div className="performance-list-item-main">
+                <strong>{performanceAnalysisTitle(analysis)}</strong>
+                <span>{performanceAnalysisMeta(analysis)}</span>
+                <span>{formatDate(analysis.created_at)}</span>
+              </div>
+              <button
+                aria-label="删除投放分析记录"
+                className="icon-button danger performance-delete-button"
+                disabled={loading === `delete-performance-${analysis.id}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDeleteAnalysis(analysis.id);
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+                title="删除投放分析记录"
+              >
+                {loading === `delete-performance-${analysis.id}` ? (
+                  <Loader2 size={16} className="spin" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+              </button>
+            </div>
           ))}
         </DataList>
       </section>
@@ -4087,108 +4212,107 @@ function PerformanceAnalysisView({
               {selectedAnalysis ? performanceAnalysisMeta(selectedAnalysis) : "选择一条分析查看原因和建议"}
             </span>
           </div>
-          {result && (
-            <span className={`status ${confidenceStatusClass(result.confidence)}`}>
-              {confidenceLabel(result.confidence)}
-            </span>
-          )}
+          <div className="performance-detail-actions">
+            {selectedAnalysis && (
+              <button
+                className="secondary-button"
+                disabled={isStreamingSelected}
+                onClick={() => void handleStreamAiAnalysis()}
+                title="流式重新生成 AI 深度分析"
+              >
+                {isStreamingSelected ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                {isStreamingSelected ? "分析中" : "流式分析"}
+              </button>
+            )}
+            {result && (
+              <span className={`status ${confidenceStatusClass(result.confidence)}`}>
+                {confidenceLabel(result.confidence)}
+              </span>
+            )}
+          </div>
         </div>
 
         {selectedAnalysis && result ? (
           <div className="performance-detail-body">
-            <section className="performance-summary-card">
-              <p>{result.summary}</p>
-            </section>
+            {optimizationWorkOrder && <OptimizationWorkOrderCard data={optimizationWorkOrder} />}
 
-            <div className="performance-metric-grid">
-              {performanceMetricCards(selectedAnalysis).map((metric) => (
-                <article className="performance-metric" key={metric.label}>
-                  <span>{metric.label}</span>
-                  <strong>{metric.value}</strong>
-                  <em>{metric.hint}</em>
-                </article>
-              ))}
-            </div>
-
-            <section className="performance-section">
-              <div className="performance-section-head">
-                <h3>问题判断</h3>
-                <span>{problems.length} 项</span>
-              </div>
-              <div className="performance-card-list">
-                {problems.map((problem) => (
-                  <article className={`performance-insight-item ${problem.severity}`} key={problem.code}>
-                    <div className="item-head">
-                      <div>
-                        <h3>{problem.title}</h3>
-                        <span>{areaLabel(problem.area)} / {severityLabel(problem.severity)}</span>
-                      </div>
-                      <span className={`status ${severityStatusClass(problem.severity)}`}>
-                        {severityLabel(problem.severity)}
-                      </span>
-                    </div>
-                    <p>{problem.diagnosis}</p>
-                    {problem.evidence.length > 0 && (
-                      <div className="tag-row">
-                        {problem.evidence.map((item) => (
-                          <span className="tag" key={item}>{item}</span>
-                        ))}
-                      </div>
+            <div className="performance-support-stack">
+              {(isStreamingSelected ||
+                (hasStreamForSelected && (performanceStreamText || performanceStreamError))) && (
+                <details className="performance-disclosure performance-ai-stream-disclosure">
+                  <summary>
+                    <span>AI 流式输出</span>
+                    <em>{isStreamingSelected ? "正在生成" : performanceStreamError ? "生成失败" : "已完成"}</em>
+                  </summary>
+                  <div className="performance-disclosure-content">
+                    {performanceStreamError ? (
+                      <div className="performance-ai-fallback">{performanceStreamError}</div>
+                    ) : (
+                      <pre className="performance-stream-output">
+                        {performanceStreamText || "等待模型开始输出..."}
+                      </pre>
                     )}
-                  </article>
-                ))}
-              </div>
-            </section>
+                  </div>
+                </details>
+              )}
 
-            <section className="performance-section">
-              <div className="performance-section-head">
-                <h3>调整建议</h3>
-                <span>{recommendations.length} 项</span>
-              </div>
-              <div className="performance-card-list">
-                {recommendations.map((recommendation) => (
-                  <article className="performance-insight-item recommendation" key={recommendation.code}>
-                    <div className="item-head">
-                      <div>
-                        <h3>{recommendation.action}</h3>
-                        <span>{areaLabel(recommendation.area)} / {priorityLabel(recommendation.priority)}</span>
-                      </div>
-                      <span className={`status ${priorityStatusClass(recommendation.priority)}`}>
-                        {priorityLabel(recommendation.priority)}
-                      </span>
+              {dataCompleteness && (
+                <details className="performance-disclosure performance-completeness-disclosure">
+                  <summary>
+                    <span>数据完整度</span>
+                    <em>
+                      {completenessLabel(dataCompleteness.level)} · {dataCompleteness.score}/100
+                    </em>
+                  </summary>
+                  <div className="performance-disclosure-content">
+                    <DataCompletenessCard data={dataCompleteness} />
+                  </div>
+                </details>
+              )}
+
+              {aiAnalysis ? (
+                <details className="performance-disclosure performance-ai-disclosure">
+                  <summary>
+                    <span>AI 深度分析</span>
+                  </summary>
+                  <div className="performance-disclosure-content">
+                    {visualAnalysis && <AiVisualAnalysisCard data={visualAnalysis} />}
+                    <div className="performance-ai-grid">
+                      <AiInsightList title="核心原因" items={aiAnalysis.root_causes} />
+                      <AiInsightList title="调整动作" items={aiAnalysis.recommended_actions} />
+                      <AiInsightList title="测试方案" items={aiAnalysis.next_tests} />
+                      <AiInsightList title="素材判断" items={aiAnalysis.creative_feedback} />
+                      <AiInsightList title="人群判断" items={aiAnalysis.audience_feedback} />
+                      <AiInsightList title="落地页判断" items={aiAnalysis.landing_page_feedback} />
+                      <AiInsightList title="预算与投放" items={aiAnalysis.budget_delivery_feedback} />
+                      <AiInsightList title="风险提醒" items={aiAnalysis.risk_notes} />
                     </div>
-                    <p>{recommendation.detail}</p>
-                  </article>
-                ))}
-              </div>
-            </section>
+                  </div>
+                </details>
+              ) : result.llm_error ? (
+                <details className="performance-disclosure performance-ai-disclosure">
+                  <summary>
+                    <span>AI 深度分析</span>
+                    <em>生成失败</em>
+                  </summary>
+                  <div className="performance-disclosure-content">
+                    <div className="performance-ai-fallback">
+                      大模型分析暂时失败，请检查模型配置或稍后重试。错误：{result.llm_error}
+                    </div>
+                  </div>
+                </details>
+              ) : null}
 
-            {nextChecks.length > 0 && (
-              <section className="performance-section">
-                <div className="performance-section-head">
-                  <h3>下一步核对</h3>
-                  <span>{nextChecks.length} 项</span>
+              <details className="performance-disclosure performance-json-details">
+                <summary>
+                  <span>原始 JSON</span>
+                  <em>请求数据</em>
+                </summary>
+                <div className="performance-disclosure-content">
+                  <JsonBlock value={selectedAnalysis.request_payload} />
                 </div>
-                <div className="tag-row performance-checks">
-                  {nextChecks.map((item) => (
-                    <span className="tag" key={item}>{item}</span>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            <section className="performance-section">
-              <div className="performance-section-head">
-                <h3>核心指标</h3>
-                <span>{selectedAnalysis.date_start || "-"} 至 {selectedAnalysis.date_stop || "-"}</span>
-              </div>
-              <KeyValueTable data={selectedAnalysis.metrics} />
-            </section>
-
-            <details className="json-details performance-json-details">
-              <summary>原始 JSON</summary>
-              <JsonBlock value={selectedAnalysis.request_payload} />
-            </details>
+              </details>
+            </div>
           </div>
         ) : (
           <EmptyState text="选择一条分析记录查看详情" />
@@ -4196,6 +4320,312 @@ function PerformanceAnalysisView({
       </section>
     </section>
   );
+}
+
+function DataCompletenessCard({ data }: { data: AdPerformanceDataCompleteness }) {
+  return (
+    <section className={`performance-completeness-card ${data.level}`}>
+      <div className="completeness-overview">
+        <span>数据完整度</span>
+        <strong>{completenessLabel(data.level)}</strong>
+        <em>{data.score}/100</em>
+        {data.notes.length > 0 && <p>{data.notes[0]}</p>}
+      </div>
+      <div className="completeness-grid">
+        <CompletenessList title="已收到" items={data.available} tone="ok" />
+        <CompletenessList title="缺少" items={data.missing} tone="missing" />
+        <CompletenessList title="可以分析" items={data.can_analyze} tone="ok" />
+        <CompletenessList title="暂不能分析" items={data.cannot_analyze} tone="missing" />
+      </div>
+      {data.notes.length > 1 && (
+        <div className="completeness-notes">
+          {data.notes.slice(1).map((note) => (
+            <span key={note}>{note}</span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CompletenessList({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: string[];
+  tone: "ok" | "missing";
+}) {
+  return (
+    <article className={`completeness-list ${tone}`}>
+      <h4>{title}</h4>
+      {items.length ? (
+        <ul>
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>暂无</p>
+      )}
+    </article>
+  );
+}
+
+function OptimizationWorkOrderCard({ data }: { data: AdPerformanceOptimizationWorkOrder }) {
+  const sections: Array<{
+    key: keyof Pick<AdPerformanceOptimizationWorkOrder, "campaign" | "adset" | "creative">;
+    title: string;
+    note: string;
+  }> = [
+    { key: "campaign", title: "广告系列", note: "目标与草稿状态" },
+    { key: "adset", title: "广告组", note: "预算、人群与事件" },
+    { key: "creative", title: "广告创意", note: "标题、文案、素材与落地页" },
+  ];
+  const rows = sections.flatMap((section) =>
+    data[section.key].map((field) => ({
+      field,
+      sectionKey: section.key,
+      sectionTitle: section.title,
+    })),
+  );
+  const actionRows = rows.filter((row) => optimizationIsActionable(row.field));
+  const keptRows = rows.filter((row) => optimizationIsKept(row.field));
+  const [activeTab, setActiveTab] = useState<
+    "actions" | "campaign" | "adset" | "creative" | "kept"
+  >("actions");
+  const tabs = [
+    { key: "actions", label: "建议处理", count: actionRows.length },
+    { key: "campaign", label: "广告系列", count: data.campaign.length },
+    { key: "adset", label: "广告组", count: data.adset.length },
+    { key: "creative", label: "广告创意", count: data.creative.length },
+    { key: "kept", label: "已保留", count: keptRows.length },
+  ] as const;
+  const visibleRows =
+    activeTab === "actions"
+      ? actionRows
+      : activeTab === "kept"
+        ? keptRows
+        : rows.filter((row) => row.sectionKey === activeTab);
+
+  return (
+    <section className="performance-section optimization-work-order">
+      <div className="performance-section-head">
+        <h3>AI 优化工单</h3>
+        <span>{priorityLabel(data.priority)}</span>
+      </div>
+      <div className="optimization-work-order-body">
+        <div className="optimization-brief">
+          <div>
+            <span>{optimizationOverallActionLabel(data.overall_action)}</span>
+            <strong>{data.operator_summary || "AI 已生成字段级优化建议。"}</strong>
+            {data.next_step && <p>{data.next_step}</p>}
+          </div>
+          <div className="optimization-brief-stats">
+            <article>
+              <strong>{actionRows.length}</strong>
+              <span>需要处理</span>
+            </article>
+            <article>
+              <strong>{data.modules_to_keep.length}</strong>
+              <span>建议保留</span>
+            </article>
+            <article>
+              <strong>{data.modules_to_watch.length}</strong>
+              <span>继续观察</span>
+            </article>
+          </div>
+        </div>
+
+        <OptimizationModuleChips
+          change={data.modules_to_change}
+          keep={data.modules_to_keep}
+          watch={data.modules_to_watch}
+        />
+
+        <div className="optimization-tabs" role="tablist" aria-label="优化工单分类">
+          {tabs.map((tab) => (
+            <button
+              className={activeTab === tab.key ? "active" : ""}
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              onClick={() => setActiveTab(tab.key)}
+            >
+              <span>{tab.label}</span>
+              <em>{tab.count}</em>
+            </button>
+          ))}
+        </div>
+
+        <div className="optimization-action-list">
+          {visibleRows.length ? (
+            visibleRows.map((row) => (
+              <OptimizationFieldAdviceCard
+                field={row.field}
+                key={`${row.sectionKey}-${row.field.field}`}
+                sectionTitle={activeTab === "actions" || activeTab === "kept" ? row.sectionTitle : null}
+              />
+            ))
+          ) : (
+            <div className="optimization-empty-state">
+              当前分类没有需要展示的字段。
+            </div>
+          )}
+        </div>
+
+        {data.warnings.length > 0 && (
+          <div className="optimization-warnings">
+            {data.warnings.map((warning) => (
+              <span key={warning}>{warning}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function OptimizationModuleChips({
+  change,
+  keep,
+  watch,
+}: {
+  change: string[];
+  keep: string[];
+  watch: string[];
+}) {
+  const groups = [
+    { label: "建议处理", items: change, tone: "change" },
+    { label: "建议保留", items: keep, tone: "keep" },
+    { label: "继续观察", items: watch, tone: "watch" },
+  ];
+  return (
+    <div className="optimization-chip-groups">
+      {groups
+        .filter((group) => group.items.length > 0)
+        .map((group) => (
+          <div className={`optimization-chip-group ${group.tone}`} key={group.label}>
+            <span>{group.label}</span>
+            <div>
+              {group.items.slice(0, 6).map((item) => (
+                <em key={item}>{item}</em>
+              ))}
+            </div>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function OptimizationFieldAdviceCard({
+  field,
+  sectionTitle,
+}: {
+  field: AdPerformanceOptimizationFieldAdvice;
+  sectionTitle?: string | null;
+}) {
+  const suggestedValue = adviceValueText(field.suggested_value);
+  const suggestedText = suggestedValue || field.suggested_direction || "";
+  const currentText = adviceValueText(field.current_value);
+  return (
+    <article className={`optimization-field-row action-${optimizationActionClass(field.action)}`}>
+      <div className="optimization-field-name">
+        {sectionTitle && <span>{sectionTitle}</span>}
+        <strong>{field.label}</strong>
+      </div>
+      <div className="optimization-field-value">
+        <span>当前</span>
+        <strong title={currentText}>{adviceShortText(field.current_value) || "未收到"}</strong>
+      </div>
+      <div className="optimization-field-value">
+        <span>建议</span>
+        <strong title={suggestedText}>
+          {adviceShortText(field.suggested_value) ||
+            adviceShortText(field.suggested_direction) ||
+            "-"}
+        </strong>
+      </div>
+      <span className="optimization-action-pill">{optimizationActionLabel(field.action)}</span>
+      <details className="optimization-field-detail">
+        <summary>原因与生成方向</summary>
+        <p>{field.reason}</p>
+        {field.suggested_direction && (
+          <div>
+            <span>建议方向</span>
+            <p>{field.suggested_direction}</p>
+          </div>
+        )}
+        {field.generation_prompt && (
+          <div>
+            <span>生成提示词</span>
+            <p>{field.generation_prompt}</p>
+          </div>
+        )}
+        {field.can_apply_to_generation && <em>可用于重新生成</em>}
+      </details>
+    </article>
+  );
+}
+
+function completenessLabel(level: string): string {
+  const labels: Record<string, string> = {
+    high: "高",
+    medium: "中等",
+    low: "低",
+    unknown: "未知",
+  };
+  return labels[level] ?? level;
+}
+
+function AiVisualAnalysisCard({ data }: { data: AdPerformanceVisualAnalysis }) {
+  const sourceUrl = data.source_video_url || data.source_image_url;
+  return (
+    <article className="performance-visual-card">
+      <div className="performance-visual-head">
+        <div>
+          <h4>素材视觉分析</h4>
+          {data.summary && <p>{data.summary}</p>}
+        </div>
+        {sourceUrl && (
+          <a href={sourceUrl} target="_blank" rel="noreferrer">
+            查看素材
+          </a>
+        )}
+      </div>
+      <div className="performance-ai-grid">
+        <AiInsightList title="看到的元素" items={data.observed_elements} />
+        <AiInsightList title="画面优点" items={data.strengths} />
+        <AiInsightList title="画面问题" items={data.weaknesses} />
+        <AiInsightList title="优化建议" items={data.recommendations} />
+        <AiInsightList title="风险提醒" items={data.risk_notes} />
+      </div>
+      {data.confidence_note && <em>{data.confidence_note}</em>}
+    </article>
+  );
+}
+
+function AiInsightList({ title, items }: { title: string; items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <article className="performance-ai-block">
+      <h4>{title}</h4>
+      <ul>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </article>
+  );
+}
+
+function analysisModeLabel(mode: string | undefined): string {
+  if (mode === "llm_failed") return "大模型分析失败";
+  if (mode === "llm_only" || mode === "rules_and_llm") return "大模型分析";
+  if (mode === "rules_with_llm_fallback") return "历史分析";
+  return "大模型分析";
 }
 
 function performanceAnalysisTitle(analysis: AdPerformanceAnalysis): string {
@@ -4215,43 +4645,6 @@ function performanceAnalysisMeta(analysis: AdPerformanceAnalysis): string {
   ]
     .filter(Boolean)
     .join(" / ") || shortId(analysis.id);
-}
-
-function performanceMetricCards(analysis: AdPerformanceAnalysis): Array<{ label: string; value: string; hint: string }> {
-  const metrics = analysis.metrics ?? {};
-  return [
-    { label: "花费", value: metricNumber(metrics.spend), hint: "spend" },
-    { label: "曝光", value: metricNumber(metrics.impressions, 0), hint: "impressions" },
-    { label: "CTR", value: metricPercent(metrics.ctr, true), hint: "点击率" },
-    { label: "落地页到达", value: metricPercent(metrics.landing_page_view_rate, false), hint: "landing page view rate" },
-    { label: "频次", value: metricNumber(metrics.frequency), hint: "frequency" },
-    { label: "视频 50%", value: metricPercent(metrics.video_p50_rate, false), hint: "video retention" },
-  ];
-}
-
-function metricNumber(value: unknown, digits = 2): string {
-  const number = numericValue(value);
-  if (number == null) return readText(value) || "-";
-  return new Intl.NumberFormat("zh-CN", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: 0,
-  }).format(number);
-}
-
-function metricPercent(value: unknown, alreadyPercent: boolean): string {
-  const number = numericValue(value);
-  if (number == null) return "-";
-  const percent = alreadyPercent ? number : number * 100;
-  return `${percent.toFixed(percent >= 10 ? 1 : 2)}%`;
-}
-
-function numericValue(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const number = Number.parseFloat(value.replace(/,/g, ""));
-    return Number.isFinite(number) ? number : null;
-  }
-  return null;
 }
 
 function confidenceLabel(value: string): string {
@@ -4282,6 +4675,64 @@ function severityStatusClass(value: string): string {
   if (value === "critical") return "failed";
   if (value === "warning") return "needs_revision";
   return "generated";
+}
+
+function optimizationOverallActionLabel(value: string): string {
+  const labels: Record<string, string> = {
+    check_delivery_first: "先查投放",
+    check_landing_page_first: "先查落地页",
+    continue_testing: "继续测试",
+    create_optimized_draft: "生成优化草稿",
+    review: "复核建议",
+  };
+  return labels[value] ?? value;
+}
+
+function optimizationActionLabel(value: string): string {
+  const labels: Record<string, string> = {
+    keep: "保留",
+    regenerate: "重新生成",
+    rewrite: "重写",
+    check: "检查",
+    watch: "观察",
+    reduce: "降低/保持",
+    increase: "提高",
+    pause: "暂停",
+    create_draft: "草稿",
+    missing: "待补充",
+  };
+  return labels[value] ?? value;
+}
+
+function optimizationActionClass(value: string): string {
+  if (["regenerate", "rewrite"].includes(value)) return "change";
+  if (["check", "missing"].includes(value)) return "check";
+  if (["reduce", "increase", "pause"].includes(value)) return "control";
+  if (value === "watch") return "watch";
+  return "keep";
+}
+
+function optimizationIsActionable(field: AdPerformanceOptimizationFieldAdvice): boolean {
+  if (field.can_apply_to_generation || field.missing) return true;
+  if (["regenerate", "rewrite", "check", "reduce", "increase", "pause", "missing"].includes(field.action)) {
+    return true;
+  }
+  return field.priority === "high" && field.action !== "keep";
+}
+
+function optimizationIsKept(field: AdPerformanceOptimizationFieldAdvice): boolean {
+  return field.action === "keep" || field.action === "create_draft";
+}
+
+function adviceValueText(value: unknown): string {
+  if (value == null || value === "") return "";
+  return stringifyValue(value);
+}
+
+function adviceShortText(value: unknown, maxLength = 58): string {
+  const text = adviceValueText(value).replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
 }
 
 function priorityLabel(value: string): string {
@@ -5123,6 +5574,7 @@ function errorScopeForOperationKey(key: string): ErrorScope {
   if (key.includes("copy") || key.includes("draft")) return "copy";
   if (key.includes("creative") || key === "creatives") return "image";
   if (key.includes("video")) return "video";
+  if (key.includes("performance")) return "performance";
   if (key.includes("final") || key.includes("confirm-return")) return "final";
   if (key.includes("work-order") || key.includes("ad-generation") || key.startsWith("delete-job")) {
     return "work-order";
@@ -5143,7 +5595,7 @@ function shouldShowErrorBanner(error: ScopedAppError, activeView: ViewKey): bool
     copy: ["copy"],
     creatives: ["image"],
     videos: ["video"],
-    performance: ["global", "refresh"],
+    performance: ["global", "refresh", "performance"],
   };
   return activeScopes[activeView].includes(error.scope);
 }

@@ -17,6 +17,12 @@ class LLMProvider(Protocol):
     async def extract_delivery_fields(self, raw_content: str) -> dict:
         """Extract and suggest work-order fields that directly affect ad delivery."""
 
+    async def analyze_ad_performance(self, context: dict) -> dict:
+        """Analyze ad performance data and return operator-facing optimization advice."""
+
+    def stream_ad_performance_analysis(self, context: dict) -> AsyncIterator[dict]:
+        """Stream ad performance analysis text and yield the final normalized result."""
+
     async def generate_topics(
         self,
         campaign: Campaign,

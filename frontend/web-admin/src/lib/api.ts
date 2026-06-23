@@ -1,6 +1,7 @@
 import type {
   AdGenerationJob,
   AdGenerationJobAccepted,
+  AdPerformanceAIAnalysis,
   AdPerformanceAnalysis,
   Campaign,
   CopyDraft,
@@ -40,6 +41,11 @@ export type VideoStoryboardTextStreamEvent =
   | { type: "delta"; text: string }
   | { type: "error"; message: string }
   | { type: "done"; duration_seconds: number; aspect_ratio: string; text?: string };
+export type AdPerformanceAnalysisStreamEvent =
+  | { type: "start"; analysis_id: string }
+  | { type: "delta"; analysis_id: string; text: string }
+  | { type: "error"; analysis_id?: string; message: string }
+  | { type: "done"; analysis_id: string; ai_analysis: AdPerformanceAIAnalysis };
 
 class ApiError extends Error {
   status: number;
@@ -250,6 +256,19 @@ export const api = {
     request<AdPerformanceAnalysis[]>(`/integrations/ad-performance/analyses?limit=${limit}`),
   getAdPerformanceAnalysis: (analysisId: string) =>
     request<AdPerformanceAnalysis>(`/integrations/ad-performance/analyses/${analysisId}`),
+  deleteAdPerformanceAnalysis: (analysisId: string) =>
+    request<void>(`/integrations/ad-performance/analyses/${analysisId}`, {
+      method: "DELETE",
+    }),
+  streamAdPerformanceAnalysis: (
+    analysisId: string,
+    onEvent: (event: AdPerformanceAnalysisStreamEvent) => void,
+  ) =>
+    streamSse<AdPerformanceAnalysisStreamEvent>(
+      `/integrations/ad-performance/analyses/${analysisId}/ai-analysis/stream`,
+      {},
+      onEvent,
+    ),
   getAdGenerationJob: (jobId: string) =>
     request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}`),
   getAdGenerationResult: (jobId: string) =>

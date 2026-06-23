@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Query, status
+from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
 from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
@@ -51,6 +54,27 @@ async def get_ad_performance_analysis(analysis_id: str, session: DbSession):
     return _analysis_read(await service.get_analysis(session, analysis_id))
 
 
+@router.delete(
+    "/integrations/ad-performance/analyses/{analysis_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_ad_performance_analysis(analysis_id: str, session: DbSession):
+    await service.delete_analysis(session, analysis_id)
+
+
+@router.post("/integrations/ad-performance/analyses/{analysis_id}/ai-analysis/stream")
+async def stream_ad_performance_ai_analysis(analysis_id: str, session: DbSession):
+    async def event_stream():
+        async for event in service.stream_ai_analysis(session, analysis_id):
+            yield _sse_event(event.get("type", "message"), event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _analysis_read(analysis: AdPerformanceAnalysis) -> AdPerformanceAnalysisRead:
     return AdPerformanceAnalysisRead(
         id=analysis.id,
@@ -73,3 +97,7 @@ def _analysis_read(analysis: AdPerformanceAnalysis) -> AdPerformanceAnalysisRead
         analysis_result=analysis.analysis_result or {},
         error_message=analysis.error_message,
     )
+
+
+def _sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

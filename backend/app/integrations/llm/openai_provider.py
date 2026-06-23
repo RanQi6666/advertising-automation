@@ -4,6 +4,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 
 from backend.app.core.errors import ProviderError
 from backend.app.db.models.campaign import Campaign
@@ -15,6 +16,7 @@ from backend.app.integrations.llm.language import (
     build_target_language_context,
     language_requirements_prompt,
 )
+from backend.app.schemas.ad_performance import AdPerformanceOptimizationWorkOrder
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     ImageBrief,
@@ -25,11 +27,20 @@ from backend.app.schemas.ai import (
 
 
 class OpenAILLMProvider:
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        supports_video_input: bool = False,
+        video_input_fps: float = 1.0,
+    ) -> None:
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.supports_video_input = supports_video_input
+        self.video_input_fps = video_input_fps
 
-    async def _json_completion(self, system: str, user: str) -> dict[str, Any]:
+    async def _json_completion(self, system: str, user: Any) -> dict[str, Any]:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -63,6 +74,57 @@ class OpenAILLMProvider:
             ),
             user=json.dumps({"raw_content": raw_content}, ensure_ascii=False),
         )
+
+    async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
+        data = await self._json_completion(
+            system=_ad_performance_analysis_system_prompt(),
+            user=_ad_performance_user_content(
+                context,
+                supports_video_input=self.supports_video_input,
+                video_fps=self.video_input_fps,
+            ),
+        )
+        return _ad_performance_analysis_from_data(data)
+
+    async def stream_ad_performance_analysis(
+        self, context: dict
+    ) -> AsyncIterator[dict[str, Any]]:
+        stream = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _ad_performance_analysis_system_prompt()},
+                {
+                    "role": "user",
+                    "content": _ad_performance_user_content(
+                        context,
+                        supports_video_input=self.supports_video_input,
+                        video_fps=self.video_input_fps,
+                    ),
+                },
+            ],
+            response_format={"type": "json_object"},
+            stream=True,
+        )
+        full_text = ""
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+            full_text += delta
+            yield {"type": "delta", "text": delta}
+
+        content = _strip_json_markdown(full_text)
+        try:
+            data = json.loads(content or "{}")
+        except json.JSONDecodeError as exc:
+            raise ProviderError("LLM returned invalid JSON.") from exc
+        yield {
+            "type": "done",
+            "analysis": _ad_performance_analysis_from_data(data),
+            "text": content,
+        }
 
     async def generate_topics(
         self,
@@ -469,7 +531,9 @@ class OpenAILLMProvider:
                             "duration_seconds": duration_seconds,
                             "aspect_ratio": aspect_ratio,
                             "context": context,
-                            "current_storyboard": _compact_storyboard_for_revision(current_storyboard),
+                            "current_storyboard": _compact_storyboard_for_revision(
+                                current_storyboard
+                            ),
                             "current_storyboard_text": _truncate(current_storyboard_text, 6000),
                             "revision_feedback": feedback,
                             "target_language": target_language,
@@ -486,6 +550,202 @@ class OpenAILLMProvider:
             delta = chunk.choices[0].delta.content or ""
             if delta:
                 yield delta
+
+
+def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "summary": _coerce_text(data.get("summary"))[:1200],
+        "root_causes": _limited_text_list(data.get("root_causes"), 6, 360),
+        "recommended_actions": _limited_text_list(data.get("recommended_actions"), 8, 420),
+        "next_tests": _limited_text_list(data.get("next_tests"), 6, 420),
+        "creative_feedback": _limited_text_list(data.get("creative_feedback"), 5, 360),
+        "audience_feedback": _limited_text_list(data.get("audience_feedback"), 5, 360),
+        "landing_page_feedback": _limited_text_list(data.get("landing_page_feedback"), 5, 360),
+        "budget_delivery_feedback": _limited_text_list(
+            data.get("budget_delivery_feedback"), 5, 360
+        ),
+        "risk_notes": _limited_text_list(data.get("risk_notes"), 5, 360),
+        "visual_analysis": _ad_performance_visual_analysis_from_data(
+            data.get("visual_analysis")
+        ),
+        "optimization_work_order": _ad_performance_optimization_work_order_from_data(
+            data.get("optimization_work_order")
+        ),
+        "confidence_note": _truncate(_coerce_optional_text(data.get("confidence_note")), 500),
+    }
+    if not normalized["summary"]:
+        normalized["summary"] = "大模型已完成分析，但没有返回明确摘要，请优先查看下方原因和建议。"
+    return normalized
+
+
+def _ad_performance_analysis_system_prompt() -> str:
+    return (
+        "You are a senior performance marketing analyst for Meta/Facebook ads. "
+        "Return valid JSON only. Analyze the ad independently first; comparisons "
+        "with sibling ads are supplemental and must not replace the independent "
+        "diagnosis. Do not overjudge creative quality when spend, impressions, or "
+        "click volume is too small. Be practical for an operator: explain what is "
+        "probably wrong, why, and what exact action to test next. Use Simplified "
+        "Chinese. Respect data_completeness: if image/video URLs or keyframes are "
+        "missing, say the visual diagnosis is limited instead of pretending you "
+        "saw the asset. The root object must contain: summary, root_causes, "
+        "recommended_actions, next_tests, creative_feedback, audience_feedback, "
+        "landing_page_feedback, budget_delivery_feedback, risk_notes, "
+        "optimization_work_order, and confidence_note. optimization_work_order must be "
+        "the same diagnosis expressed as an operator work order, not a separate rule "
+        "result. Its shape is: schema_version, operator_summary, priority, "
+        "overall_action, next_step, modules_to_change, modules_to_keep, "
+        "modules_to_watch, campaign, adset, creative, warnings. campaign/adset/creative "
+        "are arrays of field advice objects with: field, label, current_value, action, "
+        "priority, suggested_value, suggested_direction, generation_prompt, reason, "
+        "source, can_apply_to_generation, missing. action must be one of keep, "
+        "regenerate, rewrite, check, watch, reduce, increase, pause, create_draft, "
+        "missing. priority must be low, medium, or high. source must be ai. For fields "
+        "that should feed generation, set can_apply_to_generation true and provide a "
+        "practical generation_prompt. If a required field is missing from input, set "
+        "action to missing and missing to true. If an image or video is attached, "
+        "inspect the actual visual content and include "
+        "visual_analysis with summary, observed_elements, strengths, weaknesses, "
+        "recommendations, risk_notes, source_image_url/source_video_url, and "
+        "confidence_note. If no visual media is attached, set visual_analysis to null. "
+        "Every list field must be an array of short strings."
+    )
+
+
+def _ad_performance_user_content(
+    context: dict[str, Any],
+    supports_video_input: bool = False,
+    video_fps: float = 1.0,
+) -> str | list[dict[str, Any]]:
+    text = json.dumps(context, ensure_ascii=False)
+    video_url = _ad_performance_video_url(context) if supports_video_input else None
+    if video_url:
+        return [
+            {
+                "type": "text",
+                "text": (
+                    text
+                    + "\n\nThe attached video is the actual ad creative from creative.video_url. "
+                    "Inspect the video directly for visual_analysis, especially the first "
+                    "seconds, hook, product/context match, pacing, and drop-off risks. Do not "
+                    "claim visual details that are not visible in the video."
+                ),
+            },
+            {"type": "video_url", "video_url": {"url": video_url, "fps": video_fps}},
+        ]
+    image_url = _ad_performance_image_url(context)
+    if not image_url:
+        return text
+    return [
+        {
+            "type": "text",
+            "text": (
+                text
+                + "\n\nThe attached image is the actual ad creative from creative.image_url. "
+                "Inspect the image directly for visual_analysis. Do not claim visual details "
+                "that are not visible in the image."
+            ),
+        },
+        {"type": "image_url", "image_url": {"url": image_url}},
+    ]
+
+
+def _ad_performance_video_url(context: dict[str, Any]) -> str | None:
+    creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+    creative_type = _coerce_optional_text(
+        creative.get("creative_type") or creative.get("asset_type")
+    )
+    has_video_type = bool(creative_type and "video" in creative_type.lower())
+    video_url = _first_text(
+        creative.get("video_url"),
+        creative.get("videoUrl"),
+        creative.get("asset_video_url"),
+        creative.get("assetVideoUrl"),
+        creative.get("source_video_url"),
+    )
+    if not video_url:
+        return None
+    return video_url if has_video_type or not creative_type else None
+
+
+def _ad_performance_image_url(context: dict[str, Any]) -> str | None:
+    creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+    creative_type = _coerce_optional_text(
+        creative.get("creative_type") or creative.get("asset_type")
+    )
+    if creative_type and "image" not in creative_type.lower():
+        return None
+    return _first_text(
+        creative.get("image_url"),
+        creative.get("imageUrl"),
+        creative.get("asset_image_url"),
+        creative.get("assetImageUrl"),
+        creative.get("thumbnail_url"),
+        creative.get("thumbnailUrl"),
+        creative.get("cover_url"),
+        creative.get("coverUrl"),
+        creative.get("preview_url"),
+        creative.get("previewUrl"),
+    )
+
+
+def _ad_performance_visual_analysis_from_data(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = {
+        "summary": _truncate(_coerce_optional_text(value.get("summary")), 700),
+        "observed_elements": _limited_text_list(value.get("observed_elements"), 6, 240),
+        "strengths": _limited_text_list(value.get("strengths"), 5, 260),
+        "weaknesses": _limited_text_list(value.get("weaknesses"), 5, 260),
+        "recommendations": _limited_text_list(value.get("recommendations"), 6, 320),
+        "risk_notes": _limited_text_list(value.get("risk_notes"), 4, 260),
+        "source_image_url": _truncate(_coerce_optional_text(value.get("source_image_url")), 1000),
+        "source_video_url": _truncate(_coerce_optional_text(value.get("source_video_url")), 1000),
+        "confidence_note": _truncate(_coerce_optional_text(value.get("confidence_note")), 360),
+    }
+    if not any(
+        normalized[key]
+        for key in (
+            "summary",
+            "observed_elements",
+            "strengths",
+            "weaknesses",
+            "recommendations",
+            "risk_notes",
+        )
+    ):
+        return None
+    return normalized
+
+
+def _ad_performance_optimization_work_order_from_data(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        work_order = AdPerformanceOptimizationWorkOrder.model_validate(value).model_dump(
+            mode="json"
+        )
+    except ValidationError:
+        return None
+    if not (
+        work_order.get("operator_summary")
+        or work_order.get("campaign")
+        or work_order.get("adset")
+        or work_order.get("creative")
+    ):
+        return None
+    return work_order
+
+
+def _limited_text_list(value: Any, limit: int, max_chars: int) -> list[str]:
+    return [
+        item
+        for item in (
+            _truncate(_coerce_optional_text(raw), max_chars)
+            for raw in _coerce_text_list(value)
+        )
+        if item
+    ][:limit]
 
 
 def _strip_json_markdown(content: str) -> str:
@@ -660,7 +920,9 @@ def _compact_topic_signals(signals: dict[str, Any]) -> dict[str, Any]:
 def _compact_topic_work_order(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    parsed_fields = value.get("parsed_fields") if isinstance(value.get("parsed_fields"), dict) else {}
+    parsed_fields = (
+        value.get("parsed_fields") if isinstance(value.get("parsed_fields"), dict) else {}
+    )
     landing_url = _first_text(value.get("landing_url"), parsed_fields.get("landing_url"))
     context = {
         "country": _first_text(value.get("country"), parsed_fields.get("country")),
