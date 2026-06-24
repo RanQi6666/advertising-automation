@@ -8,6 +8,7 @@ from backend.app.integrations.llm.compliance import (
     with_meta_ad_compliance,
 )
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
+from backend.app.services.brand_safety_policy import BRAND_SAFETY_PROMPT_GUARDRAILS
 
 
 def test_meta_ad_compliance_prompt_contains_core_guardrails() -> None:
@@ -17,6 +18,10 @@ def test_meta_ad_compliance_prompt_contains_core_guardrails() -> None:
     assert "unsupported" in META_AD_COMPLIANCE_SYSTEM_PROMPT
     assert "unlicensed third-party IP" in META_AD_COMPLIANCE_SYSTEM_PROMPT
     assert "landing page" in META_AD_COMPLIANCE_SYSTEM_PROMPT
+
+
+def test_meta_ad_compliance_prompt_includes_brand_safety_guardrails() -> None:
+    assert BRAND_SAFETY_PROMPT_GUARDRAILS in META_AD_COMPLIANCE_SYSTEM_PROMPT
 
 
 def test_with_meta_ad_compliance_appends_guardrails_to_task_prompt() -> None:

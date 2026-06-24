@@ -14,6 +14,7 @@ from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     _redact_provider_request_payload,
     _resolve_video_source_image_url,
+    _storyboard_to_prompt,
     _stream_text_with_heartbeat,
 )
 
@@ -149,6 +150,27 @@ def test_video_generate_request_accepts_storyboard() -> None:
 
     assert payload.storyboard[0]["scene_index"] == 1
     assert payload.storyboard[0]["visual"] == "Open with the app benefit."
+
+
+def test_video_storyboard_prompt_includes_brand_safety_visual_bans() -> None:
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 4,
+                "visual": "Open with a clean product scene.",
+                "subtitle": "Start now",
+            }
+        ]
+    )
+
+    assert "cash" in prompt
+    assert "bank cards" in prompt
+    assert "discount stickers" in prompt
+    assert "coupons" in prompt
+    assert "casinos" in prompt
+    assert "pills" in prompt
 
 
 @pytest.mark.asyncio

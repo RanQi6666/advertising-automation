@@ -34,6 +34,12 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert "点赞/评论/分享按钮" in prompt
     assert "二维码" in prompt
     assert "水印" in prompt
+    assert "cash" in prompt
+    assert "bank cards" in prompt
+    assert "discount stickers" in prompt
+    assert "coupons" in prompt
+    assert "casinos" in prompt
+    assert "pills" in prompt
 
 
 @pytest.mark.asyncio

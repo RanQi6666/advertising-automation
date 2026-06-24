@@ -20,6 +20,7 @@ from backend.app.schemas.video import (
     VideoStoryboardRead,
     VideoStoryboardRewriteRequest,
 )
+from backend.app.services.brand_safety_policy import BRAND_SAFETY_VISUAL_BAN
 from backend.app.services.creative_asset_urls import (
     repair_creative_asset_urls,
     resolve_creative_image_url,
@@ -512,7 +513,10 @@ class VideoService:
 
 
 def _storyboard_to_prompt(storyboard: list[dict]) -> str:
-    lines = ["Create a short ad video using this approved storyboard:"]
+    lines = [
+        "Create a short ad video using this approved storyboard:",
+        BRAND_SAFETY_VISUAL_BAN,
+    ]
     for scene in storyboard:
         lines.append(
             " | ".join(

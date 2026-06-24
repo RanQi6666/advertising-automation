@@ -1511,6 +1511,79 @@ input:focus-visible {
   min-height: 300px;
 }
 
+.brand-safety-card {
+  border: 1px solid #dbe7ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.brand-safety-card.blocked {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.brand-safety-card.passed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.brand-safety-card.pending {
+  border-color: #dbe7ef;
+  background: #f8fafc;
+}
+
+.brand-safety-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.brand-safety-card-head strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.brand-safety-card-head span,
+.brand-safety-card p,
+.brand-safety-card li em {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brand-safety-card ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.brand-safety-card li {
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  padding-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.brand-safety-card li span {
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.brand-safety-card li strong {
+  color: #7f1d1d;
+  font-size: 13px;
+}
+
+.brand-safety-card li p {
+  margin: 0;
+}
+
 .raw-work-order-details {
   padding: 0 14px 14px;
 }

@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import AppError
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.agent_run import AgentRun
@@ -35,6 +36,7 @@ from backend.app.schemas.work_order import (
     CampaignFromWorkOrderRequest,
     WorkOrderCreate,
 )
+from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.campaign_service import CampaignService
 from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
@@ -375,6 +377,28 @@ class AdGenerationService:
         result_payload = job.result_payload or {}
         if payload.result_payload is not None:
             result_payload = _merge_result_payload(result_payload, payload.result_payload)
+        brand_safety_report = scan_brand_safety(result_payload)
+        result_payload = _with_brand_safety_report(result_payload, brand_safety_report)
+        if brand_safety_report["status"] == "blocked":
+            payload_status = result_payload.get("status")
+            blocked_status = (
+                payload_status
+                if isinstance(payload_status, str) and payload_status in WORKFLOW_STATUSES
+                else _workflow_status_from_payload(result_payload) or "final_review"
+            )
+            result_payload["status"] = blocked_status
+            job.result_payload = result_payload
+            job.status = blocked_status
+            job.metadata_json = {
+                **(job.metadata_json or {}),
+                "review_notes": payload.review_notes,
+                "brand_safety_status": "blocked",
+                "review_blocked_at": utcnow().isoformat(),
+                "workflow_stage": blocked_status,
+            }
+            await session.commit()
+            await session.refresh(job)
+            raise AppError("品牌安全检查未通过，请修改或重新生成后再确认回传。")
         result_payload["status"] = "returned"
         job.result_payload = result_payload
         job.status = "returned"
@@ -688,6 +712,15 @@ def _merge_result_payload(current: dict, updates: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+def _with_brand_safety_report(payload: dict, report: dict[str, Any]) -> dict:
+    next_payload = dict(payload)
+    review = next_payload.get("review")
+    if not isinstance(review, dict):
+        review = {}
+    next_payload["review"] = {**review, "brand_safety": report}
+    return next_payload
 
 
 def _with_access_token(url: str, access_token: str | None) -> str:

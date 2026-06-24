@@ -21,6 +21,11 @@ import {
   parseManualAdPerformanceJson,
   type ManualAdPerformancePayload,
 } from "./lib/adPerformanceManualJson";
+import {
+  brandSafetyBlocksReturn,
+  brandSafetyReportFromPayload,
+  brandSafetySummaryLabel,
+} from "./lib/brandSafety";
 import type {
   AdPerformanceAnalysisStreamEvent,
   CreativeStreamEvent,
@@ -1758,7 +1763,10 @@ function App() {
       () => api.confirmAdGenerationReview(selectedJob.id, parsed, finalReviewNotes),
       "已确认回传",
     );
-    if (!job) return;
+    if (!job) {
+      void refreshJob(selectedJob.id);
+      return;
+    }
     setJobs((current) => upsertById(current, job));
     if (job.return_url) {
       const target = new URL(job.return_url);
@@ -2308,6 +2316,10 @@ function WorkflowView({
   const review = isRecord(result.review) ? result.review : {};
   const warnings = Array.isArray(review.warnings) ? review.warnings.map(String) : [];
   const missingFields = Array.isArray(review.missing_fields) ? review.missing_fields.map(String) : [];
+  const finalPayloadForBrandSafety = finalPayloadDraft.trim() ? parseJsonRecord(finalPayloadDraft) : result;
+  const brandSafetyReport = brandSafetyReportFromPayload(finalPayloadForBrandSafety);
+  const brandSafetyBlocked = brandSafetyBlocksReturn(brandSafetyReport);
+  const brandSafetyLabel = brandSafetySummaryLabel(brandSafetyReport);
   const hasRisks = warnings.length > 0 || missingFields.length > 0;
   const approvedImageCount = creatives.filter((item) => item.status === "approved").length;
   const approvedVideoCount = videos.filter((item) => item.status === "approved").length;
@@ -2534,6 +2546,26 @@ function WorkflowView({
                 onChange={(event) => setFinalPayloadDraft(event.target.value)}
                 spellCheck={false}
               />
+              <div className={`brand-safety-card ${brandSafetyBlocked ? "blocked" : brandSafetyReport ? "passed" : "pending"}`}>
+                <div className="brand-safety-card-head">
+                  <strong>{brandSafetyLabel}</strong>
+                  <span>{brandSafetyReport ? `${brandSafetyReport.findings.length} 项命中` : "确认回传时后端会重新检查"}</span>
+                </div>
+                {brandSafetyReport?.findings.length ? (
+                  <ul>
+                    {brandSafetyReport.findings.slice(0, 6).map((finding, index) => (
+                      <li key={`${finding.field_path}-${finding.matched_text}-${index}`}>
+                        <span>{finding.category}</span>
+                        <strong>{finding.matched_text}</strong>
+                        <em>{finding.field_path}</em>
+                        {finding.suggestion && <p>{finding.suggestion}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>{brandSafetyReport ? "未发现赌博、博彩、药品、金钱或价格优势表达。" : "生成或确认后会显示品牌安全检查结果。"}</p>
+                )}
+              </div>
               <label className="editor-label" htmlFor="final-notes">
                 预审备注
               </label>
@@ -2553,7 +2585,7 @@ function WorkflowView({
                   <Check size={16} />
                   <span>保存预审包</span>
                 </button>
-                <button className="primary-button" onClick={onConfirmReturn} disabled={!summary.final.done}>
+                <button className="primary-button" onClick={onConfirmReturn} disabled={!summary.final.done || brandSafetyBlocked}>
                   <Send size={16} />
                   <span>确认并回传</span>
                 </button>
@@ -5847,6 +5879,15 @@ function readText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return "";
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

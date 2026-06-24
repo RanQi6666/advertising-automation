@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 from backend.app.core.errors import ProviderError
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
+from backend.app.services.brand_safety_policy import BRAND_SAFETY_VISUAL_BAN
 
 _PLATFORM_BRAND_PATTERN = re.compile(r"\b(Facebook|Meta|Instagram)\b", re.IGNORECASE)
 _PLATFORM_LABEL_PATTERN = re.compile(r"\bSponsored(?:\s+labels?)?\b", re.IGNORECASE)
@@ -59,7 +60,7 @@ class VolcengineImageProvider:
 
 def _prompt_from_brief(brief: ImageBrief) -> str:
     visual_direction = _platform_neutral_text(brief.visual_direction)
-    return (
+    prompt = (
         "请生成一张独立的移动端信息流广告素材图片。\n"
         f"图片序号：{brief.image_index}\n"
         f"主题：{brief.title}\n"
@@ -72,6 +73,7 @@ def _prompt_from_brief(brief: ImageBrief) -> str:
         "禁止元素：任何社交平台品牌标识、平台 Logo、应用界面、信息流页面截图、"
         "赞助/广告标签、点赞/评论/分享按钮、浏览器边框、手机系统截图、二维码、水印、版权标识。"
     )
+    return f"{prompt}\n{BRAND_SAFETY_VISUAL_BAN}"
 
 
 def _platform_neutral_text(value: str) -> str:
