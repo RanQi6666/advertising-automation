@@ -13,9 +13,14 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 import { ApiError, api, apiErrorMessage, getAccessToken, isTransientApiError } from "./lib/api";
+import {
+  formatManualAdPerformanceJson,
+  parseManualAdPerformanceJson,
+  type ManualAdPerformancePayload,
+} from "./lib/adPerformanceManualJson";
 import type {
   AdPerformanceAnalysisStreamEvent,
   CreativeStreamEvent,
@@ -177,6 +182,42 @@ const sampleWorkOrder = `工单
 服务费：8%
 商务：西伯
 投放链接：https://www.mensparadise.store/TV.html`;
+
+const manualAdPerformanceJsonExample = formatManualAdPerformanceJson({
+  source_type: "manual",
+  external_user_id: "manual-test",
+  date_start: "2026-06-15",
+  date_stop: "2026-06-21",
+  campaign: {
+    name: "new1",
+    fb_id: "120247498350000238",
+    objective: "OUTCOME_TRAFFIC",
+  },
+  adset: {
+    name: "new1",
+    fb_id: "120247498370850238",
+    countries: "US",
+    optimization_goal: "LINK_CLICKS",
+  },
+  creative: {
+    name: "new12",
+    facebook_ad_id: "120247505013060238",
+    message: "My record: 3 minutes. Can you beat it?",
+    link: "https://example.com/landing",
+    image_url: "https://cdn.example.com/new12.jpg",
+  },
+  insight: {
+    impressions: "1079",
+    reach: "937",
+    clicks: "83",
+    inline_link_clicks: "86",
+    spend: "0.24",
+    actions: [
+      { action_type: "link_click", value: "86" },
+      { action_type: "landing_page_view", value: "23" },
+    ],
+  },
+});
 
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>(() => initialViewFromUrl());
@@ -654,6 +695,21 @@ function App() {
     setSelectedPerformanceAnalysisId((current) =>
       current && analyses.some((item) => item.id === current) ? current : analyses[0]?.id ?? null,
     );
+  }
+
+  async function handleCreatePerformanceAnalysis(
+    payload: ManualAdPerformancePayload,
+  ): Promise<AdPerformanceAnalysis | null> {
+    const analysis = await run(
+      "performance-create",
+      () => api.createAdPerformanceAnalysis(payload),
+      "投放分析记录已创建",
+    );
+    if (!analysis) return null;
+
+    setPerformanceAnalyses((current) => upsertById(current, analysis));
+    setSelectedPerformanceAnalysisId(analysis.id);
+    return analysis;
   }
 
   async function handleDeletePerformanceAnalysis(analysisId: string) {
@@ -1832,6 +1888,7 @@ function App() {
             analyses={performanceAnalyses}
             selectedAnalysis={selectedPerformanceAnalysis}
             setSelectedAnalysisId={setSelectedPerformanceAnalysisId}
+            onCreateAnalysis={(payload) => handleCreatePerformanceAnalysis(payload)}
             onDeleteAnalysis={(analysisId) => void handleDeletePerformanceAnalysis(analysisId)}
             onRefresh={() => void refreshPerformanceAnalyses()}
             loading={loading}
@@ -4087,6 +4144,7 @@ function PerformanceAnalysisView({
   analyses,
   selectedAnalysis,
   setSelectedAnalysisId,
+  onCreateAnalysis,
   onDeleteAnalysis,
   onRefresh,
   loading,
@@ -4094,6 +4152,7 @@ function PerformanceAnalysisView({
   analyses: AdPerformanceAnalysis[];
   selectedAnalysis: AdPerformanceAnalysis | null;
   setSelectedAnalysisId: (id: string) => void;
+  onCreateAnalysis: (payload: ManualAdPerformancePayload) => Promise<AdPerformanceAnalysis | null>;
   onDeleteAnalysis: (analysisId: string) => void;
   onRefresh: () => void;
   loading: string | null;
@@ -4107,12 +4166,47 @@ function PerformanceAnalysisView({
   const [performanceStreamAnalysisId, setPerformanceStreamAnalysisId] = useState<string | null>(null);
   const [performanceStreamText, setPerformanceStreamText] = useState("");
   const [performanceStreamError, setPerformanceStreamError] = useState<string | null>(null);
+  const [manualJsonText, setManualJsonText] = useState(manualAdPerformanceJsonExample);
+  const [manualJsonError, setManualJsonError] = useState<string | null>(null);
   const isStreamingSelected = Boolean(
     selectedAnalysis && streamingAnalysisId === selectedAnalysis.id,
   );
   const hasStreamForSelected = Boolean(
     selectedAnalysis && performanceStreamAnalysisId === selectedAnalysis.id,
   );
+  const isCreatingManualAnalysis = loading === "performance-create";
+
+  function handleFormatManualJson() {
+    try {
+      const payload = parseManualAdPerformanceJson(manualJsonText);
+      setManualJsonText(formatManualAdPerformanceJson(payload));
+      setManualJsonError(null);
+    } catch (caught) {
+      setManualJsonError(
+        caught instanceof Error ? caught.message : "JSON 格式不正确，请检查后重试。",
+      );
+    }
+  }
+
+  async function handleSubmitManualJson(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    let payload: ManualAdPerformancePayload;
+    try {
+      payload = parseManualAdPerformanceJson(manualJsonText);
+      setManualJsonError(null);
+    } catch (caught) {
+      setManualJsonError(
+        caught instanceof Error ? caught.message : "JSON 格式不正确，请检查后重试。",
+      );
+      return;
+    }
+
+    const analysis = await onCreateAnalysis(payload);
+    if (analysis) {
+      setManualJsonText(formatManualAdPerformanceJson(analysis.request_payload));
+      setManualJsonError(null);
+    }
+  }
 
   async function handleStreamAiAnalysis() {
     if (!selectedAnalysis || isStreamingSelected) return;
@@ -4161,6 +4255,50 @@ function PerformanceAnalysisView({
             {loading === "performance-refresh" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
           </button>
         </div>
+        <form className="performance-manual-form" onSubmit={(event) => void handleSubmitManualJson(event)}>
+          <div className="performance-manual-head">
+            <div>
+              <h3>手动创建分析</h3>
+              <p>粘贴外部投放系统回传 JSON，立即生成一条 AI 分析记录。</p>
+            </div>
+            <div className="performance-manual-tools">
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => {
+                  setManualJsonText(manualAdPerformanceJsonExample);
+                  setManualJsonError(null);
+                }}
+                title="填入示例 JSON"
+              >
+                <FileText size={16} />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleFormatManualJson}
+                title="格式化 JSON"
+              >
+                <Check size={16} />
+              </button>
+            </div>
+          </div>
+          <textarea
+            className="performance-manual-textarea"
+            value={manualJsonText}
+            onChange={(event) => {
+              setManualJsonText(event.target.value);
+              if (manualJsonError) setManualJsonError(null);
+            }}
+            placeholder='{"creative":{"name":"new12"},"insight":{"clicks":"83"}}'
+            spellCheck={false}
+          />
+          {manualJsonError && <p className="performance-manual-error">{manualJsonError}</p>}
+          <button className="primary-button" type="submit" disabled={isCreatingManualAnalysis}>
+            {isCreatingManualAnalysis ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+            {isCreatingManualAnalysis ? "创建中" : "创建分析"}
+          </button>
+        </form>
         <DataList emptyText="还没有收到广告效果数据">
           {analyses.map((analysis) => (
             <div

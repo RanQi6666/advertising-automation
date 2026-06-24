@@ -254,6 +254,8 @@ export const api = {
     request<AdGenerationJob[]>(`/integrations/publishing/ad-generation/jobs?limit=${limit}`),
   listAdPerformanceAnalyses: (limit = 50) =>
     request<AdPerformanceAnalysis[]>(`/integrations/ad-performance/analyses?limit=${limit}`),
+  createAdPerformanceAnalysis: (payload: Record<string, unknown>) =>
+    post<AdPerformanceAnalysis>("/integrations/ad-performance/analyses", payload),
   getAdPerformanceAnalysis: (analysisId: string) =>
     request<AdPerformanceAnalysis>(`/integrations/ad-performance/analyses/${analysisId}`),
   deleteAdPerformanceAnalysis: (analysisId: string) =>
