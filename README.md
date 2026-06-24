@@ -67,7 +67,7 @@ Authorization: Bearer <token>
 或：
 
 ```text
-http://127.0.0.1:5173/work-orders/new?access_token=<token>
+http://127.0.0.1:5173/work-orders/new?ai_access_token=<token>
 ```
 
 ## 当前工作流
