@@ -96,3 +96,53 @@ async def test_material_generation_validation_error_uses_external_error_body(
     assert response.json()["code"] == 4001
     assert response.json()["message"] == "product_name is required"
     assert response.json()["data"] == {}
+
+
+@pytest.mark.asyncio
+async def test_material_generation_request_validation_error_uses_external_error_body(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "product_name": "Demo App",
+                "brief": "Create a clear daily-use ad.",
+                "landing_url": "not-a-url",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == 4001
+    assert body["message"] == "request validation failed"
+    assert body["data"]["errors"]
+
+
+@pytest.mark.asyncio
+async def test_create_app_uses_current_local_storage_root_env(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    marker = storage_root / "marker.txt"
+    marker.write_text("current storage root", encoding="utf-8")
+
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch)
+    try:
+        response = client.get("/storage/marker.txt")
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    assert response.text == "current storage root"

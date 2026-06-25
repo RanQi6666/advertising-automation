@@ -13,18 +13,17 @@ from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.core.logging import configure_logging
 from backend.app.db.init_db import create_all_tables
 
-settings = get_settings()
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    if settings.create_db_on_startup:
+    if get_settings().create_db_on_startup:
         await create_all_tables()
     yield
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     storage_root = Path(settings.local_storage_root)
     storage_root.mkdir(parents=True, exist_ok=True)
 

@@ -1,6 +1,8 @@
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
@@ -28,6 +30,15 @@ class MaterialGenerationRoute(APIRoute):
                         headers=exc.headers,
                     )
                 raise
+            except RequestValidationError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": MATERIAL_CODE_VALIDATION_ERROR,
+                        "message": "request validation failed",
+                        "data": {"errors": jsonable_encoder(exc.errors())},
+                    },
+                )
 
         return custom_route_handler
 
