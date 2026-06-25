@@ -1,9 +1,13 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
+from backend.app.db.models.campaign import Campaign
+from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.topic import ContentTopic
 from backend.app.db.session import get_session
 from backend.app.main import create_app
 
@@ -146,3 +150,89 @@ async def test_create_app_uses_current_local_storage_root_env(
 
     assert response.status_code == 200
     assert response.text == "current storage root"
+
+
+@pytest.mark.asyncio
+async def test_material_copy_generation_returns_copy_and_stores_external_context(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "copy-ext-1",
+                "product_name": "Demo App",
+                "landing_url": "https://example.com/demo",
+                "audience": "New users who need a simple setup",
+                "country": "US",
+                "event_name": "quick registration",
+                "brief": "Create a clear ad for daily use.",
+                "selling_points": ["Simple setup", "Clear content"],
+            },
+        )
+        body = response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 200
+    assert body["code"] == 0
+    assert body["message"] == "success"
+    assert body["data"]["request_id"]
+    assert body["data"]["primary_text"]
+    assert body["data"]["headline"]
+    assert body["data"]["cta"]
+    assert body["data"]["customEventType"] == "COMPLETE_REGISTRATION"
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        campaigns = (await session.execute(select(Campaign))).scalars().all()
+        topics = (await session.execute(select(ContentTopic))).scalars().all()
+        drafts = (await session.execute(select(CopyDraft))).scalars().all()
+
+    assert len(campaigns) == 1
+    assert len(topics) == 1
+    assert len(drafts) == 1
+    assert campaigns[0].metadata_json["source"] == "external_material_generation"
+    assert campaigns[0].metadata_json["external_request_id"] == "copy-ext-1"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_copy_generation_reuses_successful_external_request_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    payload = {
+        "external_request_id": "copy-ext-idempotent",
+        "product_name": "Demo App",
+        "brief": "Create a clear ad for daily use.",
+    }
+    try:
+        first = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        second = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["data"]["request_id"] == second.json()["data"]["request_id"]
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        drafts = (await session.execute(select(CopyDraft))).scalars().all()
+
+    assert len(drafts) == 1
+    await engine.dispose()

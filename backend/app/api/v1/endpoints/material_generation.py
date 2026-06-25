@@ -13,6 +13,9 @@ from backend.app.schemas.material_generation import (
     MaterialGenerationAPIError,
     MaterialGenerationEnvelope,
 )
+from backend.app.services.material_generation_service import MaterialGenerationService
+
+service = MaterialGenerationService()
 
 
 class MaterialGenerationRoute(APIRoute):
@@ -51,29 +54,13 @@ router = APIRouter(
 
 
 @router.post("/copy", response_model=MaterialGenerationEnvelope)
-async def generate_copy(payload: MaterialCopyGenerateRequest, _session: DbSession):
+async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession):
     try:
-        _validate_base_payload(payload)
-        return MaterialGenerationEnvelope(code=0, message="success", data={})
+        return await service.generate_copy(session, payload)
     except MaterialGenerationAPIError as exc:
         return JSONResponse(
             status_code=exc.status_code,
             content={"code": exc.code, "message": exc.message, "data": exc.data},
-        )
-
-
-def _validate_base_payload(payload: MaterialCopyGenerateRequest) -> None:
-    if not (payload.product_name or "").strip():
-        raise MaterialGenerationAPIError(
-            "product_name is required",
-            code=MATERIAL_CODE_VALIDATION_ERROR,
-        )
-    has_brief = bool((payload.brief or "").strip())
-    has_selling_points = any(point.strip() for point in payload.selling_points)
-    if not has_brief and not has_selling_points:
-        raise MaterialGenerationAPIError(
-            "brief or selling_points is required",
-            code=MATERIAL_CODE_VALIDATION_ERROR,
         )
 
 
