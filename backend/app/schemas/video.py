@@ -16,23 +16,25 @@ class VideoGenerateRequest(BaseModel):
 
 class VideoStoryboardGenerateRequest(BaseModel):
     campaign_id: str
-    creative_asset_ids: list[str] = Field(min_length=1, max_length=20)
+    creative_asset_ids: list[str] = Field(default_factory=list, max_length=20)
     draft_id: str | None = None
     duration_seconds: int = Field(default=12, ge=1, le=300)
     aspect_ratio: str = "9:16"
     instructions: str | None = None
+    model_id: str | None = Field(default=None, max_length=128)
     metadata_json: dict = Field(default_factory=dict)
 
 
 class VideoStoryboardRewriteRequest(BaseModel):
     campaign_id: str
-    creative_asset_ids: list[str] = Field(min_length=1, max_length=20)
+    creative_asset_ids: list[str] = Field(default_factory=list, max_length=20)
     draft_id: str | None = None
     duration_seconds: int = Field(default=12, ge=1, le=300)
     aspect_ratio: str = "9:16"
     storyboard: list[dict] = Field(default_factory=list)
     storyboard_text: str | None = None
     feedback: str = Field(min_length=1)
+    model_id: str | None = Field(default=None, max_length=128)
     metadata_json: dict = Field(default_factory=dict)
 
 

@@ -327,6 +327,19 @@ export interface VideoStoryboardResponse {
   metadata_json: Record<string, unknown>;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  is_default: boolean;
+}
+
+export interface ModelOptions {
+  text: ModelOption[];
+  image: ModelOption[];
+  defaults: Record<string, string | null>;
+}
+
 export interface ReviewTask extends Timestamped {
   campaign_id: string | null;
   entity_type: string;

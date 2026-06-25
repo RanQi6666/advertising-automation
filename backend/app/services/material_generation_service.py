@@ -28,6 +28,7 @@ from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.model_selection import effective_text_model
 from backend.app.services.video_service import VideoService
 
 SOURCE = "external_material_generation"
@@ -51,7 +52,8 @@ class MaterialGenerationService:
 
         try:
             campaign, topic = await self._create_context(session, payload)
-            candidate = await self.copywriting.llm.generate_copy(
+            llm, llm_settings = self.copywriting.llm_for_model(None)
+            candidate = await llm.generate_copy(
                 campaign=campaign,
                 topic=topic,
                 constraints=payload.constraints,
@@ -65,13 +67,14 @@ class MaterialGenerationService:
                 headline=candidate.headline,
                 description=candidate.description,
                 cta=candidate.cta,
-                model_name=self.copywriting.settings.llm_model,
+                model_name=effective_text_model(llm_settings),
                 prompt_version="copywriting.v1",
                 metadata_json={
                     "source": SOURCE,
                     "external_request_id": payload.external_request_id,
                     "material_type": "copy",
                     "customEventType": custom_event_type,
+                    "provider": llm_settings.llm_provider,
                 },
             )
             session.add(draft)

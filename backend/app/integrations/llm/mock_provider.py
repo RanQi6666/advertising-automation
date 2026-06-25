@@ -410,6 +410,7 @@ class MockLLMProvider:
         size: str,
         feedback: str | None = None,
         source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         snippets = [
             "Main benefit",
@@ -430,6 +431,7 @@ class MockLLMProvider:
         briefs: list[ImageBrief] = []
         landing_page = draft.metadata_json.get("landing_page") or {}
         landing_hint = landing_page.get("title") or landing_page.get("url")
+        storyboard_hint = _mock_storyboard_hint(storyboard_context)
         for index in range(count):
             revision_hint = (
                 f" Apply operator revision request: {feedback.strip()[:280]}."
@@ -450,6 +452,7 @@ class MockLLMProvider:
                         "Clean standalone performance-ad layout with readable text, product focus, "
                         "and enough negative space for mobile feed placements. "
                         f"Use landing page context: {landing_hint or 'not available'}."
+                        f"{storyboard_hint}"
                         f"{source_hint}{revision_hint}"
                     ),
                     size=size,
@@ -477,7 +480,7 @@ class MockLLMProvider:
         scenes: list[VideoStoryboardScene] = []
 
         for index in range(scene_count):
-            asset = assets[index % asset_count]
+            asset = assets[index % asset_count] if assets else None
             start_second = index * segment
             end_second = duration_seconds if index == scene_count - 1 else (index + 1) * segment
             if index == 0:
@@ -507,7 +510,11 @@ class MockLLMProvider:
                     scene_index=index + 1,
                     start_second=start_second,
                     end_second=end_second,
-                    visual=f"{visual} Use image asset {asset.id}.",
+                    visual=(
+                        f"{visual} Use image asset {asset.id}."
+                        if asset
+                        else f"{visual} This scene will guide a future generated image."
+                    ),
                     subtitle=subtitle,
                     motion="Slow zoom, quick text reveal, and clean vertical-safe framing.",
                     voiceover=(
@@ -515,7 +522,7 @@ class MockLLMProvider:
                         if draft and draft.primary_text
                         else f"Discover {product} in a simple, fast experience."
                     ),
-                    source_asset_ids=[asset.id],
+                    source_asset_ids=[asset.id] if asset else [],
                     notes=instructions or "Mock storyboard for reserved video generation.",
                 )
             )
@@ -864,7 +871,7 @@ def _topic_templates(
         ("Pain point hook", "Lead with the daily pain the audience already understands."),
         ("Before and after", "Show the transformation customers can expect."),
         ("Proof and trust", "Use credibility, reviews, or measurable proof."),
-        ("Limited offer", "Frame the message around urgency and a clear next step."),
+        ("Clear next step", "Frame the message around one practical action."),
         ("Educational angle", "Teach one useful idea before presenting the offer."),
     ]
 
@@ -900,6 +907,22 @@ def _storyboard_script_text(storyboard: VideoStoryboardCandidate) -> str:
     if storyboard.rationale:
         lines.append(f"生成思路：{storyboard.rationale}")
     return "\n".join(lines).strip() + "\n"
+
+
+def _mock_storyboard_hint(storyboard_context: dict | None) -> str:
+    if not isinstance(storyboard_context, dict):
+        return ""
+    storyboard_text = str(storyboard_context.get("storyboard_text") or "").strip()
+    if storyboard_text:
+        return f" Align with storyboard: {storyboard_text[:320]}."
+
+    scenes = storyboard_context.get("storyboard")
+    if isinstance(scenes, list) and scenes:
+        first_scene = scenes[0] if isinstance(scenes[0], dict) else {}
+        visual = str(first_scene.get("visual") or "").strip()
+        if visual:
+            return f" Align with storyboard scene: {visual[:240]}."
+    return ""
 
 
 def _chunk_text(value: str, size: int = 24) -> list[str]:

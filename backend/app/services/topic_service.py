@@ -18,6 +18,7 @@ from backend.app.services.landing_page_service import (
     LandingPageService,
     snapshot_to_context,
 )
+from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 
 TOPIC_LANDING_EXCERPT_CHARS = 600
@@ -28,7 +29,6 @@ TOPIC_SELLING_POINT_LIMIT = 5
 class TopicService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.llm = get_llm_provider(self.settings)
         self.landing_pages = LandingPageService()
 
     async def generate_topics(
@@ -44,7 +44,10 @@ class TopicService:
         )
         if _should_replace_existing_topics(effective_signals):
             await self._reject_existing_topics(session, payload.campaign_id)
-        candidates = await self.llm.generate_topics(
+        llm_settings = settings_for_text_model(self.settings, payload.model_id)
+        llm = get_llm_provider(llm_settings)
+        model_name = effective_text_model(llm_settings)
+        candidates = await llm.generate_topics(
             campaign=campaign,  # type: ignore[arg-type]
             limit=payload.limit,
             signals=effective_signals,
@@ -56,6 +59,8 @@ class TopicService:
                 candidate=candidate,
                 signals=effective_signals,
                 streamed=False,
+                provider=llm_settings.llm_provider,
+                model=model_name,
             )
             session.add(topic)
             topics.append(topic)
@@ -81,13 +86,16 @@ class TopicService:
             await session.commit()
 
         limit = payload.limit
+        llm_settings = settings_for_text_model(self.settings, payload.model_id)
+        llm = get_llm_provider(llm_settings)
+        model_name = effective_text_model(llm_settings)
         yield {"type": "start", "limit": limit}
         for index in range(1, limit + 1):
             yield {"type": "slot", "index": index}
 
         generated_count = 0
         try:
-            async for candidate in self.llm.stream_topics(
+            async for candidate in llm.stream_topics(
                 campaign=campaign,  # type: ignore[arg-type]
                 limit=limit,
                 signals=effective_signals,
@@ -100,6 +108,8 @@ class TopicService:
                     candidate=candidate,
                     signals=effective_signals,
                     streamed=True,
+                    provider=llm_settings.llm_provider,
+                    model=model_name,
                 )
                 session.add(topic)
                 await session.commit()
@@ -133,6 +143,8 @@ class TopicService:
         candidate: TopicCandidate,
         signals: dict,
         streamed: bool,
+        provider: str,
+        model: str,
     ) -> ContentTopic:
         return ContentTopic(
             campaign_id=campaign_id,
@@ -145,8 +157,8 @@ class TopicService:
             score=candidate.score,
             source_data={
                 "signals": signals,
-                "provider": self.settings.llm_provider,
-                "model": self.settings.llm_model,
+                "provider": provider,
+                "model": model,
                 "streamed": streamed,
             },
         )

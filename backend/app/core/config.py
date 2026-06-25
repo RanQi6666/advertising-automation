@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -28,10 +28,19 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )
 
-    llm_provider: Literal["mock", "openai", "volcengine"] = "mock"
+    llm_provider: Literal["mock", "openai", "volcengine", "gateway"] = "mock"
     llm_model: str = "gpt-4.1-mini"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    model_gateway_api_key: str | None = None
+    model_gateway_base_url: str | None = None
+    model_gateway_text_model: str | None = None
+    model_gateway_image_model: str | None = None
+    model_gateway_image_size: str = "1024x1024"
+    model_gateway_image_response_format: str | None = None
+    model_gateway_image_extra_body: dict[str, Any] = Field(default_factory=dict)
+    model_gateway_text_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
     ad_performance_video_input_fps: float = Field(default=1.0, ge=0.2, le=5.0)
     ark_api_key: str | None = None
@@ -57,7 +66,7 @@ class Settings(BaseSettings):
     volcengine_video_priority: int = Field(default=0, ge=0, le=9)
     volcengine_video_safety_identifier: str | None = None
 
-    image_provider: Literal["placeholder", "volcengine"] = "placeholder"
+    image_provider: Literal["placeholder", "volcengine", "gateway"] = "placeholder"
     video_provider: Literal["placeholder", "volcengine"] = "placeholder"
     object_storage_provider: Literal["local", "s3", "r2", "minio"] = "local"
     public_base_url: str = "http://127.0.0.1:8001"
@@ -73,6 +82,13 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("model_gateway_text_models", "model_gateway_image_models", mode="before")
+    @classmethod
+    def parse_model_gateway_models(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [model.strip() for model in value.split(",") if model.strip()]
         return value
 
 

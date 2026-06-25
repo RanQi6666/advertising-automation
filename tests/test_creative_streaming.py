@@ -26,6 +26,7 @@ class FakeLLMProvider:
         size: str,
         feedback: str | None = None,
         source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         self.calls.append(
             {
@@ -34,6 +35,7 @@ class FakeLLMProvider:
                 "size": size,
                 "feedback": feedback,
                 "source_asset_id": source_asset.id if source_asset else None,
+                "storyboard_context": storyboard_context,
             }
         )
         return [
@@ -68,8 +70,20 @@ class SlowFakeImageProvider(FakeImageProvider):
         return await super().generate_images(briefs)
 
 
+def _patch_image_provider(monkeypatch, provider):
+    captured_settings = []
+
+    def fake_get_image_provider(settings=None):  # noqa: ANN001
+        captured_settings.append(settings)
+        return provider
+
+    monkeypatch.setattr(creative_service, "get_image_provider", fake_get_image_provider)
+    return captured_settings
+
+
 @pytest.mark.asyncio
-async def test_stream_creatives_yields_three_assets_incrementally() -> None:
+async def test_stream_creatives_yields_three_assets_incrementally(monkeypatch) -> None:
+    _patch_image_provider(monkeypatch, FakeImageProvider())
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -90,7 +104,6 @@ async def test_stream_creatives_yields_three_assets_incrementally() -> None:
 
         service = CreativeService()
         service.llm = FakeLLMProvider()  # type: ignore[assignment]
-        service.image_provider = FakeImageProvider()  # type: ignore[assignment]
 
         events = [
             event
@@ -118,6 +131,7 @@ async def test_stream_creatives_yields_three_assets_incrementally() -> None:
 @pytest.mark.asyncio
 async def test_stream_creatives_sends_heartbeat_while_images_are_pending(monkeypatch) -> None:
     monkeypatch.setattr(creative_service, "STREAM_HEARTBEAT_SECONDS", 0.001)
+    _patch_image_provider(monkeypatch, SlowFakeImageProvider())
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -138,7 +152,6 @@ async def test_stream_creatives_sends_heartbeat_while_images_are_pending(monkeyp
 
         service = CreativeService()
         service.llm = FakeLLMProvider()  # type: ignore[assignment]
-        service.image_provider = SlowFakeImageProvider()  # type: ignore[assignment]
 
         events = [
             event
@@ -159,7 +172,150 @@ async def test_stream_creatives_sends_heartbeat_while_images_are_pending(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_regenerate_creative_creates_new_version_with_feedback() -> None:
+async def test_stream_creatives_passes_storyboard_context_and_selected_image_model(
+    monkeypatch,
+) -> None:
+    captured_settings = _patch_image_provider(monkeypatch, FakeImageProvider())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        fake_llm = FakeLLMProvider()
+        service = CreativeService()
+        service.llm = fake_llm  # type: ignore[assignment]
+        service.settings = service.settings.model_copy(
+            update={
+                "image_provider": "gateway",
+                "model_gateway_image_model": "default-image",
+            }
+        )
+
+        events = [
+            event
+            async for event in service.stream_creatives(
+                session,
+                CreativeGenerateRequest(
+                    draft_id=draft.id,
+                    count=1,
+                    size="1:1",
+                    model_id="custom-image-model",
+                    storyboard_text="Scene 1: open with the app in a bright home scene.",
+                ),
+            )
+        ]
+
+        asset_event = next(event for event in events if event["type"] == "asset")
+        assert fake_llm.calls[-1]["storyboard_context"]["storyboard_text"].startswith(
+            "Scene 1"
+        )
+        assert captured_settings[-1].model_gateway_image_model == "custom-image-model"
+        assert asset_event["asset"]["metadata_json"]["storyboard_context"][
+            "storyboard_text"
+        ].startswith("Scene 1")
+        assert asset_event["asset"]["metadata_json"]["image_model"] == "custom-image-model"
+        assert asset_event["asset"]["metadata_json"]["image_provider"] == "gateway"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stream_creatives_marks_video_keyframe_variant_groups(monkeypatch) -> None:
+    _patch_image_provider(monkeypatch, FakeImageProvider())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        fake_llm = FakeLLMProvider()
+        service = CreativeService()
+        service.llm = fake_llm  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in service.stream_creatives(
+                session,
+                CreativeGenerateRequest(
+                    draft_id=draft.id,
+                    count=6,
+                    size="9:16",
+                    generation_mode="video_keyframe_variants",
+                    variant_count=3,
+                    frames_per_variant=2,
+                    video_duration_seconds=12,
+                    storyboard_text="12 second script: hook, benefit, final action.",
+                ),
+            )
+        ]
+
+        asset_events = [event for event in events if event["type"] == "asset"]
+        assert events[0] == {"type": "start", "limit": 6, "indices": [1, 2, 3, 4, 5, 6]}
+        assert len(asset_events) == 6
+        assert fake_llm.calls[-1]["storyboard_context"]["keyframe_plan"] == {
+            "mode": "video_keyframe_variants",
+            "variant_count": 3,
+            "frames_per_variant": 2,
+            "video_duration_seconds": 12,
+            "total_images": 6,
+        }
+
+        metadata_by_index = {
+            event["index"]: event["asset"]["metadata_json"] for event in asset_events
+        }
+        assert [
+            (
+                metadata_by_index[index]["keyframe_group"],
+                metadata_by_index[index]["keyframe_role"],
+                metadata_by_index[index]["keyframe_position"],
+            )
+            for index in range(1, 7)
+        ] == [
+            (1, "first_frame", 1),
+            (1, "last_frame", 2),
+            (2, "first_frame", 1),
+            (2, "last_frame", 2),
+            (3, "first_frame", 1),
+            (3, "last_frame", 2),
+        ]
+        assert all(
+            metadata["keyframe_group_size"] == 2
+            and metadata["keyframe_variant_count"] == 3
+            and metadata["video_duration_seconds"] == 12
+            for metadata in metadata_by_index.values()
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_regenerate_creative_creates_new_version_with_feedback(monkeypatch) -> None:
+    _patch_image_provider(monkeypatch, FakeImageProvider())
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -184,7 +340,16 @@ async def test_regenerate_creative_creates_new_version_with_feedback() -> None:
             size="1:1",
             version=1,
             status=CreativeStatus.GENERATED.value,
-            metadata_json={"image_index": 2},
+            metadata_json={
+                "image_index": 2,
+                "generation_mode": "video_keyframe_variants",
+                "keyframe_group": 1,
+                "keyframe_role": "last_frame",
+                "keyframe_position": 2,
+                "keyframe_group_size": 2,
+                "keyframe_variant_count": 3,
+                "video_duration_seconds": 12,
+            },
         )
         session.add_all([campaign, draft, source_asset])
         await session.commit()
@@ -192,7 +357,6 @@ async def test_regenerate_creative_creates_new_version_with_feedback() -> None:
         fake_llm = FakeLLMProvider()
         service = CreativeService()
         service.llm = fake_llm  # type: ignore[assignment]
-        service.image_provider = FakeImageProvider()  # type: ignore[assignment]
 
         regenerated = await service.regenerate_creative(
             session=session,
@@ -203,6 +367,13 @@ async def test_regenerate_creative_creates_new_version_with_feedback() -> None:
         assert regenerated.id != source_asset.id
         assert regenerated.version == 2
         assert regenerated.metadata_json["image_index"] == 2
+        assert regenerated.metadata_json["generation_mode"] == "video_keyframe_variants"
+        assert regenerated.metadata_json["keyframe_group"] == 1
+        assert regenerated.metadata_json["keyframe_role"] == "last_frame"
+        assert regenerated.metadata_json["keyframe_position"] == 2
+        assert regenerated.metadata_json["keyframe_group_size"] == 2
+        assert regenerated.metadata_json["keyframe_variant_count"] == 3
+        assert regenerated.metadata_json["video_duration_seconds"] == 12
         assert regenerated.metadata_json["revision_feedback"] == (
             "Make the product larger and reduce text."
         )

@@ -43,6 +43,8 @@ import type {
   Campaign,
   CopyDraft,
   CreativeAsset,
+  ModelOption,
+  ModelOptions,
   ReviewedDeliveryFields,
   Topic,
   VideoAsset,
@@ -132,6 +134,9 @@ type AdGenerationIntegrationParams = {
 const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
 const CREATIVE_GENERATION_LIMIT = 3;
+const KEYFRAME_VARIANT_COUNT = 3;
+const KEYFRAME_FRAMES_PER_VARIANT = 2;
+const KEYFRAME_TOTAL_IMAGES = KEYFRAME_VARIANT_COUNT * KEYFRAME_FRAMES_PER_VARIANT;
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -254,6 +259,10 @@ function App() {
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [videoPollWarnings, setVideoPollWarnings] = useState<Record<string, VideoPollWarning>>({});
+  const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null);
+  const [selectedTopicModelId, setSelectedTopicModelId] = useState("");
+  const [selectedCopyModelId, setSelectedCopyModelId] = useState("");
+  const [selectedImageModelId, setSelectedImageModelId] = useState("");
 
   const [rawWorkOrder, setRawWorkOrder] = useState(() => sampleWorkOrder);
   const [deliveryExtractionCache, setDeliveryExtractionCache] =
@@ -652,14 +661,16 @@ function App() {
 
   async function refreshBaseData() {
     await run("refresh", async () => {
-      const [nextJobs, nextCampaigns, nextPerformanceAnalyses] = await Promise.all([
+      const [nextJobs, nextCampaigns, nextPerformanceAnalyses, nextModelOptions] = await Promise.all([
         api.listAdGenerationJobs(100),
         api.listCampaigns(100),
         api.listAdPerformanceAnalyses(100),
+        api.getModelOptions(),
       ]);
       setJobs(nextJobs);
       setCampaigns(nextCampaigns);
       setPerformanceAnalyses(nextPerformanceAnalyses);
+      applyModelOptions(nextModelOptions);
       setSelectedJobId((current) =>
         current && nextJobs.some((item) => item.id === current) ? current : nextJobs[0]?.id ?? null,
       );
@@ -677,6 +688,13 @@ function App() {
         clearCampaignWorkflowState();
       }
     });
+  }
+
+  function applyModelOptions(nextOptions: ModelOptions) {
+    setModelOptions(nextOptions);
+    setSelectedTopicModelId((current) => preferredModelId(current, nextOptions.text, nextOptions.defaults.text));
+    setSelectedCopyModelId((current) => preferredModelId(current, nextOptions.text, nextOptions.defaults.text));
+    setSelectedImageModelId((current) => preferredModelId(current, nextOptions.image, nextOptions.defaults.image));
   }
 
   async function refreshJob(jobId: string) {
@@ -1011,6 +1029,7 @@ function App() {
             });
           }
         },
+        selectedTopicModelId,
       );
 
       if (!streamedTopics.length) {
@@ -1084,6 +1103,7 @@ function App() {
             });
           }
         },
+        selectedTopicModelId,
       );
 
       if (!retriedTopic) {
@@ -1137,7 +1157,11 @@ function App() {
       setError("请先选择一个选题。", "copy");
       return;
     }
-    const draft = await run("copy", () => api.generateCopy(topic.id, "Learn More"), "文案已生成");
+    const draft = await run(
+      "copy",
+      () => api.generateCopy(topic.id, "Learn More", selectedCopyModelId),
+      "文案已生成",
+    );
     if (draft) {
       setDrafts((current) => [draft, ...current]);
       setSelectedDraftId(draft.id);
@@ -1150,7 +1174,7 @@ function App() {
     if (!selectedDraft || !copyFeedback.trim()) return;
     const draft = await run(
       "revise-copy",
-      () => api.reviseCopy(selectedDraft.id, copyFeedback),
+      () => api.reviseCopy(selectedDraft.id, copyFeedback, selectedCopyModelId),
       "新版本文案已生成",
     );
     if (draft) {
@@ -1279,6 +1303,68 @@ function App() {
     );
   }
 
+  async function ensureStoryboardForImageGeneration(
+    draft: CopyDraft,
+  ): Promise<{ storyboard: Record<string, unknown>[]; storyboardText: string }> {
+    const currentText = videoStoryboardText.trim();
+    if (currentText) {
+      return {
+        storyboard: videoStoryboardDirty
+          ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
+          : videoStoryboard,
+        storyboardText: videoStoryboardText,
+      };
+    }
+
+    if (!selectedCampaign) {
+      throw new Error("请先选择项目。");
+    }
+
+    let streamedText = "";
+    await api.streamVideoStoryboard(
+      selectedCampaign.id,
+      [],
+      draft.id,
+      videoDurationSeconds,
+      videoAspectRatio,
+      videoInstructions,
+      (event: VideoStoryboardTextStreamEvent) => {
+        if (event.type === "start") {
+          setVideoAspectRatio(event.aspect_ratio);
+          setVideoDurationSeconds(event.duration_seconds);
+          return;
+        }
+        if (event.type === "delta") {
+          streamedText += event.text;
+          setVideoStoryboardText(streamedText);
+          return;
+        }
+        if (event.type === "done") {
+          streamedText = event.text ?? streamedText;
+          setVideoStoryboardText(streamedText);
+          setVideoAspectRatio(event.aspect_ratio);
+          setVideoDurationSeconds(event.duration_seconds);
+          return;
+        }
+        if (event.type === "error") {
+          throw new Error(event.message);
+        }
+      },
+      selectedCopyModelId,
+    );
+
+    if (!streamedText.trim()) {
+      throw new Error("模型未返回创意脚本，请重试。");
+    }
+
+    setVideoStoryboard([]);
+    setVideoStoryboardDirty(true);
+    return {
+      storyboard: storyboardPayloadFromText(streamedText, []),
+      storyboardText: streamedText,
+    };
+  }
+
   async function handleGenerateCreatives() {
     const draft = approvedDraft ?? selectedDraft;
     if (!draft) {
@@ -1286,21 +1372,23 @@ function App() {
       return;
     }
     if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
+    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio);
     setActiveView("creatives");
     setLoading("creatives");
     clearError("image");
     setNotice(null);
-    setCreativeGenerationSlots(initialCreativeSlots(CREATIVE_GENERATION_LIMIT));
+    setCreativeGenerationSlots(initialCreativeSlots(generationPlan.count));
 
     const streamedAssets: CreativeAsset[] = [];
     try {
+      const storyboardContext = await ensureStoryboardForImageGeneration(draft);
       await api.generateCreativesStream(
         draft.id,
-        CREATIVE_GENERATION_LIMIT,
-        "1:1",
+        generationPlan.count,
+        generationPlan.size,
         (event: CreativeStreamEvent) => {
           if (event.type === "start") {
-            setCreativeGenerationSlots(initialCreativeSlots(CREATIVE_GENERATION_LIMIT));
+            setCreativeGenerationSlots(initialCreativeSlots(event.limit));
             return;
           }
           if (event.type === "slot") {
@@ -1315,9 +1403,11 @@ function App() {
             streamedAssets.push(event.asset);
             clearError("image");
             setCreatives((current) => prependOrReplaceById(current, event.asset));
-            setSelectedCreativeIds((current) =>
-              current.includes(event.asset.id) ? current : [...current, event.asset.id],
-            );
+            if (!generationPlan.isKeyframeVariant) {
+              setSelectedCreativeIds((current) =>
+                current.includes(event.asset.id) ? current : [...current, event.asset.id],
+              );
+            }
             updateCreativeGenerationSlot(event.index, {
               status: "done",
               asset: event.asset,
@@ -1339,6 +1429,16 @@ function App() {
             );
           }
         },
+        undefined,
+        {
+          modelId: selectedImageModelId,
+          storyboard: storyboardContext.storyboard,
+          storyboardText: storyboardContext.storyboardText,
+          generationMode: generationPlan.generationMode,
+          variantCount: generationPlan.variantCount,
+          framesPerVariant: generationPlan.framesPerVariant,
+          videoDurationSeconds: generationPlan.videoDurationSeconds,
+        },
       );
 
       if (!streamedAssets.length) {
@@ -1350,9 +1450,20 @@ function App() {
       clearError("image");
       setNotice(
         streamedAssets.length === CREATIVE_GENERATION_LIMIT
-          ? "3 张图片已生成"
-          : `已生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`,
+          ? "3 张图片已按创意脚本生成"
+          : `已按创意脚本生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`,
       );
+      if (generationPlan.isKeyframeVariant) {
+        const firstGroupIds = firstCompleteKeyframeGroupIds(streamedAssets);
+        if (firstGroupIds.length) {
+          setSelectedCreativeIds(firstGroupIds);
+        }
+        setNotice(
+          streamedAssets.length === generationPlan.count
+            ? "3 组首尾帧方案已按创意脚本生成"
+            : `已生成 ${streamedAssets.length} 张关键帧，剩余候选可单独重试`,
+        );
+      }
       void saveWorkflowStage("image_review");
     } catch (caught) {
       const message = apiErrorMessage(caught, "图片生成失败");
@@ -1363,7 +1474,7 @@ function App() {
       }
       markLoadingCreativeSlotsFailed(message || "图片生成中断，请重试。");
       if (streamedAssets.length) {
-        setNotice(`已生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`);
+        setNotice(`已按创意脚本生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`);
         void saveWorkflowStage("image_review");
       }
     } finally {
@@ -1378,6 +1489,7 @@ function App() {
       return;
     }
     if (loading?.startsWith("creative-retry-")) return;
+    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio);
     setLoading(`creative-retry-${slotIndex}`);
     clearError("image");
     setNotice(null);
@@ -1389,10 +1501,11 @@ function App() {
 
     let retriedAsset: CreativeAsset | null = null;
     try {
+      const storyboardContext = await ensureStoryboardForImageGeneration(draft);
       await api.generateCreativesStream(
         draft.id,
         1,
-        "1:1",
+        generationPlan.size,
         (event: CreativeStreamEvent) => {
           if (event.type === "asset") {
             retriedAsset = event.asset;
@@ -1415,6 +1528,15 @@ function App() {
           }
         },
         slotIndex,
+        {
+          modelId: selectedImageModelId,
+          storyboard: storyboardContext.storyboard,
+          storyboardText: storyboardContext.storyboardText,
+          generationMode: generationPlan.generationMode,
+          variantCount: generationPlan.variantCount,
+          framesPerVariant: generationPlan.framesPerVariant,
+          videoDurationSeconds: generationPlan.videoDurationSeconds,
+        },
       );
 
       if (!retriedAsset) {
@@ -1458,7 +1580,12 @@ function App() {
     });
 
     try {
-      const regenerated = await api.regenerateCreative(asset.id, feedback, asset.size);
+      const regenerated = await api.regenerateCreative(
+        asset.id,
+        feedback,
+        asset.size,
+        selectedImageModelId,
+      );
       setCreatives((current) => prependOrReplaceById(current, regenerated));
       setSelectedCreativeIds((current) =>
         current.includes(regenerated.id)
@@ -1495,8 +1622,9 @@ function App() {
   async function handleGenerateVideoStoryboard() {
     if (!selectedCampaign) return;
     const sourceIds = selectedCreativeIdsForVideo();
-    if (!sourceIds.length) {
-      setError("请先审核通过并选择至少一张图片。", "video");
+    const draftId = approvedDraft?.id ?? selectedDraft?.id ?? null;
+    if (!sourceIds.length && !draftId) {
+      setError("请先生成并审核通过文案，或选择参考图片。", "video");
       return;
     }
     if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
@@ -1515,7 +1643,7 @@ function App() {
       await api.streamVideoStoryboard(
         selectedCampaign.id,
         sourceIds,
-        approvedDraft?.id ?? selectedDraft?.id ?? null,
+        draftId,
         videoDurationSeconds,
         videoAspectRatio,
         videoInstructions,
@@ -1541,18 +1669,19 @@ function App() {
             throw new Error(event.message);
           }
         },
+        selectedCopyModelId,
       );
       if (!streamedText.trim()) {
-        throw new Error("模型未返回视频脚本，请重试。");
+        throw new Error("模型未返回创意脚本，请重试。");
       }
-      setNotice("视频脚本已生成");
+      setNotice("创意脚本已生成");
     } catch (caught) {
-      const message = apiErrorMessage(caught, "视频脚本生成失败");
+      const message = apiErrorMessage(caught, "创意脚本生成失败");
       if (streamedText.trim() && isTransientApiError(caught)) {
         clearError("video");
         setNotice(`已保留当前脚本内容。${message}`);
       } else {
-        setCaughtError("video", caught, "视频脚本生成失败");
+        setCaughtError("video", caught, "创意脚本生成失败");
       }
       if (!streamedText.trim() && previousText.trim()) {
         setVideoStoryboardText(previousText);
@@ -1566,8 +1695,9 @@ function App() {
     if (!selectedCampaign) return;
     const sourceIds = selectedCreativeIdsForVideo();
     const feedback = videoStoryboardFeedback.trim();
-    if (!sourceIds.length) {
-      setError("请先审核通过并选择至少一张图片。", "video");
+    const draftId = approvedDraft?.id ?? selectedDraft?.id ?? null;
+    if (!sourceIds.length && !draftId) {
+      setError("请先生成并审核通过文案，或选择参考图片。", "video");
       return;
     }
     if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
@@ -1575,7 +1705,7 @@ function App() {
       return;
     }
     if (!videoStoryboardText.trim()) {
-      setError("请先生成或填写视频脚本。", "video");
+      setError("请先生成或填写创意脚本。", "video");
       return;
     }
     if (!feedback) {
@@ -1598,12 +1728,13 @@ function App() {
         {
           campaignId: selectedCampaign.id,
           creativeAssetIds: sourceIds,
-          draftId: approvedDraft?.id ?? selectedDraft?.id ?? null,
+          draftId,
           durationSeconds: videoDurationSeconds,
           aspectRatio: videoAspectRatio,
           storyboard: storyboardPayload,
           storyboardText: previousText,
           feedback,
+          modelId: selectedCopyModelId,
         },
         (event: VideoStoryboardTextStreamEvent) => {
           if (event.type === "start") {
@@ -1634,12 +1765,12 @@ function App() {
       setVideoStoryboardFeedback("");
       setNotice("脚本已按意见改写");
     } catch (caught) {
-      const message = apiErrorMessage(caught, "视频脚本改写失败");
+      const message = apiErrorMessage(caught, "创意脚本改写失败");
       if (streamedText.trim() && isTransientApiError(caught)) {
         clearError("video");
         setNotice(`已保留当前改写内容。${message}`);
       } else {
-        setCaughtError("video", caught, "视频脚本改写失败");
+        setCaughtError("video", caught, "创意脚本改写失败");
       }
       if (!streamedText.trim()) {
         setVideoStoryboardText(previousText);
@@ -1657,7 +1788,7 @@ function App() {
       return;
     }
     if (!videoStoryboardText.trim()) {
-      setError("请先生成或填写视频脚本。", "video");
+      setError("请先生成或填写创意脚本。", "video");
       return;
     }
     const storyboardPayload = videoStoryboardDirty
@@ -1967,6 +2098,9 @@ function App() {
             setSelectedTopicId={setSelectedTopicId}
             topicFeedback={topicFeedback}
             setTopicFeedback={setTopicFeedback}
+            modelOptions={modelOptions?.text ?? []}
+            selectedModelId={selectedTopicModelId}
+            setSelectedModelId={setSelectedTopicModelId}
             onGenerate={(feedback) => void handleGenerateTopics(feedback)}
             onRetryTopicSlot={(index) => void handleRetryTopicSlot(index)}
             onSelect={(id) => void handleSelectTopic(id)}
@@ -1984,6 +2118,9 @@ function App() {
             creatives={creatives}
             feedback={copyFeedback}
             setFeedback={setCopyFeedback}
+            modelOptions={modelOptions?.text ?? []}
+            selectedModelId={selectedCopyModelId}
+            setSelectedModelId={setSelectedCopyModelId}
             onGenerateCopy={() => void handleGenerateCopy()}
             onReviseCopy={() => void handleReviseCopy()}
             onReview={handleReview}
@@ -2002,6 +2139,10 @@ function App() {
             setRewriteFeedback={(assetId, value) =>
               setCreativeRewriteFeedbacks((current) => ({ ...current, [assetId]: value }))
             }
+            modelOptions={modelOptions?.image ?? []}
+            selectedModelId={selectedImageModelId}
+            setSelectedModelId={setSelectedImageModelId}
+            videoDurationSeconds={videoDurationSeconds}
             onGenerate={() => void handleGenerateCreatives()}
             onRetrySlot={(index) => void handleRetryCreativeSlot(index)}
             onRegenerate={(asset) => void handleRegenerateCreative(asset)}
@@ -2649,6 +2790,9 @@ function TopicsView({
   setSelectedTopicId,
   topicFeedback,
   setTopicFeedback,
+  modelOptions,
+  selectedModelId,
+  setSelectedModelId,
   onGenerate,
   onRetryTopicSlot,
   onSelect,
@@ -2660,6 +2804,9 @@ function TopicsView({
   setSelectedTopicId: (id: string) => void;
   topicFeedback: string;
   setTopicFeedback: (value: string) => void;
+  modelOptions: ModelOption[];
+  selectedModelId: string;
+  setSelectedModelId: (value: string) => void;
   onGenerate: (feedback?: string) => void;
   onRetryTopicSlot: (index: number) => void;
   onSelect: (topicId: string) => void;
@@ -2695,12 +2842,22 @@ function TopicsView({
             <h2>候选选题</h2>
             <span className="panel-note">{panelNote}</span>
           </div>
-          {!topics.length && !topicGenerationSlots.length && (
-            <button className="primary-button" onClick={() => onGenerate()} disabled={isGeneratingTopics}>
-              {isGeneratingTopics ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>生成选题</span>
-            </button>
-          )}
+          <div className="button-row model-action-row">
+            <ModelSelect
+              id="topic-model"
+              label="选题模型"
+              options={modelOptions}
+              value={selectedModelId}
+              onChange={setSelectedModelId}
+              disabled={isGeneratingTopics}
+            />
+            {!topics.length && !topicGenerationSlots.length && (
+              <button className="primary-button" onClick={() => onGenerate()} disabled={isGeneratingTopics}>
+                {isGeneratingTopics ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                <span>生成选题</span>
+              </button>
+            )}
+          </div>
         </div>
         {topics.length > 0 && !hasGeneratingSlots && (
           <section className="topic-feedback-panel topic-batch-regenerate">
@@ -2864,6 +3021,9 @@ function CopyView({
   creatives,
   feedback,
   setFeedback,
+  modelOptions,
+  selectedModelId,
+  setSelectedModelId,
   onGenerateCopy,
   onReviseCopy,
   onReview,
@@ -2878,6 +3038,9 @@ function CopyView({
   creatives: CreativeAsset[];
   feedback: string;
   setFeedback: (value: string) => void;
+  modelOptions: ModelOption[];
+  selectedModelId: string;
+  setSelectedModelId: (value: string) => void;
   onGenerateCopy: () => void;
   onReviseCopy: () => void;
   onReview: (
@@ -2901,7 +3064,7 @@ function CopyView({
     previewCreatives[0] ??
     null;
   const selectedPreviewAspectClass = mediaPreviewAspectClass(selectedPreviewCreative?.size);
-  const feedbackTags = ["更短", "更本地化", "少用符号", "突出优惠", "更合规"];
+  const feedbackTags = ["更短", "更本地化", "少用符号", "突出使用场景", "更合规"];
   const appendFeedback = (value: string) => {
     setFeedback(feedback.trim() ? `${feedback.trim()}，${value}` : value);
   };
@@ -2926,10 +3089,20 @@ function CopyView({
               {drafts.length ? `${drafts.length} 个版本可审核` : "等待生成第一版文案"}
             </span>
           </div>
-          <button className="primary-button" onClick={onGenerateCopy} disabled={!selectedTopic || loading === "copy"}>
-            {loading === "copy" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-            <span>生成文案</span>
-          </button>
+          <div className="button-row model-action-row">
+            <ModelSelect
+              id="copy-model"
+              label="文案/脚本模型"
+              options={modelOptions}
+              value={selectedModelId}
+              onChange={setSelectedModelId}
+              disabled={loading === "copy" || loading === "revise-copy"}
+            />
+            <button className="primary-button" onClick={onGenerateCopy} disabled={!selectedTopic || loading === "copy"}>
+              {loading === "copy" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+              <span>生成文案</span>
+            </button>
+          </div>
         </div>
         <DataList emptyText="暂无文案">
           {drafts.map((draft) => (
@@ -3155,11 +3328,15 @@ function CreativesView({
   setSelectedCreativeIds,
   rewriteFeedbacks,
   setRewriteFeedback,
+  modelOptions,
+  selectedModelId,
+  setSelectedModelId,
   onGenerate,
   onRetrySlot,
   onRegenerate,
   onReview,
   onCreateVideo,
+  videoDurationSeconds,
   loading,
 }: {
   creatives: CreativeAsset[];
@@ -3168,6 +3345,10 @@ function CreativesView({
   setSelectedCreativeIds: (ids: string[]) => void;
   rewriteFeedbacks: Record<string, string>;
   setRewriteFeedback: (assetId: string, value: string) => void;
+  modelOptions: ModelOption[];
+  selectedModelId: string;
+  setSelectedModelId: (value: string) => void;
+  videoDurationSeconds: number;
   onGenerate: () => void;
   onRetrySlot: (index: number) => void;
   onRegenerate: (asset: CreativeAsset) => void;
@@ -3188,10 +3369,16 @@ function CreativesView({
   const hasSlotErrors = visibleSlots.some((slot) => slot.status === "error");
   const isGenerating =
     loading === "creatives" || creativeGenerationSlots.some((slot) => slot.status === "loading");
+  const generationPlan = creativeGenerationPlan(videoDurationSeconds, "9:16");
+  const keyframeGroups = buildKeyframeVariantGroups(visibleSlots);
+  const hasKeyframeGroups = keyframeGroups.length > 0;
+  const slotLimit = visibleSlots.length || generationPlan.count;
   const panelNote = visibleSlots.length
     ? isGenerating
-      ? `${completedCount}/${CREATIVE_GENERATION_LIMIT} 张已生成`
-      : `${completedCount} 张当前候选`
+      ? `${completedCount}/${slotLimit} 张已生成`
+      : hasKeyframeGroups
+        ? `${keyframeGroups.length} 组首尾帧方案`
+        : `${completedCount} 张当前候选`
     : "还没有生成图片";
 
   return (
@@ -3202,10 +3389,18 @@ function CreativesView({
             <h2>图片审核</h2>
             <span className="panel-note">{panelNote}</span>
           </div>
-          <div className="button-row">
+          <div className="button-row model-action-row">
+            <ModelSelect
+              id="image-model"
+              label="图片模型"
+              options={modelOptions}
+              value={selectedModelId}
+              onChange={setSelectedModelId}
+              disabled={Boolean(loading)}
+            />
             <button className="secondary-button" onClick={onGenerate} disabled={isGenerating}>
               {isGenerating ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>生成 3 张图片</span>
+              <span>{generationPlan.isKeyframeVariant ? "生成 3 组关键帧" : "生成 3 张图片"}</span>
             </button>
             <button className="primary-button" onClick={onCreateVideo} disabled={!creatives.some((item) => item.status === "approved")}>
               <Film size={16} />
@@ -3214,7 +3409,7 @@ function CreativesView({
           </div>
         </div>
         {visibleSlots.length > 0 && (
-          <div className={`creative-progress ${completedCount === CREATIVE_GENERATION_LIMIT ? "done" : hasSlotErrors ? "failed" : ""}`}>
+          <div className={`creative-progress ${completedCount === slotLimit ? "done" : hasSlotErrors ? "failed" : ""}`}>
             <div className="creative-progress-head">
               <div className="creative-progress-icon">
                 {isGenerating ? <Loader2 size={18} className="spin" /> : <Image size={18} />}
@@ -3242,7 +3437,57 @@ function CreativesView({
           </div>
         )}
 
-        {visibleSlots.length ? (
+        {visibleSlots.length && hasKeyframeGroups ? (
+          <div className="keyframe-variant-grid">
+            {keyframeGroups.map((group) => {
+              const groupIds = group.assets.map((asset) => asset.id);
+              const groupSelected =
+                groupIds.length > 0 && groupIds.every((id) => selectedCreativeIds.includes(id));
+              return (
+                <section
+                  className={`keyframe-variant-card ${groupSelected ? "selected" : ""}`}
+                  key={`keyframe-group-${group.group}`}
+                >
+                  <div className="keyframe-variant-head">
+                    <div>
+                      <strong>方案 {group.group}</strong>
+                      <span>
+                        {group.complete
+                          ? "首帧 + 尾帧"
+                          : `${group.assets.length}/${KEYFRAME_FRAMES_PER_VARIANT} 张已生成`}
+                      </span>
+                    </div>
+                    <button
+                      className={groupSelected ? "primary-button" : "secondary-button"}
+                      type="button"
+                      disabled={!group.complete}
+                      onClick={() => setSelectedCreativeIds(groupIds)}
+                    >
+                      <Film size={16} />
+                      <span>{groupSelected ? "已选此组" : "选择此组"}</span>
+                    </button>
+                  </div>
+                  <div className="asset-grid keyframe-pair-grid">
+                    {group.slots.map((slot) => (
+                      <CreativeSlotCard
+                        key={`creative-slot-${slot.index}-${slot.asset?.id ?? slot.status}`}
+                        slot={slot}
+                        selectedCreativeIds={selectedCreativeIds}
+                        setSelectedCreativeIds={setSelectedCreativeIds}
+                        rewriteFeedbacks={rewriteFeedbacks}
+                        setRewriteFeedback={setRewriteFeedback}
+                        onRetrySlot={onRetrySlot}
+                        onRegenerate={onRegenerate}
+                        onReview={onReview}
+                        loading={loading}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        ) : visibleSlots.length ? (
           <div className="asset-grid creative-slot-grid">
             {visibleSlots.map((slot) => (
               <CreativeSlotCard
@@ -3707,7 +3952,7 @@ function VideosView({
                 disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
               >
                 {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                <span>生成分镜脚本</span>
+                <span>生成创意脚本</span>
               </button>
               <button
                 className="primary-button"
@@ -3715,6 +3960,7 @@ function VideosView({
                 onClick={onCreateVideo}
                 disabled={
                   !storyboardText.trim() ||
+                  !selectedCreativeIds.length ||
                   loading === "video" ||
                   loading === "video-storyboard" ||
                   loading === "video-storyboard-rewrite"
@@ -3727,7 +3973,7 @@ function VideosView({
           </div>
           <details className="storyboard-editor-details video-storyboard-editor" open>
             <summary>
-              <span>视频脚本</span>
+              <span>创意脚本</span>
               <small>
                 {loading === "video-storyboard"
                   ? "生成中"
@@ -4151,6 +4397,42 @@ function DataList({ children, emptyText }: { children: React.ReactNode; emptyTex
 
 function EmptyState({ text }: { text: string }) {
   return <div className="empty-state">{text}</div>;
+}
+
+function ModelSelect({
+  id,
+  label,
+  options,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  label: string;
+  options: ModelOption[];
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  if (!options.length) return null;
+  return (
+    <label className="model-select-control" htmlFor={id}>
+      <span>{label}</span>
+      <select
+        id={id}
+        className="select model-select"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+      >
+        {options.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label || option.id}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 function StatusPill({ status }: { status: string }) {
@@ -5554,7 +5836,7 @@ function buildCreativeSlots(
   const fallbackAssets: CreativeAsset[] = [];
   for (const asset of sorted) {
     const index = creativeImageIndex(asset, 0);
-    if (index >= 1 && index <= CREATIVE_GENERATION_LIMIT && !assetsByIndex.has(index)) {
+    if (index >= 1 && index <= KEYFRAME_TOTAL_IMAGES && !assetsByIndex.has(index)) {
       assetsByIndex.set(index, asset);
     } else {
       fallbackAssets.push(asset);
@@ -5564,7 +5846,7 @@ function buildCreativeSlots(
   const usedIds = new Set<string>();
   const slots: CreativeGenerationSlot[] = [];
 
-  for (let index = 1; index <= CREATIVE_GENERATION_LIMIT; index += 1) {
+  for (let index = 1; index <= KEYFRAME_TOTAL_IMAGES; index += 1) {
     const indexedAsset = assetsByIndex.get(index);
     const fallbackAsset = fallbackAssets.find((asset) => !usedIds.has(asset.id));
     const asset = indexedAsset ?? fallbackAsset;
@@ -5591,6 +5873,81 @@ function syncCreativeSlotsWithAssets(
   });
 }
 
+type CreativeGenerationPlan = {
+  count: number;
+  size: string;
+  generationMode: "standard" | "video_keyframe_variants";
+  isKeyframeVariant: boolean;
+  variantCount?: number;
+  framesPerVariant?: number;
+  videoDurationSeconds?: number;
+};
+
+type KeyframeVariantGroup = {
+  group: number;
+  slots: CreativeGenerationSlot[];
+  assets: CreativeAsset[];
+  complete: boolean;
+};
+
+function creativeGenerationPlan(
+  durationSeconds: number,
+  aspectRatio: string,
+): CreativeGenerationPlan {
+  if (durationSeconds === 12) {
+    return {
+      count: KEYFRAME_TOTAL_IMAGES,
+      size: aspectRatio || "9:16",
+      generationMode: "video_keyframe_variants",
+      isKeyframeVariant: true,
+      variantCount: KEYFRAME_VARIANT_COUNT,
+      framesPerVariant: KEYFRAME_FRAMES_PER_VARIANT,
+      videoDurationSeconds: durationSeconds,
+    };
+  }
+  return {
+    count: CREATIVE_GENERATION_LIMIT,
+    size: "1:1",
+    generationMode: "standard",
+    isKeyframeVariant: false,
+  };
+}
+
+function buildKeyframeVariantGroups(slots: CreativeGenerationSlot[]): KeyframeVariantGroup[] {
+  const groups = new Map<number, CreativeGenerationSlot[]>();
+  for (const slot of slots) {
+    if (!slot.asset || !isKeyframeVariantAsset(slot.asset)) continue;
+    const group = creativeKeyframeGroup(slot.asset);
+    if (!group) continue;
+    groups.set(group, [...(groups.get(group) ?? []), slot]);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([group, groupSlots]) => {
+      const sortedSlots = groupSlots
+        .slice()
+        .sort((left, right) => creativeKeyframePosition(left.asset) - creativeKeyframePosition(right.asset));
+      const assets = sortedSlots.map((slot) => slot.asset).filter((asset): asset is CreativeAsset => Boolean(asset));
+      return {
+        group,
+        slots: sortedSlots,
+        assets,
+        complete: assets.length >= KEYFRAME_FRAMES_PER_VARIANT,
+      };
+    });
+}
+
+function firstCompleteKeyframeGroupIds(assets: CreativeAsset[]): string[] {
+  const groups = buildKeyframeVariantGroups(
+    assets.map((asset) => ({
+      index: creativeImageIndex(asset, 0),
+      status: "done" as const,
+      asset,
+    })),
+  );
+  return groups.find((group) => group.complete)?.assets.map((asset) => asset.id) ?? [];
+}
+
 function creativeImageIndex(asset: CreativeAsset, fallback: number): number {
   const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
   const rawIndex = metadata.image_index;
@@ -5601,6 +5958,32 @@ function creativeImageIndex(asset: CreativeAsset, fallback: number): number {
         ? Number.parseInt(rawIndex, 10)
         : Number.NaN;
   return Number.isFinite(index) && index > 0 ? index : fallback;
+}
+
+function isKeyframeVariantAsset(asset: CreativeAsset): boolean {
+  const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
+  return metadata.generation_mode === "video_keyframe_variants";
+}
+
+function creativeKeyframeGroup(asset: CreativeAsset): number {
+  const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
+  return numericMetadataValue(metadata.keyframe_group);
+}
+
+function creativeKeyframePosition(asset?: CreativeAsset): number {
+  if (!asset) return Number.MAX_SAFE_INTEGER;
+  const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
+  return numericMetadataValue(metadata.keyframe_position) || Number.MAX_SAFE_INTEGER;
+}
+
+function numericMetadataValue(value: unknown): number {
+  const numberValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : 0;
 }
 
 function adGenerationCampaignId(job: AdGenerationJob): string | null {
@@ -5845,8 +6228,8 @@ function operationProgressText(
     topics: { title: "正在生成选题", estimate: "预计 20-60 秒" },
     copy: { title: "正在生成文案", estimate: "预计 15-45 秒" },
     creatives: { title: "正在生成图片", estimate: "预计 30-90 秒" },
-    "video-storyboard": { title: "正在生成视频脚本", estimate: "预计 20-60 秒" },
-    "video-storyboard-rewrite": { title: "正在改写视频脚本", estimate: "预计 20-60 秒" },
+    "video-storyboard": { title: "正在生成创意脚本", estimate: "预计 20-60 秒" },
+    "video-storyboard-rewrite": { title: "正在改写创意脚本", estimate: "预计 20-60 秒" },
     video: { title: "正在提交视频生成", estimate: "预计 10-30 秒" },
     "save-final-payload": { title: "正在保存预审包", estimate: "预计几秒" },
     "confirm-return": { title: "正在确认回传", estimate: "预计几秒" },
@@ -5938,6 +6321,15 @@ function formatDate(value: string | null): string {
 
 function shortId(value: string): string {
   return value.slice(0, 8);
+}
+
+function preferredModelId(
+  current: string,
+  options: ModelOption[],
+  defaultModelId?: string | null,
+): string {
+  if (current && options.some((option) => option.id === current)) return current;
+  return defaultModelId || options.find((option) => option.is_default)?.id || options[0]?.id || "";
 }
 
 export default App;

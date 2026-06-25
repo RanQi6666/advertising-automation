@@ -64,6 +64,7 @@ class LLMProvider(Protocol):
         size: str,
         feedback: str | None = None,
         source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         """Condense copy into image-by-image creative briefs."""
 

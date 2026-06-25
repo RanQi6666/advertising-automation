@@ -48,6 +48,7 @@ async def regenerate_creative(
         creative_id=creative_id,
         feedback=payload.feedback,
         size=payload.size,
+        image_model_id=payload.model_id,
     )
 
 

@@ -475,17 +475,23 @@ async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_outp
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def risky_generate_copy(**_kwargs):
-        return CopyDraftCandidate(
-            body="Free cash casino jackpot",
-            primary_text="Free cash casino jackpot",
-            headline="Free casino cash",
-            description="Claim free cash now",
-            cta="Learn More",
-        )
-
     service = MaterialGenerationService()
-    monkeypatch.setattr(service.copywriting.llm, "generate_copy", risky_generate_copy)
+
+    class RiskyCopyProvider:
+        async def generate_copy(self, **_kwargs):
+            return CopyDraftCandidate(
+                body="Free cash casino jackpot",
+                primary_text="Free cash casino jackpot",
+                headline="Free casino cash",
+                description="Claim free cash now",
+                cta="Learn More",
+            )
+
+    monkeypatch.setattr(
+        service.copywriting,
+        "llm_for_model",
+        lambda _model_id: (RiskyCopyProvider(), service.copywriting.settings),
+    )
     monkeypatch.setattr(
         material_generation_endpoint,
         "_material_generation_service",

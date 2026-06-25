@@ -290,6 +290,7 @@ class OpenAILLMProvider:
         size: str,
         feedback: str | None = None,
         source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         target_language = build_target_language_context(draft_metadata=draft.metadata_json)
         data = await self._json_completion(
@@ -312,7 +313,15 @@ class OpenAILLMProvider:
                 "language. If revision_feedback and source_asset are provided, generate "
                 "a revised version for that single image: preserve useful continuity from "
                 "the source image brief, apply the operator feedback as mandatory, and "
-                "avoid repeating the rejected visual problem.\n\n"
+                "avoid repeating the rejected visual problem. If storyboard_context is "
+                "provided, treat it as the primary visual plan: align each image brief to "
+                "the matching scene order, preserve the scene's visual intent, subtitle, "
+                "and motion, and create still images that can serve as first/last frame "
+                "references for the video. If storyboard_context.keyframe_plan.mode is "
+                "video_keyframe_variants, create paired variants: each group has one "
+                "first-frame hook image and one last-frame resolution image for the same "
+                "12-second video idea. Make each pair visually coherent while keeping the "
+                "three groups distinct enough for an operator to choose between.\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -325,6 +334,9 @@ class OpenAILLMProvider:
                     "target_language": target_language,
                     "revision_feedback": feedback,
                     "source_asset": _image_source_asset_context(source_asset),
+                    "storyboard_context": _compact_image_storyboard_context(
+                        storyboard_context
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -1177,6 +1189,52 @@ def _image_source_asset_context(asset: CreativeAsset | None) -> dict[str, Any] |
         "size": asset.size,
         "status": asset.status,
     }
+
+
+def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_scenes = value.get("storyboard")
+    scenes = raw_scenes if isinstance(raw_scenes, list) else []
+    compact_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes[:8], start=1):
+        if not isinstance(scene, dict):
+            continue
+        compact_scenes.append(
+            {
+                "scene_index": _coerce_int(scene.get("scene_index"), index),
+                "visual": _truncate(_coerce_optional_text(scene.get("visual")), 700),
+                "subtitle": _truncate(_coerce_optional_text(scene.get("subtitle")), 180),
+                "motion": _truncate(_coerce_optional_text(scene.get("motion")), 240),
+                "voiceover": _truncate(_coerce_optional_text(scene.get("voiceover")), 300),
+            }
+        )
+
+    storyboard_text = _truncate(_coerce_optional_text(value.get("storyboard_text")), 4000)
+    keyframe_plan = value.get("keyframe_plan")
+    compact_keyframe_plan = keyframe_plan if isinstance(keyframe_plan, dict) else None
+    if not compact_scenes and not storyboard_text and not compact_keyframe_plan:
+        return None
+    context = {
+        "scenes": [
+            {key: item for key, item in scene.items() if item not in (None, "", [])}
+            for scene in compact_scenes
+        ],
+        "storyboard_text": storyboard_text,
+    }
+    if compact_keyframe_plan:
+        context["keyframe_plan"] = {
+            key: compact_keyframe_plan.get(key)
+            for key in (
+                "mode",
+                "variant_count",
+                "frames_per_variant",
+                "video_duration_seconds",
+                "total_images",
+            )
+            if compact_keyframe_plan.get(key) not in (None, "", [])
+        }
+    return context
 
 
 def _coerce_text(value: Any) -> str:

@@ -27,6 +27,7 @@ from backend.app.services.creative_asset_urls import (
 )
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
+from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
 
@@ -47,6 +48,10 @@ class VideoService:
         if self._llm is None:
             self._llm = get_llm_provider(self.settings)
         return self._llm
+
+    def _llm_for_model(self, model_id: str | None):
+        llm_settings = settings_for_text_model(self.settings, model_id)
+        return get_llm_provider(llm_settings), llm_settings
 
     @property
     def video_provider(self):
@@ -73,7 +78,8 @@ class VideoService:
                 campaign_id=payload.campaign_id,
             ),
         }
-        storyboard = await self.llm.generate_video_storyboard(
+        llm, llm_settings = self._llm_for_model(payload.model_id)
+        storyboard = await llm.generate_video_storyboard(
             campaign=campaign,  # type: ignore[arg-type]
             draft=draft,  # type: ignore[arg-type]
             assets=assets,  # type: ignore[arg-type]
@@ -95,8 +101,8 @@ class VideoService:
             metadata_json={
                 **payload.metadata_json,
                 "rationale": storyboard.rationale,
-                "provider": self.settings.llm_provider,
-                "model": self.settings.llm_model,
+                "provider": llm_settings.llm_provider,
+                "model": effective_text_model(llm_settings),
                 "instructions": payload.instructions,
             },
         )
@@ -168,8 +174,9 @@ class VideoService:
 
         full_text = ""
         try:
+            llm, _llm_settings = self._llm_for_model(payload.model_id)
             async for event in _stream_text_with_heartbeat(
-                self.llm.stream_video_storyboard_text(
+                llm.stream_video_storyboard_text(
                     campaign=campaign,  # type: ignore[arg-type]
                     draft=draft,  # type: ignore[arg-type]
                     assets=assets,  # type: ignore[arg-type]
@@ -219,7 +226,8 @@ class VideoService:
                 campaign_id=payload.campaign_id,
             ),
         }
-        storyboard = await self.llm.revise_video_storyboard(
+        llm, llm_settings = self._llm_for_model(payload.model_id)
+        storyboard = await llm.revise_video_storyboard(
             campaign=campaign,  # type: ignore[arg-type]
             draft=draft,  # type: ignore[arg-type]
             assets=assets,  # type: ignore[arg-type]
@@ -243,8 +251,8 @@ class VideoService:
             metadata_json={
                 **payload.metadata_json,
                 "rationale": storyboard.rationale,
-                "provider": self.settings.llm_provider,
-                "model": self.settings.llm_model,
+                "provider": llm_settings.llm_provider,
+                "model": effective_text_model(llm_settings),
                 "revision_feedback": feedback,
             },
         )
@@ -284,8 +292,9 @@ class VideoService:
 
         full_text = ""
         try:
+            llm, _llm_settings = self._llm_for_model(payload.model_id)
             async for event in _stream_text_with_heartbeat(
-                self.llm.stream_video_storyboard_revision_text(
+                llm.stream_video_storyboard_revision_text(
                     campaign=campaign,  # type: ignore[arg-type]
                     draft=draft,  # type: ignore[arg-type]
                     assets=assets,  # type: ignore[arg-type]
@@ -458,7 +467,9 @@ class VideoService:
         draft_id: str | None,
         assets: list[CreativeAsset],
     ) -> CopyDraft | None:
-        effective_draft_id = draft_id or assets[0].draft_id
+        effective_draft_id = draft_id or (assets[0].draft_id if assets else None)
+        if not effective_draft_id:
+            raise AppError("Please select a copy draft before generating a video storyboard.")
         return await get_required(session, CopyDraft, effective_draft_id)  # type: ignore[return-value]
 
     async def _landing_page_context(

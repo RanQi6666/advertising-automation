@@ -16,6 +16,7 @@ from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.services.creative_asset_urls import repair_creative_asset_urls
 from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.model_selection import effective_image_model, settings_for_image_model
 from backend.app.services.utils import get_required
 
 STREAM_HEARTBEAT_SECONDS = 5.0
@@ -40,6 +41,10 @@ class CreativeService:
             size=payload.size,
             target_index=payload.target_index,
             extra_metadata={"streamed": False},
+            image_model_id=payload.model_id,
+            storyboard=payload.storyboard,
+            storyboard_text=payload.storyboard_text,
+            keyframe_plan=_keyframe_plan(payload),
         )
         for asset in assets:
             session.add(asset)
@@ -57,16 +62,24 @@ class CreativeService:
         size: str,
         extra_metadata: dict,
         target_index: int | None = None,
+        image_model_id: str | None = None,
+        storyboard: list[dict] | None = None,
+        storyboard_text: str | None = None,
+        keyframe_plan: dict | None = None,
     ) -> list[CreativeAsset]:
         draft = await get_required(session, CopyDraft, draft_id)
+        storyboard_context = _storyboard_context(storyboard or [], storyboard_text, keyframe_plan)
         briefs = await self.llm.generate_image_briefs(
             draft=draft,  # type: ignore[arg-type]
             count=count,
             size=size,
+            storyboard_context=storyboard_context,
         )
         slot_indices = [target_index] if target_index is not None else list(range(1, count + 1))
         briefs = _briefs_for_slots(briefs, slot_indices)
-        generated_images = await self.image_provider.generate_images(briefs)
+        image_settings = settings_for_image_model(self.settings, image_model_id)
+        image_provider = get_image_provider(image_settings)
+        generated_images = await image_provider.generate_images(briefs)
         assets: list[CreativeAsset] = []
         for brief, image in zip(briefs, generated_images, strict=False):
             asset = await self._asset_from_generated_image(
@@ -74,7 +87,13 @@ class CreativeService:
                 brief=brief,
                 image=image,
                 version=1,
-                extra_metadata=extra_metadata,
+                extra_metadata={
+                    **extra_metadata,
+                    **({"storyboard_context": storyboard_context} if storyboard_context else {}),
+                    **_keyframe_metadata(brief.image_index, keyframe_plan),
+                    "image_model": effective_image_model(image_settings),
+                    "image_provider": image_settings.image_provider,
+                },
             )
             assets.append(asset)
         return assets
@@ -86,6 +105,12 @@ class CreativeService:
     ) -> AsyncIterator[dict]:
         draft = await get_required(session, CopyDraft, payload.draft_id)
         slot_indices = _slot_indices(payload)
+        keyframe_plan = _keyframe_plan(payload)
+        storyboard_context = _storyboard_context(
+            payload.storyboard,
+            payload.storyboard_text,
+            keyframe_plan,
+        )
         yield {"type": "start", "limit": len(slot_indices), "indices": slot_indices}
         for index in slot_indices:
             yield {"type": "slot", "index": index}
@@ -96,6 +121,7 @@ class CreativeService:
                     draft=draft,  # type: ignore[arg-type]
                     count=len(slot_indices),
                     size=payload.size,
+                    storyboard_context=storyboard_context,
                 )
             )
             while True:
@@ -124,7 +150,13 @@ class CreativeService:
                     draft=draft,  # type: ignore[arg-type]
                     brief=brief,
                     version=1,
-                    extra_metadata={"streamed": True},
+                    extra_metadata=_creative_metadata(
+                        streamed=True,
+                        storyboard_context=storyboard_context,
+                        keyframe_plan=keyframe_plan,
+                        image_index=brief.image_index,
+                    ),
+                    image_model_id=payload.model_id,
                 )
             )
             for brief in briefs
@@ -171,6 +203,7 @@ class CreativeService:
         creative_id: str,
         feedback: str,
         size: str | None = None,
+        image_model_id: str | None = None,
     ) -> CreativeAsset:
         source_asset = await get_required(session, CreativeAsset, creative_id)
         draft = await get_required(session, CopyDraft, source_asset.draft_id)
@@ -193,10 +226,12 @@ class CreativeService:
             version=source_asset.version + 1,
             extra_metadata={
                 "streamed": False,
+                **_source_keyframe_metadata(source_asset),
                 "revision_feedback": feedback,
                 "source_creative_asset_id": source_asset.id,
                 "source_creative_version": source_asset.version,
             },
+            image_model_id=image_model_id,
         )
         if source_asset.status == CreativeStatus.GENERATED.value:
             source_asset.status = CreativeStatus.NEEDS_REVISION.value
@@ -229,6 +264,7 @@ class CreativeService:
         brief: ImageBrief,
         version: int,
         extra_metadata: dict,
+        image_model_id: str | None = None,
     ) -> tuple[int, CreativeAsset | None, str | None]:
         try:
             asset = await self._generate_asset_from_brief(
@@ -236,6 +272,7 @@ class CreativeService:
                 brief=brief,
                 version=version,
                 extra_metadata=extra_metadata,
+                image_model_id=image_model_id,
             )
             return brief.image_index, asset, None
         except Exception as exc:
@@ -247,8 +284,11 @@ class CreativeService:
         brief: ImageBrief,
         version: int,
         extra_metadata: dict,
+        image_model_id: str | None = None,
     ) -> CreativeAsset:
-        generated_images = await self.image_provider.generate_images([brief])
+        image_settings = settings_for_image_model(self.settings, image_model_id)
+        image_provider = get_image_provider(image_settings)
+        generated_images = await image_provider.generate_images([brief])
         if not generated_images:
             raise ProviderError("Image provider returned no generated image.")
         return await self._asset_from_generated_image(
@@ -256,7 +296,11 @@ class CreativeService:
             brief=brief,
             image=generated_images[0],
             version=version,
-            extra_metadata=extra_metadata,
+            extra_metadata={
+                **extra_metadata,
+                "image_model": effective_image_model(image_settings),
+                "image_provider": image_settings.image_provider,
+            },
         )
 
     async def _asset_from_generated_image(
@@ -319,6 +363,83 @@ def _briefs_for_slots(briefs: list[ImageBrief], slot_indices: list[int]) -> list
             )
         )
     return normalized
+
+
+def _storyboard_context(
+    storyboard: list[dict],
+    storyboard_text: str | None,
+    keyframe_plan: dict | None = None,
+) -> dict | None:
+    clean_scenes = [scene for scene in storyboard if isinstance(scene, dict)]
+    clean_text = (storyboard_text or "").strip()
+    if not clean_scenes and not clean_text and not keyframe_plan:
+        return None
+    context = {
+        "storyboard": clean_scenes[:10],
+        "storyboard_text": clean_text[:6000],
+    }
+    if keyframe_plan:
+        context["keyframe_plan"] = keyframe_plan
+    return context
+
+
+def _creative_metadata(
+    streamed: bool,
+    storyboard_context: dict | None = None,
+    keyframe_plan: dict | None = None,
+    image_index: int | None = None,
+) -> dict:
+    metadata = {"streamed": streamed}
+    if storyboard_context:
+        metadata["storyboard_context"] = storyboard_context
+    if image_index is not None:
+        metadata.update(_keyframe_metadata(image_index, keyframe_plan))
+    return metadata
+
+
+def _keyframe_plan(payload: CreativeGenerateRequest) -> dict | None:
+    if payload.generation_mode != "video_keyframe_variants":
+        return None
+    return {
+        "mode": payload.generation_mode,
+        "variant_count": payload.variant_count,
+        "frames_per_variant": payload.frames_per_variant,
+        "video_duration_seconds": payload.video_duration_seconds,
+        "total_images": payload.variant_count * payload.frames_per_variant,
+    }
+
+
+def _keyframe_metadata(image_index: int, keyframe_plan: dict | None) -> dict:
+    if not keyframe_plan:
+        return {}
+    frames_per_variant = int(keyframe_plan.get("frames_per_variant") or 2)
+    variant_count = int(keyframe_plan.get("variant_count") or 3)
+    group = ((image_index - 1) // frames_per_variant) + 1
+    position = ((image_index - 1) % frames_per_variant) + 1
+    role = "first_frame" if position == 1 else "last_frame"
+    return {
+        "generation_mode": keyframe_plan.get("mode"),
+        "keyframe_group": group,
+        "keyframe_role": role,
+        "keyframe_position": position,
+        "keyframe_group_size": frames_per_variant,
+        "keyframe_variant_count": variant_count,
+        "video_duration_seconds": keyframe_plan.get("video_duration_seconds"),
+    }
+
+
+def _source_keyframe_metadata(asset: CreativeAsset) -> dict:
+    metadata = asset.metadata_json if isinstance(asset.metadata_json, dict) else {}
+    keys = (
+        "generation_mode",
+        "keyframe_group",
+        "keyframe_role",
+        "keyframe_position",
+        "keyframe_group_size",
+        "keyframe_variant_count",
+        "video_duration_seconds",
+    )
+    return {key: metadata[key] for key in keys if key in metadata}
 
 
 def _asset_image_index(asset: CreativeAsset, default: int) -> int:

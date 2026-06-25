@@ -1,6 +1,7 @@
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.image.base import ImageProvider
+from backend.app.integrations.image.gateway_provider import GatewayImageProvider
 from backend.app.integrations.image.placeholder_provider import PlaceholderImageProvider
 from backend.app.integrations.image.volcengine_provider import VolcengineImageProvider
 
@@ -21,5 +22,29 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             model=settings.volcengine_image_model,
             provider_size=settings.volcengine_image_size,
             watermark=settings.volcengine_image_watermark,
+        )
+    if settings.image_provider == "gateway":
+        api_key = settings.model_gateway_api_key or settings.openai_api_key
+        base_url = settings.model_gateway_base_url or settings.openai_base_url
+        if not api_key:
+            raise ProviderError(
+                "MODEL_GATEWAY_API_KEY is required when IMAGE_PROVIDER=gateway."
+            )
+        if not base_url:
+            raise ProviderError(
+                "MODEL_GATEWAY_BASE_URL is required when IMAGE_PROVIDER=gateway."
+            )
+        if not settings.model_gateway_image_model:
+            raise ProviderError(
+                "MODEL_GATEWAY_IMAGE_MODEL is required when IMAGE_PROVIDER=gateway."
+            )
+        return GatewayImageProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=settings.model_gateway_image_model,
+            provider_size=settings.model_gateway_image_size,
+            response_format=settings.model_gateway_image_response_format,
+            extra_body=settings.model_gateway_image_extra_body,
+            storage_root=settings.local_storage_root,
         )
     raise ProviderError(f"Unsupported image provider: {settings.image_provider}")

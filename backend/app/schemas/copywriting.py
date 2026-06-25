@@ -6,11 +6,13 @@ from backend.app.schemas.common import TimestampedRead
 class CopyGenerateRequest(BaseModel):
     topic_id: str
     constraints: dict = Field(default_factory=dict)
+    model_id: str | None = Field(default=None, max_length=128)
 
 
 class CopyReviseRequest(BaseModel):
     feedback: str = Field(min_length=1)
     constraints: dict = Field(default_factory=dict)
+    model_id: str | None = Field(default=None, max_length=128)
 
 
 class CopyDraftRead(TimestampedRead):

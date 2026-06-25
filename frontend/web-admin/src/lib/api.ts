@@ -7,6 +7,7 @@ import type {
   CopyDraft,
   CreativeAsset,
   LandingPageSnapshot,
+  ModelOptions,
   ReviewTask,
   Topic,
   VideoAsset,
@@ -250,6 +251,7 @@ export const api = {
   baseUrl: API_BASE_URL,
 
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
+  getModelOptions: () => request<ModelOptions>("/model-options"),
   listAdGenerationJobs: (limit = 50) =>
     request<AdGenerationJob[]>(`/integrations/publishing/ad-generation/jobs?limit=${limit}`),
   listAdPerformanceAnalyses: (limit = 50) =>
@@ -356,17 +358,24 @@ export const api = {
   listLandingPageSnapshots: (campaignId: string) =>
     request<LandingPageSnapshot[]>(`/campaigns/${campaignId}/landing-page/snapshots?limit=10`),
 
-  generateTopics: (campaignId: string, limit = 3, signals: Record<string, unknown> = {}) =>
+  generateTopics: (
+    campaignId: string,
+    limit = 3,
+    signals: Record<string, unknown> = {},
+    modelId?: string | null,
+  ) =>
     post<Topic[]>("/topics/generate", {
       campaign_id: campaignId,
       limit,
       signals,
+      ...(modelId ? { model_id: modelId } : {}),
     }),
   generateTopicsStream: (
     campaignId: string,
     limit = 3,
     signals: Record<string, unknown> = {},
     onEvent: (event: TopicStreamEvent) => void,
+    modelId?: string | null,
   ) =>
     streamNdjson(
       "/topics/generate/stream",
@@ -374,6 +383,7 @@ export const api = {
         campaign_id: campaignId,
         limit,
         signals,
+        ...(modelId ? { model_id: modelId } : {}),
       },
       onEvent,
     ),
@@ -381,23 +391,45 @@ export const api = {
   selectTopic: (topicId: string) => post<Topic>(`/topics/${topicId}/select`),
   rejectTopic: (topicId: string) => post<Topic>(`/topics/${topicId}/reject`),
 
-  generateCopy: (topicId: string, cta = "Learn More") =>
+  generateCopy: (topicId: string, cta = "Learn More", modelId?: string | null) =>
     post<CopyDraft>("/copywriting/generate", {
       topic_id: topicId,
       constraints: { cta },
+      ...(modelId ? { model_id: modelId } : {}),
     }),
-  reviseCopy: (draftId: string, feedback: string) =>
+  reviseCopy: (draftId: string, feedback: string, modelId?: string | null) =>
     post<CopyDraft>(`/copywriting/${draftId}/revise`, {
       feedback,
       constraints: {},
+      ...(modelId ? { model_id: modelId } : {}),
     }),
   listDrafts: (campaignId: string) => request<CopyDraft[]>(`/campaigns/${campaignId}/drafts?limit=20`),
 
-  generateCreatives: (draftId: string, count = 3, size = "1:1") =>
+  generateCreatives: (
+    draftId: string,
+    count = 3,
+    size = "1:1",
+    options: {
+      modelId?: string | null;
+      storyboard?: Record<string, unknown>[];
+      storyboardText?: string | null;
+      generationMode?: "standard" | "video_keyframe_variants";
+      variantCount?: number;
+      framesPerVariant?: number;
+      videoDurationSeconds?: number | null;
+    } = {},
+  ) =>
     post<CreativeAsset[]>("/creatives/generate", {
       draft_id: draftId,
       count,
       size,
+      ...(options.modelId ? { model_id: options.modelId } : {}),
+      ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
+      ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
+      ...(options.generationMode ? { generation_mode: options.generationMode } : {}),
+      ...(options.variantCount ? { variant_count: options.variantCount } : {}),
+      ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
+      ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
     }),
   generateCreativesStream: (
     draftId: string,
@@ -405,6 +437,15 @@ export const api = {
     size = "1:1",
     onEvent: (event: CreativeStreamEvent) => void,
     targetIndex?: number,
+    options: {
+      modelId?: string | null;
+      storyboard?: Record<string, unknown>[];
+      storyboardText?: string | null;
+      generationMode?: "standard" | "video_keyframe_variants";
+      variantCount?: number;
+      framesPerVariant?: number;
+      videoDurationSeconds?: number | null;
+    } = {},
   ) =>
     streamNdjson<CreativeStreamEvent>(
       "/creatives/generate/stream",
@@ -413,13 +454,26 @@ export const api = {
         count,
         size,
         ...(targetIndex ? { target_index: targetIndex } : {}),
+        ...(options.modelId ? { model_id: options.modelId } : {}),
+        ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
+        ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
+        ...(options.generationMode ? { generation_mode: options.generationMode } : {}),
+        ...(options.variantCount ? { variant_count: options.variantCount } : {}),
+        ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
+        ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
       },
       onEvent,
     ),
-  regenerateCreative: (creativeId: string, feedback: string, size?: string) =>
+  regenerateCreative: (
+    creativeId: string,
+    feedback: string,
+    size?: string,
+    modelId?: string | null,
+  ) =>
     post<CreativeAsset>(`/creatives/${creativeId}/regenerate`, {
       feedback,
       ...(size ? { size } : {}),
+      ...(modelId ? { model_id: modelId } : {}),
     }),
   listCreatives: (campaignId: string) =>
     request<CreativeAsset[]>(`/campaigns/${campaignId}/creatives?limit=20`),
@@ -431,6 +485,7 @@ export const api = {
     durationSeconds: number,
     aspectRatio: string,
     instructions?: string,
+    modelId?: string | null,
   ) =>
     post<VideoStoryboardResponse>("/videos/storyboard", {
       campaign_id: campaignId,
@@ -439,6 +494,7 @@ export const api = {
       duration_seconds: durationSeconds,
       aspect_ratio: aspectRatio,
       ...(instructions?.trim() ? { instructions } : {}),
+      ...(modelId ? { model_id: modelId } : {}),
     }),
   streamVideoStoryboard: (
     campaignId: string,
@@ -448,6 +504,7 @@ export const api = {
     aspectRatio: string,
     instructions: string | undefined,
     onEvent: (event: VideoStoryboardTextStreamEvent) => void,
+    modelId?: string | null,
   ) =>
     streamSse<VideoStoryboardTextStreamEvent>(
       "/videos/storyboard/stream",
@@ -458,6 +515,7 @@ export const api = {
         duration_seconds: durationSeconds,
         aspect_ratio: aspectRatio,
         ...(instructions?.trim() ? { instructions } : {}),
+        ...(modelId ? { model_id: modelId } : {}),
       },
       onEvent,
     ),
@@ -470,6 +528,7 @@ export const api = {
     storyboard: Record<string, unknown>[];
     storyboardText: string;
     feedback: string;
+    modelId?: string | null;
   }) =>
     post<VideoStoryboardResponse>("/videos/storyboard/rewrite", {
       campaign_id: payload.campaignId,
@@ -480,6 +539,7 @@ export const api = {
       storyboard: payload.storyboard,
       storyboard_text: payload.storyboardText,
       feedback: payload.feedback,
+      ...(payload.modelId ? { model_id: payload.modelId } : {}),
     }),
   streamRewriteVideoStoryboard: (
     payload: {
@@ -491,6 +551,7 @@ export const api = {
       storyboard: Record<string, unknown>[];
       storyboardText: string;
       feedback: string;
+      modelId?: string | null;
     },
     onEvent: (event: VideoStoryboardTextStreamEvent) => void,
   ) =>
@@ -505,6 +566,7 @@ export const api = {
         storyboard: payload.storyboard,
         storyboard_text: payload.storyboardText,
         feedback: payload.feedback,
+        ...(payload.modelId ? { model_id: payload.modelId } : {}),
       },
       onEvent,
     ),

@@ -2,16 +2,23 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.app.core.config import Settings
+from backend.app.core.config import Settings, get_settings
+from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
-from backend.app.schemas.video import VideoGenerateRequest, VideoStoryboardRewriteRequest
+from backend.app.schemas.video import (
+    VideoGenerateRequest,
+    VideoStoryboardGenerateRequest,
+    VideoStoryboardRewriteRequest,
+)
 from backend.app.services import video_service
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
+    VideoService,
     _redact_provider_request_payload,
     _resolve_video_source_image_url,
     _storyboard_to_prompt,
@@ -150,6 +157,55 @@ def test_video_generate_request_accepts_storyboard() -> None:
 
     assert payload.storyboard[0]["scene_index"] == 1
     assert payload.storyboard[0]["visual"] == "Open with the app benefit."
+
+
+@pytest.mark.asyncio
+async def test_video_service_generates_storyboard_from_draft_without_reference_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    get_settings.cache_clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-1",
+            name="India TV campaign",
+            product_name="India TV",
+            audience_description="Men 25-45",
+            metadata_json={},
+        )
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Show live TV clearly in a home scene.",
+            headline="Live TV at home",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        storyboard = await VideoService().generate_storyboard(
+            session,
+            VideoStoryboardGenerateRequest(
+                campaign_id=campaign.id,
+                creative_asset_ids=[],
+                draft_id=draft.id,
+                duration_seconds=12,
+                aspect_ratio="9:16",
+            ),
+        )
+
+    assert storyboard.draft_id == draft.id
+    assert storyboard.creative_asset_ids == []
+    assert storyboard.storyboard
+
+    get_settings.cache_clear()
+    await engine.dispose()
 
 
 def test_video_storyboard_prompt_includes_brand_safety_visual_bans() -> None:

@@ -326,6 +326,27 @@ input:focus-visible {
   margin: 0 14px 14px;
 }
 
+.model-action-row {
+  align-items: flex-end;
+}
+
+.model-select-control {
+  display: grid;
+  gap: 5px;
+  min-width: min(210px, 100%);
+}
+
+.model-select-control span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.select.model-select {
+  width: 100%;
+  max-width: 240px;
+}
+
 .icon-button,
 .primary-button,
 .secondary-button {
@@ -4114,6 +4135,55 @@ input:focus-visible {
 
 .creative-slot-grid {
   align-items: start;
+}
+
+.keyframe-variant-grid {
+  display: grid;
+  gap: 14px;
+  padding: 12px;
+}
+
+.keyframe-variant-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px;
+}
+
+.keyframe-variant-card.selected {
+  border-color: rgb(15 118 110 / 0.44);
+  background: #f8fffd;
+  box-shadow: 0 14px 28px rgb(15 118 110 / 0.08);
+}
+
+.keyframe-variant-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.keyframe-variant-head strong {
+  display: block;
+  color: #102326;
+  font-size: 14px;
+  font-weight: 860;
+}
+
+.keyframe-variant-head span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.keyframe-pair-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0;
 }
 
 .asset-card {

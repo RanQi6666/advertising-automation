@@ -17,6 +17,21 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
             model=settings.llm_model,
             base_url=settings.openai_base_url,
         )
+    if settings.llm_provider == "gateway":
+        api_key = settings.model_gateway_api_key or settings.openai_api_key
+        base_url = settings.model_gateway_base_url or settings.openai_base_url
+        model = settings.model_gateway_text_model or settings.llm_model
+        if not api_key:
+            raise ProviderError("MODEL_GATEWAY_API_KEY is required when LLM_PROVIDER=gateway.")
+        if not base_url:
+            raise ProviderError("MODEL_GATEWAY_BASE_URL is required when LLM_PROVIDER=gateway.")
+        if not model:
+            raise ProviderError("MODEL_GATEWAY_TEXT_MODEL is required when LLM_PROVIDER=gateway.")
+        return OpenAILLMProvider(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
     if settings.llm_provider == "volcengine":
         if not settings.volcengine_api_key:
             raise ProviderError("VOLCENGINE_API_KEY is required when LLM_PROVIDER=volcengine.")

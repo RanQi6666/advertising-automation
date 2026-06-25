@@ -11,6 +11,7 @@ from backend.app.api.v1.endpoints import (
     landing_pages,
     legal,
     material_generation,
+    model_options,
     reviews,
     topics,
     videos,
@@ -60,6 +61,11 @@ api_router.include_router(
 api_router.include_router(videos.router, tags=["videos"], dependencies=protected_dependencies)
 api_router.include_router(reviews.router, tags=["reviews"], dependencies=protected_dependencies)
 api_router.include_router(legal.router, tags=["legal"], dependencies=protected_dependencies)
+api_router.include_router(
+    model_options.router,
+    tags=["model-options"],
+    dependencies=protected_dependencies,
+)
 api_router.include_router(
     material_generation.router,
     tags=["material-generation"],

@@ -7,6 +7,7 @@ class TopicGenerateRequest(BaseModel):
     campaign_id: str
     limit: int = Field(default=3, ge=1, le=3)
     signals: dict = Field(default_factory=dict)
+    model_id: str | None = Field(default=None, max_length=128)
 
 
 class TopicRead(TimestampedRead):

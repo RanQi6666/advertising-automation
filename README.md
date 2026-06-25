@@ -11,8 +11,8 @@
 - PostgreSQL + SQLAlchemy async 持久化，Alembic 管理数据库迁移。
 - 工单字段识别、人工确认、落地页记录、选题、文案、图片、视频和最终审核。
 - 外部投放系统集成任务：创建任务、返回 `review_url`、查询任务、查询最终结果、确认后可回跳或回调。
-- LLM 适配器：`mock`、`openai`、`volcengine`。
-- 图片适配器：`placeholder`、`volcengine`。
+- LLM 适配器：`mock`、`openai`、`volcengine`、`gateway`。
+- 图片适配器：`placeholder`、`volcengine`、`gateway`。
 - 视频适配器：`placeholder`、`volcengine`。
 - 生成素材当前落本机磁盘，并通过后端 `/storage/...` 静态路径暴露。
 
@@ -148,6 +148,24 @@ VOLCENGINE_VIDEO_MODEL=your_seedance_endpoint_id
 
 `VOLCENGINE_VIDEO_API_KEY` 可以单独配置；为空时视频生成会复用 `VOLCENGINE_API_KEY` 或 `ARK_API_KEY`。当前素材持久化只实现了 `OBJECT_STORAGE_PROVIDER=local`。
 
+接入 OpenAI 兼容的本地中转平台时：
+
+```env
+LLM_PROVIDER=gateway
+IMAGE_PROVIDER=gateway
+MODEL_GATEWAY_API_KEY=your_gateway_key
+MODEL_GATEWAY_BASE_URL=http://127.0.0.1:3000/v1
+MODEL_GATEWAY_TEXT_MODEL=your_text_model
+MODEL_GATEWAY_IMAGE_MODEL=your_image_model
+MODEL_GATEWAY_TEXT_MODELS=your_text_model,your_other_text_model
+MODEL_GATEWAY_IMAGE_MODELS=your_image_model,your_other_image_model
+MODEL_GATEWAY_IMAGE_SIZE=1024x1024
+MODEL_GATEWAY_IMAGE_RESPONSE_FORMAT=
+```
+
+`MODEL_GATEWAY_IMAGE_RESPONSE_FORMAT` 默认留空。如果中转平台要求显式指定，可以填 `url` 或 `b64_json`。视频生成目前仍由 `VIDEO_PROVIDER` 决定，不会随着图片中转配置自动切换。
+`MODEL_GATEWAY_TEXT_MODELS` 和 `MODEL_GATEWAY_IMAGE_MODELS` 用逗号分隔，前端会把它们显示为选题、文案、图片的模型下拉框。
+
 前端本地开发默认请求：
 
 ```env
@@ -179,9 +197,9 @@ Copy-Item .env.production.example .env.production
 - `CORS_ORIGINS`
 - `PUBLIC_BASE_URL`
 - `AD_GENERATION_REVIEW_BASE_URL`
-- `VOLCENGINE_API_KEY`
-- `VOLCENGINE_MODEL`
-- `VOLCENGINE_VIDEO_MODEL`
+- `VOLCENGINE_API_KEY` 或 `MODEL_GATEWAY_API_KEY`
+- `VOLCENGINE_MODEL` 或 `MODEL_GATEWAY_TEXT_MODEL`
+- `VOLCENGINE_VIDEO_MODEL`（如果 `VIDEO_PROVIDER=volcengine`）
 
 启动：
 
