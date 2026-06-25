@@ -21,3 +21,4 @@ artifacts/*
 node_modules/
 frontend/web-admin/dist/
 AGENTS.md
+.worktrees/
