@@ -293,10 +293,15 @@ async def test_material_generation_provider_error_uses_external_error_body(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def raise_provider_error(_session, _payload):
-        raise ProviderError("provider unavailable")
+    class ProviderErrorService:
+        async def generate_copy(self, _session, _payload):
+            raise ProviderError("provider unavailable")
 
-    monkeypatch.setattr(material_generation_endpoint.service, "generate_copy", raise_provider_error)
+    monkeypatch.setattr(
+        material_generation_endpoint,
+        "_material_generation_service",
+        ProviderErrorService,
+    )
     client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
     try:
         response = client.post(
@@ -325,10 +330,15 @@ async def test_material_generation_app_error_uses_external_error_body(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def raise_app_error(_session, _payload):
-        raise AppError("bad app state")
+    class AppErrorService:
+        async def generate_copy(self, _session, _payload):
+            raise AppError("bad app state")
 
-    monkeypatch.setattr(material_generation_endpoint.service, "generate_copy", raise_app_error)
+    monkeypatch.setattr(
+        material_generation_endpoint,
+        "_material_generation_service",
+        AppErrorService,
+    )
     client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
     try:
         response = client.post(
@@ -474,10 +484,12 @@ async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_outp
             cta="Learn More",
         )
 
+    service = MaterialGenerationService()
+    monkeypatch.setattr(service.copywriting.llm, "generate_copy", risky_generate_copy)
     monkeypatch.setattr(
-        material_generation_endpoint.service.copywriting.llm,
-        "generate_copy",
-        risky_generate_copy,
+        material_generation_endpoint,
+        "_material_generation_service",
+        lambda: service,
     )
     client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
     try:
@@ -556,7 +568,6 @@ async def test_material_copy_generation_does_not_initialize_image_provider(
     monkeypatch.delenv("VOLCENGINE_API_KEY", raising=False)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     get_settings.cache_clear()
-    monkeypatch.setattr(material_generation_endpoint, "service", MaterialGenerationService())
 
     client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
     try:

@@ -19,8 +19,6 @@ from backend.app.schemas.material_generation import (
 )
 from backend.app.services.material_generation_service import MaterialGenerationService
 
-service = MaterialGenerationService()
-
 
 class MaterialGenerationRoute(APIRoute):
     def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
@@ -60,7 +58,7 @@ router = APIRouter(
 @router.post("/copy", response_model=MaterialGenerationEnvelope)
 async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession):
     try:
-        return await service.generate_copy(session, payload)
+        return await _material_generation_service().generate_copy(session, payload)
     except MaterialGenerationAPIError as exc:
         return _material_error_response(exc)
     except ProviderError as exc:
@@ -72,7 +70,7 @@ async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession
 @router.post("/images", response_model=MaterialGenerationEnvelope)
 async def generate_images(payload: MaterialImageGenerateRequest, session: DbSession):
     try:
-        return await service.generate_images(session, payload)
+        return await _material_generation_service().generate_images(session, payload)
     except MaterialGenerationAPIError as exc:
         return _material_error_response(exc)
     except ProviderError as exc:
@@ -88,7 +86,7 @@ async def generate_images(payload: MaterialImageGenerateRequest, session: DbSess
 )
 async def create_video(payload: MaterialVideoGenerateRequest, session: DbSession):
     try:
-        result = await service.create_video(session, payload)
+        result = await _material_generation_service().create_video(session, payload)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=result.model_dump(),
@@ -104,13 +102,17 @@ async def create_video(payload: MaterialVideoGenerateRequest, session: DbSession
 @router.get("/jobs/{job_id}", response_model=MaterialGenerationEnvelope)
 async def get_job(job_id: str, session: DbSession):
     try:
-        return await service.get_video_job(session, job_id)
+        return await _material_generation_service().get_video_job(session, job_id)
     except MaterialGenerationAPIError as exc:
         return _material_error_response(exc)
     except ProviderError as exc:
         return _provider_error_response(exc)
     except AppError as exc:
         return _app_error_response(exc)
+
+
+def _material_generation_service() -> MaterialGenerationService:
+    return MaterialGenerationService()
 
 
 def _material_error_response(exc: MaterialGenerationAPIError) -> JSONResponse:
