@@ -4,6 +4,7 @@ from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -22,7 +23,6 @@ from backend.app.schemas.material_generation import (
     MaterialImageGenerateRequest,
     MaterialVideoGenerateRequest,
 )
-from backend.app.schemas.video import VideoGenerateRequest
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
@@ -191,32 +191,44 @@ class MaterialGenerationService:
                 )
                 session.add(asset)
                 source_assets.append(asset)
-            await session.commit()
-            for asset in source_assets:
-                await session.refresh(asset)
-        except MaterialGenerationAPIError:
-            await session.rollback()
-            raise
+            await session.flush()
 
-        video_service = self._video_service()
-        video = await video_service.create_video_job(
-            session,
-            VideoGenerateRequest(
+            video = VideoAsset(
                 campaign_id=campaign.id,
                 draft_id=draft.id,
-                creative_asset_ids=[asset.id for asset in source_assets],
+                source_asset_ids=[asset.id for asset in source_assets],
                 prompt=payload.prompt or payload.brief,
+                storyboard=[],
                 duration_seconds=payload.duration_seconds,
                 aspect_ratio=payload.aspect_ratio,
                 metadata_json={
                     "source": SOURCE,
                     "external_request_id": payload.external_request_id,
                     "material_type": "video",
+                    "implementation_status": "configured",
+                    "note": (
+                        "Video generation task is configured. "
+                        "Provider generation starts immediately."
+                    ),
                 },
-            ),
-        )
-        started = await video_service.start_video_generation(session, video.id)
-        return self._video_processing_response(started)
+            )
+            session.add(video)
+            await session.flush()
+
+            started = await self._video_service().start_video_generation(session, video.id)
+            return self._video_processing_response(started)
+        except MaterialGenerationAPIError:
+            await session.rollback()
+            raise
+        except ProviderError:
+            await session.rollback()
+            raise
+        except AppError:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     async def get_video_job(
         self,
@@ -360,8 +372,10 @@ class MaterialGenerationService:
                 and video.status
                 in {
                     VideoStatus.GENERATING.value,
+                    VideoStatus.REQUESTED.value,
                     VideoStatus.GENERATED.value,
                     VideoStatus.APPROVED.value,
+                    VideoStatus.FAILED.value,
                 }
             ):
                 return video

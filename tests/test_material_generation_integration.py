@@ -7,16 +7,22 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.api.v1.endpoints import material_generation as material_generation_endpoint
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.enums import VideoStatus
 from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.session import get_session
+from backend.app.integrations.video.placeholder_provider import PlaceholderVideoProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import CopyDraftCandidate
+from backend.app.schemas.material_generation import MaterialVideoGenerateRequest
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.material_generation_service import MaterialGenerationService
+from backend.app.services.video_service import VideoService
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +66,76 @@ async def _client_with_db(tmp_path, monkeypatch: pytest.MonkeyPatch, token: str 
     app.dependency_overrides[get_session] = override_get_session
     client = TestClient(app)
     return client, engine, app
+
+
+async def _insert_video_job(
+    engine,
+    *,
+    external_request_id: str,
+    status: str,
+    url: str | None = None,
+    error_message: str | None = None,
+) -> str:
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        campaign = Campaign(
+            name="Demo App",
+            product_name="Demo App",
+            metadata_json={
+                "source": "external_material_generation",
+                "external_request_id": external_request_id,
+                "material_type": "video",
+            },
+        )
+        session.add(campaign)
+        await session.flush()
+
+        topic = ContentTopic(
+            campaign_id=campaign.id,
+            title="Demo App",
+            angle="Create a short video for daily use.",
+            source_data={
+                "source": "external_material_generation",
+                "external_request_id": external_request_id,
+                "material_type": "video",
+            },
+        )
+        session.add(topic)
+        await session.flush()
+
+        draft = CopyDraft(
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Create a short video for daily use.",
+            primary_text="Create a short video for daily use.",
+            headline="Demo App",
+            cta="Learn More",
+            model_name="test",
+            prompt_version="test",
+            metadata_json={
+                "source": "external_material_generation",
+                "external_request_id": external_request_id,
+                "material_type": "video",
+            },
+        )
+        session.add(draft)
+        await session.flush()
+
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            draft_id=draft.id,
+            source_asset_ids=[],
+            status=status,
+            url=url,
+            error_message=error_message,
+            metadata_json={
+                "source": "external_material_generation",
+                "external_request_id": external_request_id,
+                "material_type": "video",
+            },
+        )
+        session.add(video)
+        await session.commit()
+        return video.id
 
 
 @pytest.mark.asyncio
@@ -575,3 +651,194 @@ async def test_material_video_generation_requires_reference_image(
     assert response.status_code == 400
     assert response.json()["code"] == 4001
     assert response.json()["message"] == "image_urls is required"
+
+
+@pytest.mark.asyncio
+async def test_material_video_generation_rolls_back_when_provider_start_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_start_generation(self, request):
+        raise ProviderError("video provider unavailable")
+
+    monkeypatch.setattr(
+        PlaceholderVideoProvider,
+        "start_generation",
+        fail_start_generation,
+    )
+    engine, session_factory = await _session_factory(tmp_path)
+    service = MaterialGenerationService()
+    payload = MaterialVideoGenerateRequest(
+        external_request_id="video-ext-provider-fail",
+        product_name="Demo App",
+        brief="Create a short video for daily use.",
+        image_urls=["https://ai.example.test/storage/images/source.svg"],
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(ProviderError):
+            await service.create_video(session, payload)
+
+    async with session_factory() as session:
+        campaigns = (await session.execute(select(Campaign))).scalars().all()
+        topics = (await session.execute(select(ContentTopic))).scalars().all()
+        drafts = (await session.execute(select(CopyDraft))).scalars().all()
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+
+    assert campaigns == []
+    assert topics == []
+    assert drafts == []
+    assert assets == []
+    assert videos == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_video_generation_reuses_duplicate_external_request_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    payload = {
+        "external_request_id": "video-ext-idempotent",
+        "product_name": "Demo App",
+        "brief": "Create a short video for daily use.",
+        "image_urls": ["https://ai.example.test/storage/images/source.svg"],
+    }
+    try:
+        first = client.post(
+            "/api/v1/integrations/material-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        second = client.post(
+            "/api/v1/integrations/material-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["data"]["job_id"] == second.json()["data"]["job_id"]
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+
+    assert len(videos) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_video_generation_reuses_requested_external_request_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    existing_job_id = await _insert_video_job(
+        engine,
+        external_request_id="video-ext-requested",
+        status=VideoStatus.REQUESTED.value,
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/videos",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "video-ext-requested",
+                "product_name": "Demo App",
+                "brief": "Create a short video for daily use.",
+                "image_urls": ["https://ai.example.test/storage/images/source.svg"],
+            },
+        )
+        body = response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    assert body["code"] == 1001
+    assert body["message"] == "processing"
+    assert body["data"]["job_id"] == existing_job_id
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+
+    assert len(videos) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_video_job_missing_returns_external_404_envelope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.get(
+            "/api/v1/integrations/material-generation/jobs/missing-job-id",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": 4001,
+        "message": "video job not found",
+        "data": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_material_video_job_failed_returns_provider_error_envelope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    failed_job_id = await _insert_video_job(
+        engine,
+        external_request_id="video-ext-failed",
+        status=VideoStatus.FAILED.value,
+        error_message="boom",
+    )
+    try:
+        response = client.get(
+            f"/api/v1/integrations/material-generation/jobs/{failed_job_id}",
+            headers=_authorized_headers(),
+        )
+        body = response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    assert body["code"] == 5001
+    assert body["message"] == "video generation failed"
+    assert body["data"] == {
+        "job_id": failed_job_id,
+        "status": "failed",
+        "error": "boom",
+    }
+
+
+def test_video_service_does_not_initialize_video_provider_until_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_PROVIDER", "volcengine")
+    monkeypatch.delenv("VOLCENGINE_VIDEO_API_KEY", raising=False)
+    monkeypatch.delenv("VOLCENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        service = VideoService()
+    finally:
+        get_settings.cache_clear()
+
+    assert service.settings.video_provider == "volcengine"

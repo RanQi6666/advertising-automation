@@ -36,11 +36,23 @@ VIDEO_STREAM_HEARTBEAT_SECONDS = 5.0
 class VideoService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.llm = get_llm_provider(self.settings)
-        self.video_provider = get_video_provider(self.settings)
+        self._llm = None
+        self._video_provider = None
         self.landing_pages = LandingPageService()
         self.image_storage = ImageStorageService(self.settings)
         self.video_storage = VideoStorageService(self.settings)
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm_provider(self.settings)
+        return self._llm
+
+    @property
+    def video_provider(self):
+        if self._video_provider is None:
+            self._video_provider = get_video_provider(self.settings)
+        return self._video_provider
 
     async def generate_storyboard(
         self,
