@@ -77,10 +77,36 @@ async def test_extract_delivery_fields_uses_local_rules_for_standard_order(
     assert extraction.review["llm_skipped"] is True
     assert extraction.fields.landing_url.value == "https://www.mensparadise.store/TV.html"
     assert extraction.fields.country.normalized_value == "IN"
-    assert extraction.fields.event_name.normalized_value == "purchase"
+    assert extraction.fields.event_name.normalized_value == "PURCHASE"
     assert extraction.fields.gender.normalized_value == "male"
     assert extraction.fields.age_min.value == 25
     assert extraction.fields.age_max.value == 45
+
+
+@pytest.mark.asyncio
+async def test_extract_delivery_fields_maps_registration_variants_to_complete_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_provider_requested():
+        raise AssertionError("registration event should be recognized by local rules")
+
+    monkeypatch.setattr(work_order_service, "get_llm_provider", fail_if_provider_requested)
+
+    extraction = await WorkOrderService().extract_delivery_fields(
+        "\n".join(
+            [
+                "Project: registration flow",
+                "Country: india",
+                "\u4f18\u5316\u4e8b\u4ef6\uff1a\u5feb\u901f\u6ce8\u518c",
+                "Audience: male age 25-45",
+                "Landing: https://example.com/register",
+            ]
+        )
+    )
+
+    assert extraction.review["source"] == "local_rules"
+    assert extraction.fields.event_name.status == "extracted"
+    assert extraction.fields.event_name.normalized_value == "COMPLETE_REGISTRATION"
 
 
 @pytest.mark.asyncio

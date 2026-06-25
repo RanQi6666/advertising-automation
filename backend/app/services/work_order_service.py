@@ -13,6 +13,11 @@ from backend.app.schemas.work_order import (
     WorkOrderCreate,
     WorkOrderDeliveryExtractionRead,
 )
+from backend.app.services.custom_event_types import (
+    custom_event_key,
+    custom_event_label,
+    custom_event_type,
+)
 from backend.app.services.work_order_parser import parse_work_order_text
 
 DELIVERY_FIELD_KEYS = (
@@ -342,6 +347,9 @@ def _countries_from_text(text: str) -> list[str]:
 def _find_event(raw_content: str, parsed_fields: dict) -> tuple[str, str, str]:
     source = _optional_text(parsed_fields.get("event_name")) or raw_content
     normalized = re.sub(r"\s+", "", source.lower())
+    detected_event = custom_event_label(source)
+    if detected_event:
+        return detected_event, "extracted", "local rules recognized an external optimization event."
     if any(
         keyword in normalized
         for keyword in ["购物", "购买", "下单", "purchase", "shop", "buy"]
@@ -357,6 +365,12 @@ def _find_event(raw_content: str, parsed_fields: dict) -> tuple[str, str, str]:
 
 
 def _normalize_event(event_name: str | None) -> str | None:
+    external_event_type = custom_event_type(event_name)
+    if external_event_type:
+        return external_event_type
+    event_key = custom_event_key(event_name)
+    if event_key:
+        return event_key
     if event_name == "购物":
         return "purchase"
     if event_name == "加购":

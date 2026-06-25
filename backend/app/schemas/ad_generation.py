@@ -79,6 +79,7 @@ class PublishingAdSetPayload(BaseModel):
     optimization_goal: str = "LINK_CLICKS"
     bid_strategy: str = "LOWEST_COST_WITHOUT_CAP"
     event_name: str | None = None
+    customEventType: str | None = None
     countries: str
     country_code: str
     country_label: str | None = None

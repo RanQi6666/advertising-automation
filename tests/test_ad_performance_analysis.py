@@ -173,7 +173,8 @@ async def test_ad_performance_analysis_detects_post_click_drop() -> None:
     assert work_order["overall_action"] == "check_landing_page_first"
     assert work_order["priority"] == "high"
     assert campaign_actions["objective"] == "rewrite"
-    assert adset_actions["optimization_event"] == "missing"
+    assert adset_actions["customEventType"] == "missing"
+    assert "optimization_event" not in adset_actions
     assert creative_actions["landing_page_url"] == "check"
     assert creative_actions["headline"] == "regenerate"
     assert analysis.analysis_result["data_completeness"]["level"] == "medium"
@@ -183,6 +184,46 @@ async def test_ad_performance_analysis_detects_post_click_drop() -> None:
         "转化事件 purchase/add_to_cart/lead"
         in analysis.analysis_result["data_completeness"]["missing"]
     )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ad_performance_analysis_uses_custom_event_type_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SummaryOnlyProvider:
+        async def analyze_ad_performance(self, context: dict[str, Any]) -> dict[str, Any]:
+            return {"summary": "rules should build optimization work order"}
+
+    monkeypatch.setattr(
+        "backend.app.services.ad_performance_analysis_service.get_llm_provider",
+        lambda settings=None: SummaryOnlyProvider(),
+    )
+
+    payload = _new12_payload()
+    payload["campaign"]["objective"] = "OUTCOME_LEADS"
+    payload["adset"]["optimization_goal"] = "OFFSITE_CONVERSIONS"
+    payload["adset"]["customEventType"] = "\u5feb\u901f\u6ce8\u518c"
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        analysis = await AdPerformanceAnalysisService().create_analysis(
+            session,
+            AdPerformanceAnalysisCreate.model_validate(payload),
+        )
+
+    adset_fields = {
+        item["field"]: item for item in analysis.analysis_result["optimization_work_order"]["adset"]
+    }
+
+    assert adset_fields["customEventType"]["current_value"] == "COMPLETE_REGISTRATION"
+    assert adset_fields["customEventType"]["suggested_value"] == "COMPLETE_REGISTRATION"
+    assert "optimization_event" not in adset_fields
+
     await engine.dispose()
 
 

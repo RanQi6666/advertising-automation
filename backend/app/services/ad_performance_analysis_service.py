@@ -20,6 +20,7 @@ from backend.app.schemas.ad_performance import (
     AdPerformanceProblem,
     AdPerformanceRecommendation,
 )
+from backend.app.services.custom_event_types import custom_event_type
 from backend.app.services.utils import get_required
 
 LOW_SAMPLE_IMPRESSIONS = 100
@@ -1102,7 +1103,7 @@ def _adset_optimization_fields(
             missing=not _has_value(_first_value(adset.get("pixel_id"), adset.get("pixelId"))),
         ),
         _optimization_field(
-            "optimization_event",
+            "customEventType",
             "优化事件",
             optimization_event,
             "missing" if has_traffic_warning and not optimization_event else "keep",
@@ -1479,14 +1480,17 @@ def _adset_optimization_event(adset: dict[str, Any], metrics: dict[str, Any]) ->
         (str(key) for key, value in conversion_actions.items() if _as_float(value)),
         None,
     )
-    return _first_text(
+    event_value = _first_text(
+        adset.get("customEventType"),
         adset.get("custom_event_type"),
         adset.get("optimization_event"),
         adset.get("event_name"),
+        promoted_object.get("customEventType"),
         promoted_object.get("custom_event_type"),
         promoted_object.get("pixel_event_name"),
         conversion_event,
     )
+    return custom_event_type(event_value) or event_value
 
 
 def _first_value(*values: Any) -> Any:
@@ -1666,6 +1670,7 @@ def _llm_analysis_context(
                 "optimization_goal",
                 "bid_strategy",
                 "pixel_id",
+                "customEventType",
                 "custom_event_type",
                 "countries",
                 "age_min",

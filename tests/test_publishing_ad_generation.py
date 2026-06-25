@@ -615,6 +615,55 @@ async def test_publishing_ad_generation_keeps_event_without_pixel_dependency() -
 
 
 @pytest.mark.asyncio
+async def test_publishing_ad_generation_returns_custom_event_type_for_registration() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-registration",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: registration flow\n"
+                        "Country: US\n"
+                        "Audience: age 18-35\n"
+                        "Optimization event: fast registration\n"
+                        "Landing: https://example.com/register"
+                    ),
+                    structured_fields={
+                        "project_name": "Registration Flow",
+                        "country": "US",
+                        "age_min": 18,
+                        "age_max": 35,
+                        "customEventType": "\u5feb\u901f\u6ce8\u518c",
+                        "landing_url": "https://example.com/register",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+
+        completed = await service.process_job(session, job.id)
+
+    campaign_payload = completed.result_payload["campaign_payload"]
+    adset_payload = completed.result_payload["adset_payload"]
+
+    assert completed.status == "fields_review"
+    assert campaign_payload["objective"] == "OUTCOME_LEADS"
+    assert adset_payload["optimization_goal"] == "OFFSITE_CONVERSIONS"
+    assert adset_payload["customEventType"] == "COMPLETE_REGISTRATION"
+    assert adset_payload["event_name"] == "complete_registration"
+    assert "custom_event_type" not in adset_payload
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publishing_ad_generation_maps_shopping_to_sales_defaults() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

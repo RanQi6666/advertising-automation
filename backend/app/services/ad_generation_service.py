@@ -38,6 +38,7 @@ from backend.app.schemas.work_order import (
 )
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.custom_event_types import custom_event_key, custom_event_type
 from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -45,7 +46,14 @@ logger = logging.getLogger(__name__)
 
 DELIVERY_FIELD_ALIASES = {
     "landing_url": ("landing_url", "link", "destination_url", "url"),
-    "event_name": ("event_name", "event", "conversion_event", "custom_event_type", "objective"),
+    "event_name": (
+        "event_name",
+        "event",
+        "conversion_event",
+        "customEventType",
+        "custom_event_type",
+        "objective",
+    ),
     "country": ("country", "country_code", "countries"),
     "age_min": ("age_min", "min_age"),
     "age_max": ("age_max", "max_age"),
@@ -105,7 +113,19 @@ SALES_EVENTS = {
     "\u4e0b\u5355",
 }
 ADD_TO_CART_EVENTS = {"add_to_cart", "addtocart", "cart", "\u52a0\u8d2d"}
-LEAD_EVENTS = {"lead", "leads", "signup", "register", "\u7ebf\u7d22", "\u6ce8\u518c"}
+LEAD_EVENTS = {
+    "complete_registration",
+    "lead",
+    "leads",
+    "signup",
+    "register",
+    "\u7ebf\u7d22",
+    "\u6ce8\u518c",
+}
+CHECKOUT_EVENTS = {"initiated_checkout", "checkout"}
+PAYMENT_INFO_EVENTS = {"add_payment_info", "paymentinfo"}
+RECHARGE_EVENTS = {"first_recharge"}
+SEARCH_EVENTS = {"search"}
 TRAFFIC_EVENTS = {"traffic", "click", "link_click", "\u6d41\u91cf", "\u70b9\u51fb"}
 VIDEO_EVENTS = {"video", "view", "engagement", "thruplay", "\u89c6\u9891", "\u4e92\u52a8"}
 APP_EVENTS = {"app", "install", "app_install", "\u5e94\u7528", "\u5b89\u88c5"}
@@ -593,6 +613,7 @@ class AdGenerationService:
                 daily_budget=payload.preferences.daily_budget,
                 optimization_goal=_optimization_goal(event_name),
                 event_name=_text_or_none(event_name),
+                customEventType=custom_event_type(event_name),
                 countries=country_code,
                 country_code=country_code,
                 country_label=country_label,
@@ -834,7 +855,13 @@ def _country_code_and_label(value: Any) -> tuple[str, str]:
 
 def _campaign_objective(event_name: Any) -> str:
     event_key = _event_key(event_name)
-    if event_key in SALES_EVENTS or event_key in ADD_TO_CART_EVENTS:
+    if (
+        event_key in SALES_EVENTS
+        or event_key in ADD_TO_CART_EVENTS
+        or event_key in CHECKOUT_EVENTS
+        or event_key in PAYMENT_INFO_EVENTS
+        or event_key in RECHARGE_EVENTS
+    ):
         return "OUTCOME_SALES"
     if event_key in LEAD_EVENTS:
         return "OUTCOME_LEADS"
@@ -847,7 +874,15 @@ def _campaign_objective(event_name: Any) -> str:
 
 def _optimization_goal(event_name: Any) -> str:
     event_key = _event_key(event_name)
-    if event_key in SALES_EVENTS or event_key in ADD_TO_CART_EVENTS or event_key in LEAD_EVENTS:
+    if event_key in (
+        SALES_EVENTS
+        | ADD_TO_CART_EVENTS
+        | LEAD_EVENTS
+        | CHECKOUT_EVENTS
+        | PAYMENT_INFO_EVENTS
+        | RECHARGE_EVENTS
+        | SEARCH_EVENTS
+    ):
         return "OFFSITE_CONVERSIONS"
     if event_key in VIDEO_EVENTS:
         return "THRUPLAY"
@@ -857,10 +892,7 @@ def _optimization_goal(event_name: Any) -> str:
 
 
 def _event_key(event_name: Any) -> str | None:
-    text = _text_or_none(event_name)
-    if not text:
-        return None
-    return re.sub(r"[\s-]+", "_", text.strip().lower())
+    return custom_event_key(event_name)
 
 
 def _age_value(value: Any, default: int) -> int:

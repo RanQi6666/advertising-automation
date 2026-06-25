@@ -685,7 +685,7 @@ def _mock_ad_performance_optimization_work_order(
         ],
         "adset": [
             _mock_optimization_field(
-                field="optimization_event",
+                field="customEventType",
                 label="optimization event",
                 current_value=None,
                 action="missing",

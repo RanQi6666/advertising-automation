@@ -26,6 +26,7 @@ import {
   brandSafetyReportFromPayload,
   brandSafetySummaryLabel,
 } from "./lib/brandSafety";
+import { displayAssetUrl } from "./lib/assetUrls";
 import type {
   AdPerformanceAnalysisStreamEvent,
   CreativeStreamEvent,
@@ -136,7 +137,16 @@ const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
 const DELIVERY_EXTRACTION_CACHE_INDEX_KEY = "ad_delivery_extraction_v1:index";
 const DELIVERY_EXTRACTION_CACHE_LIMIT = 12;
-const DELIVERY_EVENT_OPTIONS = ["流量", "购物", "加购", "线索"] as const;
+const DEFAULT_DELIVERY_EVENT_OPTION = "购买 (PURCHASE)";
+const DELIVERY_EVENT_OPTIONS = [
+  "完成注册 (COMPLETE_REGISTRATION)",
+  DEFAULT_DELIVERY_EVENT_OPTION,
+  "加入购物车 (ADD_TO_CART)",
+  "发起结账 (INITIATED_CHECKOUT)",
+  "搜索行为 (SEARCH)",
+  "添加支付信息 (ADD_PAYMENT_INFO)",
+  "首充 (first_recharge)",
+] as const;
 const DELIVERY_COUNTRY_OPTIONS = [
   { label: "印度", value: "印度", code: "IN" },
   { label: "美国", value: "美国", code: "US" },
@@ -3075,7 +3085,7 @@ function CopyView({
                           title={asset.alt_text || imagePromptTitle(asset.prompt)}
                           type="button"
                         >
-                          <img src={asset.url || ""} alt={asset.alt_text || `预览图片 ${index + 1}`} />
+                          <img src={displayAssetUrl(asset.url)} alt={asset.alt_text || `预览图片 ${index + 1}`} />
                           <span>{asset.status === "approved" ? "已通过" : `图 ${index + 1}`}</span>
                         </button>
                       ))}
@@ -3094,7 +3104,7 @@ function CopyView({
                   {selectedPreviewCreative?.url ? (
                     <img
                       className={`facebook-preview-image ${selectedPreviewAspectClass}`}
-                      src={selectedPreviewCreative.url}
+                      src={displayAssetUrl(selectedPreviewCreative.url)}
                       alt={selectedPreviewCreative.alt_text || "广告预览图片"}
                     />
                   ) : (
@@ -3792,7 +3802,7 @@ function VideosView({
                 <pre className="facebook-preview-text">{previewText}</pre>
                 {selectedVideo?.url ? (
                   <div className={`video-ad-preview-media ${previewAspectClass}`}>
-                    <video controls muted playsInline src={selectedVideo.url} />
+                    <video controls muted playsInline src={displayAssetUrl(selectedVideo.url)} />
                   </div>
                 ) : (
                   <div
@@ -3814,7 +3824,7 @@ function VideosView({
                         {previewSourceCreatives.map((asset, index) => (
                           <img
                             key={asset.id}
-                            src={asset.url || ""}
+                            src={displayAssetUrl(asset.url)}
                             alt={asset.alt_text || `参考图 ${index + 1}`}
                           />
                         ))}
@@ -4943,13 +4953,13 @@ function ImagePreview({ asset }: { asset: CreativeAsset }) {
       </div>
     );
   }
-  return <img className="asset-image" src={asset.url} alt={asset.alt_text || "creative"} />;
+  return <img className="asset-image" src={displayAssetUrl(asset.url)} alt={asset.alt_text || "creative"} />;
 }
 
 function VideoPreview({ url }: { url: string }) {
   return (
     <div className="video-preview">
-      <video controls src={url} />
+      <video controls src={displayAssetUrl(url)} />
     </div>
   );
 }
@@ -5311,7 +5321,7 @@ function hashWorkOrderContent(value: string): string {
 function emptyReviewedDeliveryFields(): ReviewedDeliveryFields {
   return {
     landing_url: "",
-    event_name: "流量",
+    event_name: DEFAULT_DELIVERY_EVENT_OPTION,
     country: "",
     age_min: "",
     age_max: "",
@@ -5324,7 +5334,7 @@ function buildDeliveryConfirmForm(extraction: WorkOrderDeliveryExtraction): Revi
   const fields = extraction.fields;
   return {
     landing_url: deliveryFieldDisplayText(fields.landing_url),
-    event_name: normalizeEventLabel(deliveryFieldDisplayText(fields.event_name)) || "流量",
+    event_name: normalizeEventLabel(deliveryFieldDisplayText(fields.event_name)) || DEFAULT_DELIVERY_EVENT_OPTION,
     country: deliveryFieldDisplayText(fields.country),
     age_min: deliveryAgeText(fields.age_min),
     age_max: deliveryAgeText(fields.age_max),
@@ -5337,14 +5347,14 @@ function validateDeliveryConfirmForm(form: ReviewedDeliveryFields): string | nul
   if (!form.landing_url.trim()) return "请补充投放链接。";
   if (!isHttpUrl(form.landing_url.trim())) return "投放链接需要是 http 或 https 开头的完整链接。";
   if (!form.country.trim()) return "请确认投放国家。";
-  if (!form.event_name.trim()) return "请选择投放事件。";
+  if (!form.event_name.trim()) return "请选择优化事件。";
   return null;
 }
 
 function normalizeReviewedDeliveryFields(form: ReviewedDeliveryFields): ReviewedDeliveryFields {
   return {
     landing_url: form.landing_url.trim(),
-    event_name: normalizeEventLabel(form.event_name) || "流量",
+    event_name: normalizeEventLabel(form.event_name) || DEFAULT_DELIVERY_EVENT_OPTION,
     country: form.country.trim(),
     age_min: form.age_min.trim() || "不限",
     age_max: form.age_max.trim() || "不限",
@@ -5388,7 +5398,7 @@ function deliveryExtractionHint(
 function deliveryFieldLabel(key: keyof ReviewedDeliveryFields): string {
   const labels: Record<keyof ReviewedDeliveryFields, string> = {
     landing_url: "投放链接",
-    event_name: "投放事件",
+    event_name: "优化事件",
     country: "投放国家",
     age_min: "最小年龄",
     age_max: "最大年龄",
@@ -5409,13 +5419,31 @@ function deliveryStatusLabel(status: WorkOrderDeliveryField["status"]): string {
 }
 
 function normalizeEventLabel(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
+  const trimmed = value.trim();
+  const normalized = trimmed.toLowerCase().replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
   if (!normalized) return "";
-  if (["purchase", "shop", "shopping"].includes(normalized) || /购物|购买|下单/.test(value)) return "购物";
-  if (["addtocart", "add_to_cart", "cart"].includes(normalized) || value.includes("加购")) return "加购";
-  if (["lead", "signup"].includes(normalized) || /线索|注册/.test(value)) return "线索";
-  if (["traffic", "click", "linkclick", "link_click"].includes(normalized) || /流量|点击/.test(value)) return "流量";
-  return DELIVERY_EVENT_OPTIONS.includes(value as (typeof DELIVERY_EVENT_OPTIONS)[number]) ? value : "流量";
+  if (
+    ["completeregistration", "register", "signup", "lead", "leads"].includes(normalized)
+    || /注册|线索/.test(trimmed)
+  ) return "完成注册 (COMPLETE_REGISTRATION)";
+  if (
+    ["purchase", "shop", "shopping", "buy", "order", "sales"].includes(normalized)
+    || /购物|购买|下单/.test(trimmed)
+  ) return DEFAULT_DELIVERY_EVENT_OPTION;
+  if (["addtocart", "cart"].includes(normalized) || /加入购物车|加购/.test(trimmed)) {
+    return "加入购物车 (ADD_TO_CART)";
+  }
+  if (["initiatedcheckout", "checkout"].includes(normalized) || /发起结账|结账|结算/.test(trimmed)) {
+    return "发起结账 (INITIATED_CHECKOUT)";
+  }
+  if (normalized === "search" || trimmed.includes("搜索")) return "搜索行为 (SEARCH)";
+  if (["addpaymentinfo", "paymentinfo"].includes(normalized) || trimmed.includes("支付信息")) {
+    return "添加支付信息 (ADD_PAYMENT_INFO)";
+  }
+  if (normalized === "firstrecharge" || trimmed.includes("首充")) return "首充 (first_recharge)";
+  return DELIVERY_EVENT_OPTIONS.includes(trimmed as (typeof DELIVERY_EVENT_OPTIONS)[number])
+    ? trimmed
+    : DEFAULT_DELIVERY_EVENT_OPTION;
 }
 
 function normalizeGenderLabel(value: string): string {
