@@ -6,16 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
+from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.schemas.material_generation import (
     MATERIAL_CODE_BRAND_SAFETY_ERROR,
+    MATERIAL_CODE_PROVIDER_ERROR,
     MATERIAL_CODE_VALIDATION_ERROR,
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
     MaterialGenerationEnvelope,
+    MaterialImageGenerateRequest,
 )
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
+from backend.app.services.creative_service import CreativeService
 
 SOURCE = "external_material_generation"
 
@@ -23,6 +28,7 @@ SOURCE = "external_material_generation"
 class MaterialGenerationService:
     def __init__(self) -> None:
         self.copywriting = CopywritingService()
+        self.creatives = CreativeService()
 
     async def generate_copy(
         self,
@@ -69,6 +75,49 @@ class MaterialGenerationService:
             await session.commit()
             await session.refresh(draft)
             return self._copy_response(draft, payload)
+        except MaterialGenerationAPIError:
+            await session.rollback()
+            raise
+
+    async def generate_images(
+        self,
+        session: AsyncSession,
+        payload: MaterialImageGenerateRequest,
+    ) -> MaterialGenerationEnvelope:
+        _validate_base_payload(payload)
+
+        existing = await self._find_existing_images(session, payload.external_request_id)
+        if existing:
+            return self._image_response(existing)
+
+        copy_response = await self.generate_copy(session, payload)
+        draft_id = copy_response.data["request_id"]
+        self.creatives = CreativeService()
+        assets = await self.creatives.generate_creatives(
+            session,
+            CreativeGenerateRequest(
+                draft_id=draft_id,
+                count=payload.count,
+                size=payload.size,
+            ),
+        )
+
+        try:
+            for asset in assets:
+                self._raise_if_brand_safety_blocked(
+                    {"prompt": asset.prompt, "alt_text": asset.alt_text}
+                )
+                asset.metadata_json = {
+                    **(asset.metadata_json or {}),
+                    "source": SOURCE,
+                    "external_request_id": payload.external_request_id,
+                    "material_type": "image",
+                }
+                session.add(asset)
+            await session.commit()
+            for asset in assets:
+                await session.refresh(asset)
+            return self._image_response(assets)
         except MaterialGenerationAPIError:
             await session.rollback()
             raise
@@ -151,6 +200,29 @@ class MaterialGenerationService:
                 return draft
         return None
 
+    async def _find_existing_images(
+        self,
+        session: AsyncSession,
+        external_request_id: str | None,
+    ) -> list[CreativeAsset]:
+        if not (external_request_id or "").strip():
+            return []
+
+        result = await session.execute(
+            select(CreativeAsset).order_by(CreativeAsset.created_at.asc())
+        )
+        assets: list[CreativeAsset] = []
+        for asset in result.scalars().all():
+            metadata = asset.metadata_json or {}
+            if (
+                metadata.get("source") == SOURCE
+                and metadata.get("material_type") == "image"
+                and metadata.get("external_request_id") == external_request_id
+                and asset.url
+            ):
+                assets.append(asset)
+        return assets
+
     def _copy_response(
         self,
         draft: CopyDraft,
@@ -171,6 +243,20 @@ class MaterialGenerationService:
                 or payload.customEventType
                 or _custom_event_type(payload.event_name),
             },
+        )
+
+    def _image_response(self, assets: list[CreativeAsset]) -> MaterialGenerationEnvelope:
+        urls = [asset.url for asset in assets if asset.url]
+        if not urls:
+            raise MaterialGenerationAPIError(
+                "image generation returned no usable urls",
+                code=MATERIAL_CODE_PROVIDER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        return MaterialGenerationEnvelope(
+            code=0,
+            message="success",
+            data={"request_id": assets[0].id, "urls": urls},
         )
 
     def _raise_if_brand_safety_blocked(self, data: dict[str, Any]) -> None:

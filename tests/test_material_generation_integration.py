@@ -325,3 +325,36 @@ async def test_material_copy_generation_replay_keeps_original_custom_event_type(
     assert first.json()["data"]["customEventType"] == "COMPLETE_REGISTRATION"
     assert second.json()["data"]["customEventType"] == "COMPLETE_REGISTRATION"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_image_generation_returns_public_urls(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/images",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "image-ext-1",
+                "product_name": "Demo App",
+                "brief": "Create a clean product visual for daily use.",
+                "count": 2,
+                "size": "1:1",
+            },
+        )
+        body = response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 200
+    assert body["code"] == 0
+    assert body["message"] == "success"
+    assert body["data"]["request_id"]
+    assert len(body["data"]["urls"]) == 2
+    assert all(url.startswith("https://ai.example.test/storage/") for url in body["data"]["urls"])
+
+    await engine.dispose()

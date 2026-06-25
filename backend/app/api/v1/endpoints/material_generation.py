@@ -12,6 +12,7 @@ from backend.app.schemas.material_generation import (
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
     MaterialGenerationEnvelope,
+    MaterialImageGenerateRequest,
 )
 from backend.app.services.material_generation_service import MaterialGenerationService
 
@@ -57,6 +58,17 @@ router = APIRouter(
 async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession):
     try:
         return await service.generate_copy(session, payload)
+    except MaterialGenerationAPIError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "message": exc.message, "data": exc.data},
+        )
+
+
+@router.post("/images", response_model=MaterialGenerationEnvelope)
+async def generate_images(payload: MaterialImageGenerateRequest, session: DbSession):
+    try:
+        return await service.generate_images(session, payload)
     except MaterialGenerationAPIError as exc:
         return JSONResponse(
             status_code=exc.status_code,

@@ -264,6 +264,8 @@ class CreativeService:
                 campaign_id=draft.campaign_id,
                 image_id=image_id,
             )
+        if not image_url:
+            image_url = self.image_storage.public_url_for_storage_key(storage_key)
         return CreativeAsset(
             campaign_id=draft.campaign_id,
             draft_id=draft.id,
