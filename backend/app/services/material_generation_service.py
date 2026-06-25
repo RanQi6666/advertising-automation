@@ -7,19 +7,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.enums import VideoStatus
 from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.material_generation import (
     MATERIAL_CODE_BRAND_SAFETY_ERROR,
+    MATERIAL_CODE_PROCESSING,
     MATERIAL_CODE_PROVIDER_ERROR,
+    MATERIAL_CODE_SUCCESS,
     MATERIAL_CODE_VALIDATION_ERROR,
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
     MaterialGenerationEnvelope,
     MaterialImageGenerateRequest,
+    MaterialVideoGenerateRequest,
 )
+from backend.app.schemas.video import VideoGenerateRequest
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
+from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.video_service import VideoService
 
 SOURCE = "external_material_generation"
 
@@ -122,10 +130,121 @@ class MaterialGenerationService:
     def _creative_service(self) -> CreativeService:
         return CreativeService()
 
+    async def create_video(
+        self,
+        session: AsyncSession,
+        payload: MaterialVideoGenerateRequest,
+    ) -> MaterialGenerationEnvelope:
+        _validate_base_payload(payload)
+        if not payload.image_urls:
+            raise MaterialGenerationAPIError(
+                "image_urls is required",
+                code=MATERIAL_CODE_VALIDATION_ERROR,
+            )
+
+        existing = await self._find_existing_video(session, payload.external_request_id)
+        if existing:
+            return self._video_response(existing)
+
+        try:
+            campaign, topic = await self._create_context(session, payload, material_type="video")
+            draft = CopyDraft(
+                campaign_id=campaign.id,
+                topic_id=topic.id,
+                body=payload.brief or "Create a short video for daily use.",
+                primary_text=payload.brief or "Create a short video for daily use.",
+                headline=payload.product_name,
+                description=payload.brief,
+                cta="Learn More",
+                model_name="material-generation-placeholder",
+                prompt_version="material.video.v1",
+                metadata_json={
+                    "source": SOURCE,
+                    "external_request_id": payload.external_request_id,
+                    "material_type": "video",
+                    "customEventType": payload.customEventType
+                    or _custom_event_type(payload.event_name),
+                },
+            )
+            session.add(draft)
+            await session.flush()
+
+            image_storage = ImageStorageService()
+            source_assets: list[CreativeAsset] = []
+            for image_url in payload.image_urls:
+                url = str(image_url)
+                asset = CreativeAsset(
+                    campaign_id=campaign.id,
+                    draft_id=draft.id,
+                    kind="image",
+                    url=url,
+                    storage_key=image_storage.storage_key_for_public_url(url),
+                    prompt=payload.prompt or payload.brief or "",
+                    alt_text=payload.product_name,
+                    size=payload.aspect_ratio,
+                    metadata_json={
+                        "source": SOURCE,
+                        "external_request_id": payload.external_request_id,
+                        "material_type": "video_source_image",
+                        "provider_image_url": url,
+                    },
+                )
+                session.add(asset)
+                source_assets.append(asset)
+            await session.commit()
+            for asset in source_assets:
+                await session.refresh(asset)
+        except MaterialGenerationAPIError:
+            await session.rollback()
+            raise
+
+        video_service = self._video_service()
+        video = await video_service.create_video_job(
+            session,
+            VideoGenerateRequest(
+                campaign_id=campaign.id,
+                draft_id=draft.id,
+                creative_asset_ids=[asset.id for asset in source_assets],
+                prompt=payload.prompt or payload.brief,
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+                metadata_json={
+                    "source": SOURCE,
+                    "external_request_id": payload.external_request_id,
+                    "material_type": "video",
+                },
+            ),
+        )
+        started = await video_service.start_video_generation(session, video.id)
+        return self._video_processing_response(started)
+
+    async def get_video_job(
+        self,
+        session: AsyncSession,
+        job_id: str,
+    ) -> MaterialGenerationEnvelope:
+        video = await session.get(VideoAsset, job_id)
+        if not video:
+            raise MaterialGenerationAPIError(
+                "video job not found",
+                code=MATERIAL_CODE_VALIDATION_ERROR,
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        if video.status == VideoStatus.GENERATING.value and video.provider_job_id:
+            video = await self._video_service().refresh_video_generation(session, video.id)
+
+        return self._video_response(video)
+
+    def _video_service(self) -> VideoService:
+        return VideoService()
+
     async def _create_context(
         self,
         session: AsyncSession,
         payload: MaterialCopyGenerateRequest,
+        *,
+        material_type: str = "copy",
     ) -> tuple[Campaign, ContentTopic]:
         product_name = (payload.product_name or "").strip()
         brief = (payload.brief or "").strip()
@@ -135,7 +254,7 @@ class MaterialGenerationService:
         external_context = {
             "source": SOURCE,
             "external_request_id": payload.external_request_id,
-            "material_type": "copy",
+            "material_type": material_type,
             "product_name": product_name,
             "landing_url": landing_url,
             "audience": payload.audience,
@@ -223,6 +342,31 @@ class MaterialGenerationService:
                 assets.append(asset)
         return assets
 
+    async def _find_existing_video(
+        self,
+        session: AsyncSession,
+        external_request_id: str | None,
+    ) -> VideoAsset | None:
+        if not (external_request_id or "").strip():
+            return None
+
+        result = await session.execute(select(VideoAsset).order_by(VideoAsset.created_at.desc()))
+        for video in result.scalars().all():
+            metadata = video.metadata_json or {}
+            if (
+                metadata.get("source") == SOURCE
+                and metadata.get("material_type") == "video"
+                and metadata.get("external_request_id") == external_request_id
+                and video.status
+                in {
+                    VideoStatus.GENERATING.value,
+                    VideoStatus.GENERATED.value,
+                    VideoStatus.APPROVED.value,
+                }
+            ):
+                return video
+        return None
+
     def _copy_response(
         self,
         draft: CopyDraft,
@@ -257,6 +401,39 @@ class MaterialGenerationService:
             code=0,
             message="success",
             data={"request_id": assets[0].id, "urls": urls},
+        )
+
+    def _video_response(self, video: VideoAsset) -> MaterialGenerationEnvelope:
+        if video.status in {VideoStatus.GENERATED.value, VideoStatus.APPROVED.value} and video.url:
+            return MaterialGenerationEnvelope(
+                code=MATERIAL_CODE_SUCCESS,
+                message="success",
+                data={
+                    "job_id": video.id,
+                    "status": "succeeded",
+                    "url": video.url,
+                },
+            )
+        if video.status == VideoStatus.FAILED.value:
+            return MaterialGenerationEnvelope(
+                code=MATERIAL_CODE_PROVIDER_ERROR,
+                message="video generation failed",
+                data={
+                    "job_id": video.id,
+                    "status": "failed",
+                    "error": video.error_message,
+                },
+            )
+        return self._video_processing_response(video)
+
+    def _video_processing_response(self, video: VideoAsset) -> MaterialGenerationEnvelope:
+        return MaterialGenerationEnvelope(
+            code=MATERIAL_CODE_PROCESSING,
+            message="processing",
+            data={
+                "job_id": video.id,
+                "status": "processing",
+            },
         )
 
     def _raise_if_brand_safety_blocked(self, data: dict[str, Any]) -> None:

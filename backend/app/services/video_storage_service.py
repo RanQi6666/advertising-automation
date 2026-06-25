@@ -43,6 +43,26 @@ class VideoStorageService:
         relative_path = _relative_path_from_storage_key(storage_key)
         return f"{self.settings.public_base_url.rstrip('/')}/storage/{relative_path}"
 
+    def storage_key_for_public_url(self, url: str | None) -> str | None:
+        if not url:
+            return None
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if not parsed.path.startswith("/storage/"):
+            return None
+
+        storage_path = parsed.path.removeprefix("/storage/").lstrip("/")
+        if not storage_path:
+            return None
+
+        try:
+            relative_path = _relative_path_from_storage_key(f"local://{storage_path}")
+        except ProviderError:
+            return None
+        return f"local://{relative_path}"
+
     async def _download(self, source_url: str, target_path: Path) -> None:
         temp_path = target_path.with_suffix(f"{target_path.suffix}.tmp")
         downloaded_bytes = 0

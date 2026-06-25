@@ -492,3 +492,86 @@ async def test_material_image_generation_rolls_back_when_brand_safety_blocks_ass
     assert assets == []
     assert len(drafts) == 1
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_video_generation_creates_async_job_and_query_returns_url(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        image_response = client.post(
+            "/api/v1/integrations/material-generation/images",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "video-image-ext-1",
+                "product_name": "Demo App",
+                "brief": "Create a clean product visual for daily use.",
+                "count": 1,
+            },
+        )
+        image_url = image_response.json()["data"]["urls"][0]
+
+        create_response = client.post(
+            "/api/v1/integrations/material-generation/videos",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "video-ext-1",
+                "product_name": "Demo App",
+                "brief": "Create a short video for daily use.",
+                "image_urls": [image_url],
+                "duration_seconds": 6,
+                "aspect_ratio": "9:16",
+                "prompt": "Use a simple motion sequence.",
+            },
+        )
+        create_body = create_response.json()
+        status_response = client.get(
+            f"/api/v1/integrations/material-generation/jobs/{create_body['data']['job_id']}",
+            headers=_authorized_headers(),
+        )
+        status_body = status_response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert create_body["code"] == 1001
+    assert create_body["message"] == "processing"
+    assert create_body["data"]["job_id"]
+    assert create_body["data"]["status"] == "processing"
+
+    assert status_response.status_code == 200
+    assert status_body["code"] == 0
+    assert status_body["message"] == "success"
+    assert status_body["data"]["status"] == "succeeded"
+    assert status_body["data"]["url"].startswith("https://ai.example.test/storage/")
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_video_generation_requires_reference_image(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/videos",
+            headers=_authorized_headers(),
+            json={
+                "product_name": "Demo App",
+                "brief": "Create a short video for daily use.",
+                "image_urls": [],
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert response.json()["message"] == "image_urls is required"

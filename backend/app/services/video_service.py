@@ -374,11 +374,22 @@ class VideoService:
         stored_video_url = None
         stored_storage_key = None
         if provider_status.video_url and provider_status.provider_status == "succeeded":
-            stored_video_url, stored_storage_key = await self.video_storage.transfer_provider_video(
-                source_url=provider_status.video_url,
-                video_id=video.id,
-                provider_job_id=provider_status.provider_job_id,
+            local_storage_key = self.video_storage.storage_key_for_public_url(
+                provider_status.video_url
             )
+            if local_storage_key:
+                stored_storage_key = local_storage_key
+                stored_video_url = self.video_storage.public_url_for_storage_key(
+                    local_storage_key
+                )
+            else:
+                stored_video_url, stored_storage_key = (
+                    await self.video_storage.transfer_provider_video(
+                        source_url=provider_status.video_url,
+                        video_id=video.id,
+                        provider_job_id=provider_status.provider_job_id,
+                    )
+                )
             video.url = stored_video_url
             video.storage_key = stored_storage_key
         elif provider_status.video_url:

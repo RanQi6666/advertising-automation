@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,6 +13,7 @@ from backend.app.schemas.material_generation import (
     MaterialGenerationAPIError,
     MaterialGenerationEnvelope,
     MaterialImageGenerateRequest,
+    MaterialVideoGenerateRequest,
 )
 from backend.app.services.material_generation_service import MaterialGenerationService
 
@@ -69,6 +70,36 @@ async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession
 async def generate_images(payload: MaterialImageGenerateRequest, session: DbSession):
     try:
         return await service.generate_images(session, payload)
+    except MaterialGenerationAPIError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "message": exc.message, "data": exc.data},
+        )
+
+
+@router.post(
+    "/videos",
+    response_model=MaterialGenerationEnvelope,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_video(payload: MaterialVideoGenerateRequest, session: DbSession):
+    try:
+        result = await service.create_video(session, payload)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=result.model_dump(),
+        )
+    except MaterialGenerationAPIError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "message": exc.message, "data": exc.data},
+        )
+
+
+@router.get("/jobs/{job_id}", response_model=MaterialGenerationEnvelope)
+async def get_job(job_id: str, session: DbSession):
+    try:
+        return await service.get_video_job(session, job_id)
     except MaterialGenerationAPIError as exc:
         return JSONResponse(
             status_code=exc.status_code,
