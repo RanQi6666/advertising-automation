@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from backend.app.api.deps import DbSession, require_material_generation_access_token
+from backend.app.core.errors import AppError, ProviderError
 from backend.app.schemas.material_generation import (
+    MATERIAL_CODE_PROVIDER_ERROR,
     MATERIAL_CODE_VALIDATION_ERROR,
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
@@ -60,10 +62,11 @@ async def generate_copy(payload: MaterialCopyGenerateRequest, session: DbSession
     try:
         return await service.generate_copy(session, payload)
     except MaterialGenerationAPIError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "data": exc.data},
-        )
+        return _material_error_response(exc)
+    except ProviderError as exc:
+        return _provider_error_response(exc)
+    except AppError as exc:
+        return _app_error_response(exc)
 
 
 @router.post("/images", response_model=MaterialGenerationEnvelope)
@@ -71,10 +74,11 @@ async def generate_images(payload: MaterialImageGenerateRequest, session: DbSess
     try:
         return await service.generate_images(session, payload)
     except MaterialGenerationAPIError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "data": exc.data},
-        )
+        return _material_error_response(exc)
+    except ProviderError as exc:
+        return _provider_error_response(exc)
+    except AppError as exc:
+        return _app_error_response(exc)
 
 
 @router.post(
@@ -90,10 +94,11 @@ async def create_video(payload: MaterialVideoGenerateRequest, session: DbSession
             content=result.model_dump(),
         )
     except MaterialGenerationAPIError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "data": exc.data},
-        )
+        return _material_error_response(exc)
+    except ProviderError as exc:
+        return _provider_error_response(exc)
+    except AppError as exc:
+        return _app_error_response(exc)
 
 
 @router.get("/jobs/{job_id}", response_model=MaterialGenerationEnvelope)
@@ -101,10 +106,32 @@ async def get_job(job_id: str, session: DbSession):
     try:
         return await service.get_video_job(session, job_id)
     except MaterialGenerationAPIError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "data": exc.data},
-        )
+        return _material_error_response(exc)
+    except ProviderError as exc:
+        return _provider_error_response(exc)
+    except AppError as exc:
+        return _app_error_response(exc)
+
+
+def _material_error_response(exc: MaterialGenerationAPIError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message, "data": exc.data},
+    )
+
+
+def _provider_error_response(exc: ProviderError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"code": MATERIAL_CODE_PROVIDER_ERROR, "message": str(exc), "data": {}},
+    )
+
+
+def _app_error_response(exc: AppError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"code": MATERIAL_CODE_VALIDATION_ERROR, "message": str(exc), "data": {}},
+    )
 
 
 def _is_external_error_body(detail: object) -> bool:

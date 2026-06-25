@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.api.v1.endpoints import material_generation as material_generation_endpoint
 from backend.app.core.config import get_settings
-from backend.app.core.errors import ProviderError
+from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
@@ -211,6 +211,145 @@ async def test_material_generation_request_validation_error_uses_external_error_
     assert body["code"] == 4001
     assert body["message"] == "request validation failed"
     assert body["data"]["errors"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "expected_status"),
+    (
+        (
+            "/api/v1/integrations/material-generation/copy",
+            {
+                "product_name": "Demo App",
+                "brief": "Create a free discount ad with low price language.",
+            },
+            409,
+        ),
+        (
+            "/api/v1/integrations/material-generation/images",
+            {
+                "product_name": "Demo App",
+                "brief": "Create a free discount visual with low price language.",
+            },
+            409,
+        ),
+        (
+            "/api/v1/integrations/material-generation/videos",
+            {
+                "product_name": "Demo App",
+                "brief": "Create a free discount video with low price language.",
+                "image_urls": ["https://ai.example.test/storage/images/source.svg"],
+            },
+            409,
+        ),
+    ),
+)
+async def test_material_generation_blocks_brand_safety_risky_input(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    payload: dict[str, object],
+    expected_status: int,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(endpoint, headers=_authorized_headers(), json=payload)
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == expected_status
+    assert response.json()["code"] == 4091
+    assert response.json()["message"] == "brand safety check failed"
+    assert response.json()["data"]["brand_safety"]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_material_generation_accepts_ai_access_token_query(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy?ai_access_token=material-token",
+            json={
+                "product_name": "Demo App",
+                "brief": "Create a clear daily-use ad.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    assert response.json()["code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_material_generation_provider_error_uses_external_error_body(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_provider_error(_session, _payload):
+        raise ProviderError("provider unavailable")
+
+    monkeypatch.setattr(material_generation_endpoint.service, "generate_copy", raise_provider_error)
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "product_name": "Demo App",
+                "brief": "Create a clear daily-use ad.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": 5001,
+        "message": "provider unavailable",
+        "data": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_material_generation_app_error_uses_external_error_body(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_app_error(_session, _payload):
+        raise AppError("bad app state")
+
+    monkeypatch.setattr(material_generation_endpoint.service, "generate_copy", raise_app_error)
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "product_name": "Demo App",
+                "brief": "Create a clear daily-use ad.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": 4001,
+        "message": "bad app state",
+        "data": {},
+    }
 
 
 @pytest.mark.asyncio

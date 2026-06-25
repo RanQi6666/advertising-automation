@@ -19,6 +19,7 @@ from backend.app.schemas.material_generation import (
     MATERIAL_CODE_VALIDATION_ERROR,
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
+    MaterialGenerationBaseRequest,
     MaterialGenerationEnvelope,
     MaterialImageGenerateRequest,
     MaterialVideoGenerateRequest,
@@ -42,6 +43,7 @@ class MaterialGenerationService:
         payload: MaterialCopyGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
+        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
 
         existing = await self._find_existing_copy(session, payload.external_request_id)
         if existing:
@@ -91,6 +93,7 @@ class MaterialGenerationService:
         payload: MaterialImageGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
+        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
 
         existing = await self._find_existing_images(session, payload.external_request_id)
         if existing:
@@ -136,6 +139,7 @@ class MaterialGenerationService:
         payload: MaterialVideoGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
+        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
         if not payload.image_urls:
             raise MaterialGenerationAPIError(
                 "image_urls is required",
@@ -455,7 +459,7 @@ class MaterialGenerationService:
         if result["status"] != "blocked":
             return
         raise MaterialGenerationAPIError(
-            "brand safety policy blocked generated copy",
+            "brand safety check failed",
             code=MATERIAL_CODE_BRAND_SAFETY_ERROR,
             status_code=status.HTTP_409_CONFLICT,
             data={"brand_safety": result},
@@ -475,6 +479,16 @@ def _validate_base_payload(payload: MaterialCopyGenerateRequest) -> None:
             "brief or selling_points is required",
             code=MATERIAL_CODE_VALIDATION_ERROR,
         )
+
+
+def _request_brand_safety_payload(payload: MaterialGenerationBaseRequest) -> dict[str, Any]:
+    return {
+        "product_name": payload.product_name,
+        "brief": payload.brief,
+        "selling_points": payload.selling_points,
+        "constraints": payload.constraints,
+        "prompt": getattr(payload, "prompt", None),
+    }
 
 
 def _custom_event_type(event_name: str | None) -> str:
