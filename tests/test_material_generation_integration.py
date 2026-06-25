@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from backend.app.api.v1.endpoints import material_generation as material_generation_endpoint
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
@@ -10,6 +11,7 @@ from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.session import get_session
 from backend.app.main import create_app
+from backend.app.schemas.ai import CopyDraftCandidate
 
 
 @pytest.fixture(autouse=True)
@@ -235,4 +237,91 @@ async def test_material_copy_generation_reuses_successful_external_request_id(
         drafts = (await session.execute(select(CopyDraft))).scalars().all()
 
     assert len(drafts) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_output(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def risky_generate_copy(**_kwargs):
+        return CopyDraftCandidate(
+            body="Free cash casino jackpot",
+            primary_text="Free cash casino jackpot",
+            headline="Free casino cash",
+            description="Claim free cash now",
+            cta="Learn More",
+        )
+
+    monkeypatch.setattr(
+        material_generation_endpoint.service.copywriting.llm,
+        "generate_copy",
+        risky_generate_copy,
+    )
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "copy-ext-blocked",
+                "product_name": "Demo App",
+                "brief": "Create a clear ad for daily use.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == 4091
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        campaigns = (await session.execute(select(Campaign))).scalars().all()
+        topics = (await session.execute(select(ContentTopic))).scalars().all()
+        drafts = (await session.execute(select(CopyDraft))).scalars().all()
+
+    assert campaigns == []
+    assert topics == []
+    assert drafts == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_copy_generation_replay_keeps_original_custom_event_type(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        first = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "copy-ext-event-snapshot",
+                "product_name": "Demo App",
+                "event_name": "quick registration",
+                "brief": "Create a clear ad for daily use.",
+            },
+        )
+        second = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "copy-ext-event-snapshot",
+                "product_name": "Demo App",
+                "event_name": "purchase",
+                "brief": "Create a clear ad for daily use.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["data"]["request_id"] == second.json()["data"]["request_id"]
+    assert first.json()["data"]["customEventType"] == "COMPLETE_REGISTRATION"
+    assert second.json()["data"]["customEventType"] == "COMPLETE_REGISTRATION"
     await engine.dispose()

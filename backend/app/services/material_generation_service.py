@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.topic import ContentTopic
-from backend.app.schemas.copywriting import CopyGenerateRequest
 from backend.app.schemas.material_generation import (
     MATERIAL_CODE_BRAND_SAFETY_ERROR,
     MATERIAL_CODE_VALIDATION_ERROR,
@@ -36,25 +35,43 @@ class MaterialGenerationService:
         if existing:
             return self._copy_response(existing, payload)
 
-        campaign, topic = await self._create_context(session, payload)
-        draft = await self.copywriting.generate_copy(
-            session,
-            CopyGenerateRequest(topic_id=topic.id, constraints=payload.constraints),
-        )
+        try:
+            campaign, topic = await self._create_context(session, payload)
+            candidate = await self.copywriting.llm.generate_copy(
+                campaign=campaign,
+                topic=topic,
+                constraints=payload.constraints,
+            )
+            custom_event_type = payload.customEventType or _custom_event_type(payload.event_name)
+            draft = CopyDraft(
+                campaign_id=campaign.id,
+                topic_id=topic.id,
+                body=candidate.body,
+                primary_text=candidate.primary_text,
+                headline=candidate.headline,
+                description=candidate.description,
+                cta=candidate.cta,
+                model_name=self.copywriting.settings.llm_model,
+                prompt_version="copywriting.v1",
+                metadata_json={
+                    "source": SOURCE,
+                    "external_request_id": payload.external_request_id,
+                    "material_type": "copy",
+                    "customEventType": custom_event_type,
+                },
+            )
+            session.add(draft)
+            await session.flush()
 
-        draft.metadata_json = {
-            **(draft.metadata_json or {}),
-            "source": SOURCE,
-            "external_request_id": payload.external_request_id,
-            "material_type": "copy",
-        }
-        response = self._copy_response(draft, payload)
-        self._raise_if_brand_safety_blocked(response.data)
+            response = self._copy_response(draft, payload)
+            self._raise_if_brand_safety_blocked(response.data)
 
-        session.add(draft)
-        await session.commit()
-        await session.refresh(draft)
-        return self._copy_response(draft, payload)
+            await session.commit()
+            await session.refresh(draft)
+            return self._copy_response(draft, payload)
+        except MaterialGenerationAPIError:
+            await session.rollback()
+            raise
 
     async def _create_context(
         self,
@@ -112,9 +129,7 @@ class MaterialGenerationService:
             source_data=external_context,
         )
         session.add(topic)
-        await session.commit()
-        await session.refresh(campaign)
-        await session.refresh(topic)
+        await session.flush()
         return campaign, topic
 
     async def _find_existing_copy(
@@ -141,6 +156,8 @@ class MaterialGenerationService:
         draft: CopyDraft,
         payload: MaterialCopyGenerateRequest,
     ) -> MaterialGenerationEnvelope:
+        metadata = draft.metadata_json or {}
+        custom_event_type = metadata.get("customEventType") or metadata.get("custom_event_type")
         return MaterialGenerationEnvelope(
             code=0,
             message="success",
@@ -150,7 +167,8 @@ class MaterialGenerationService:
                 "headline": draft.headline,
                 "description": draft.description,
                 "cta": draft.cta,
-                "customEventType": payload.customEventType
+                "customEventType": custom_event_type
+                or payload.customEventType
                 or _custom_event_type(payload.event_name),
             },
         )
