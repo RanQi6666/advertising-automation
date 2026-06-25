@@ -33,13 +33,39 @@ class CreativeService:
         session: AsyncSession,
         payload: CreativeGenerateRequest,
     ) -> list[CreativeAsset]:
-        draft = await get_required(session, CopyDraft, payload.draft_id)
-        briefs = await self.llm.generate_image_briefs(
-            draft=draft,  # type: ignore[arg-type]
+        assets = await self.build_creative_assets_without_commit(
+            session=session,
+            draft_id=payload.draft_id,
             count=payload.count,
             size=payload.size,
+            target_index=payload.target_index,
+            extra_metadata={"streamed": False},
         )
-        briefs = _briefs_for_slots(briefs, _slot_indices(payload))
+        for asset in assets:
+            session.add(asset)
+
+        await session.commit()
+        for asset in assets:
+            await session.refresh(asset)
+        return assets
+
+    async def build_creative_assets_without_commit(
+        self,
+        session: AsyncSession,
+        draft_id: str,
+        count: int,
+        size: str,
+        extra_metadata: dict,
+        target_index: int | None = None,
+    ) -> list[CreativeAsset]:
+        draft = await get_required(session, CopyDraft, draft_id)
+        briefs = await self.llm.generate_image_briefs(
+            draft=draft,  # type: ignore[arg-type]
+            count=count,
+            size=size,
+        )
+        slot_indices = [target_index] if target_index is not None else list(range(1, count + 1))
+        briefs = _briefs_for_slots(briefs, slot_indices)
         generated_images = await self.image_provider.generate_images(briefs)
         assets: list[CreativeAsset] = []
         for brief, image in zip(briefs, generated_images, strict=False):
@@ -48,14 +74,9 @@ class CreativeService:
                 brief=brief,
                 image=image,
                 version=1,
-                extra_metadata={"streamed": False},
+                extra_metadata=extra_metadata,
             )
-            session.add(asset)
             assets.append(asset)
-
-        await session.commit()
-        for asset in assets:
-            await session.refresh(asset)
         return assets
 
     async def stream_creatives(

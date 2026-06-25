@@ -8,7 +8,6 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
-from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.schemas.material_generation import (
     MATERIAL_CODE_BRAND_SAFETY_ERROR,
     MATERIAL_CODE_PROVIDER_ERROR,
@@ -28,7 +27,6 @@ SOURCE = "external_material_generation"
 class MaterialGenerationService:
     def __init__(self) -> None:
         self.copywriting = CopywritingService()
-        self.creatives = CreativeService()
 
     async def generate_copy(
         self,
@@ -92,14 +90,19 @@ class MaterialGenerationService:
 
         copy_response = await self.generate_copy(session, payload)
         draft_id = copy_response.data["request_id"]
-        self.creatives = CreativeService()
-        assets = await self.creatives.generate_creatives(
-            session,
-            CreativeGenerateRequest(
-                draft_id=draft_id,
-                count=payload.count,
-                size=payload.size,
-            ),
+        creative_service = self._creative_service()
+        image_metadata = {
+            "streamed": False,
+            "source": SOURCE,
+            "external_request_id": payload.external_request_id,
+            "material_type": "image",
+        }
+        assets = await creative_service.build_creative_assets_without_commit(
+            session=session,
+            draft_id=draft_id,
+            count=payload.count,
+            size=payload.size,
+            extra_metadata=image_metadata,
         )
 
         try:
@@ -107,12 +110,6 @@ class MaterialGenerationService:
                 self._raise_if_brand_safety_blocked(
                     {"prompt": asset.prompt, "alt_text": asset.alt_text}
                 )
-                asset.metadata_json = {
-                    **(asset.metadata_json or {}),
-                    "source": SOURCE,
-                    "external_request_id": payload.external_request_id,
-                    "material_type": "image",
-                }
                 session.add(asset)
             await session.commit()
             for asset in assets:
@@ -121,6 +118,9 @@ class MaterialGenerationService:
         except MaterialGenerationAPIError:
             await session.rollback()
             raise
+
+    def _creative_service(self) -> CreativeService:
+        return CreativeService()
 
     async def _create_context(
         self,

@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -8,10 +10,13 @@ from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.session import get_session
 from backend.app.main import create_app
 from backend.app.schemas.ai import CopyDraftCandidate
+from backend.app.services.creative_service import CreativeService
+from backend.app.services.material_generation_service import MaterialGenerationService
 
 
 @pytest.fixture(autouse=True)
@@ -328,6 +333,39 @@ async def test_material_copy_generation_replay_keeps_original_custom_event_type(
 
 
 @pytest.mark.asyncio
+async def test_material_copy_generation_does_not_initialize_image_provider(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IMAGE_PROVIDER", "volcengine")
+    monkeypatch.delenv("VOLCENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(material_generation_endpoint, "service", MaterialGenerationService())
+
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/copy",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "copy-ext-no-image-provider",
+                "product_name": "Demo App",
+                "brief": "Create a clear ad for daily use.",
+            },
+        )
+        body = response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 200
+    assert body["code"] == 0
+    assert body["data"]["request_id"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_material_image_generation_returns_public_urls(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -346,6 +384,10 @@ async def test_material_image_generation_returns_public_urls(
             },
         )
         body = response.json()
+        stored_urls = body["data"]["urls"]
+        storage_responses = [
+            client.get(urlparse(url).path) for url in stored_urls
+        ]
     finally:
         app.dependency_overrides.clear()
         client.close()
@@ -356,5 +398,97 @@ async def test_material_image_generation_returns_public_urls(
     assert body["data"]["request_id"]
     assert len(body["data"]["urls"]) == 2
     assert all(url.startswith("https://ai.example.test/storage/") for url in body["data"]["urls"])
+    assert all(storage_response.status_code == 200 for storage_response in storage_responses)
+    assert all(storage_response.text.startswith("<svg ") for storage_response in storage_responses)
 
+    storage_root = tmp_path / "storage"
+    for url in stored_urls:
+        storage_path = urlparse(url).path.removeprefix("/storage/")
+        assert (storage_root / storage_path).is_file()
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_image_generation_reuses_external_request_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    payload = {
+        "external_request_id": "image-ext-idempotent",
+        "product_name": "Demo App",
+        "brief": "Create a clean product visual for daily use.",
+        "count": 2,
+        "size": "1:1",
+    }
+    try:
+        first = client.post(
+            "/api/v1/integrations/material-generation/images",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        second = client.post(
+            "/api/v1/integrations/material-generation/images",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["data"]["request_id"] == second.json()["data"]["request_id"]
+    assert first.json()["data"]["urls"] == second.json()["data"]["urls"]
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+
+    assert len(assets) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_image_generation_rolls_back_when_brand_safety_blocks_asset(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_asset_builder = CreativeService._asset_from_generated_image
+
+    async def risky_asset_builder(self, *args, **kwargs):
+        asset = await original_asset_builder(self, *args, **kwargs)
+        asset.prompt = "casino cash jackpot"
+        asset.alt_text = "casino cash jackpot"
+        return asset
+
+    monkeypatch.setattr(
+        CreativeService,
+        "_asset_from_generated_image",
+        risky_asset_builder,
+    )
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/material-generation/images",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "image-ext-blocked",
+                "product_name": "Demo App",
+                "brief": "Create a clean product visual for daily use.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == 4091
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        drafts = (await session.execute(select(CopyDraft))).scalars().all()
+
+    assert assets == []
+    assert len(drafts) == 1
     await engine.dispose()
