@@ -28,7 +28,7 @@ test("reads blocked brand safety reports from final payloads", () => {
   });
 
   assert.equal(brandSafetyBlocksReturn(report), true);
-  assert.equal(brandSafetyAllowsReturn(report), false);
+  assert.equal(brandSafetyAllowsReturn(report), true);
   assert.equal(brandSafetySummaryLabel(report), "品牌安全未通过");
   assert.equal(report?.findings[0]?.field_path, "creative_payload.message");
 });

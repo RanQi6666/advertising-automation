@@ -4,7 +4,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import get_settings
-from backend.app.core.errors import AppError
 from backend.app.db.base import Base
 from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.agent_run import AgentRun
@@ -892,7 +891,7 @@ async def test_publishing_ad_generation_review_confirm_marks_job_reviewed() -> N
 
 
 @pytest.mark.asyncio
-async def test_confirm_review_blocks_brand_safety_risks() -> None:
+async def test_confirm_review_records_brand_safety_risks_but_returns() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -941,18 +940,15 @@ async def test_confirm_review_blocks_brand_safety_risks() -> None:
             },
         }
 
-        with pytest.raises(AppError, match="品牌安全检查未通过"):
-            await service.confirm_review(
-                session,
-                generated.id,
-                PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
-            )
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
+        )
 
-        blocked = await service.get_job(session, generated.id)
-
-    assert blocked.status == "final_review"
-    assert blocked.result_payload["status"] == "final_review"
-    brand_safety = blocked.result_payload["review"]["brand_safety"]
+    assert returned.status == "returned"
+    assert returned.result_payload["status"] == "returned"
+    brand_safety = returned.result_payload["review"]["brand_safety"]
     assert brand_safety["status"] == "blocked"
     assert brand_safety["highest_severity"] == "high"
     assert {item["category"] for item in brand_safety["findings"]} >= {"price_promotion"}

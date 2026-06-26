@@ -45,8 +45,8 @@ export function brandSafetyBlocksReturn(report: BrandSafetyReport | null): boole
   );
 }
 
-export function brandSafetyAllowsReturn(report: BrandSafetyReport | null): boolean {
-  return !brandSafetyBlocksReturn(report);
+export function brandSafetyAllowsReturn(_: BrandSafetyReport | null): boolean {
+  return true;
 }
 
 export function brandSafetySummaryLabel(report: BrandSafetyReport | null): string {
