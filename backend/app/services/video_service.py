@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,13 +72,7 @@ class VideoService:
             asset_ids=payload.creative_asset_ids,
         )
         draft = await self._load_draft(session, payload.draft_id, assets)
-        context = {
-            "work_order": campaign.metadata_json.get("work_order"),
-            "landing_page": await self._landing_page_context(
-                session,
-                campaign_id=payload.campaign_id,
-            ),
-        }
+        context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         llm, llm_settings = self._llm_for_model(payload.model_id)
         storyboard = await llm.generate_video_storyboard(
             campaign=campaign,  # type: ignore[arg-type]
@@ -89,7 +84,11 @@ class VideoService:
             instructions=payload.instructions,
         )
         storyboard_items = [scene.model_dump() for scene in storyboard.scenes]
-        prompt = _storyboard_to_prompt(storyboard_items)
+        creative_strategy = _strategy_from_context(context)
+        prompt = _storyboard_to_prompt(
+            storyboard_items,
+            creative_strategy=creative_strategy,
+        )
         return VideoStoryboardRead(
             campaign_id=payload.campaign_id,
             draft_id=draft.id if draft else None,
@@ -104,6 +103,7 @@ class VideoService:
                 "provider": llm_settings.llm_provider,
                 "model": effective_text_model(llm_settings),
                 "instructions": payload.instructions,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
 
@@ -112,9 +112,10 @@ class VideoService:
         session: AsyncSession,
         payload: VideoGenerateRequest,
     ) -> VideoAsset:
-        await get_required(session, Campaign, payload.campaign_id)
+        campaign = await get_required(session, Campaign, payload.campaign_id)
+        draft = None
         if payload.draft_id:
-            await get_required(session, CopyDraft, payload.draft_id)
+            draft = await get_required(session, CopyDraft, payload.draft_id)
 
         assets = await self._load_source_assets(
             session=session,
@@ -122,16 +123,24 @@ class VideoService:
             asset_ids=payload.creative_asset_ids,
         )
         inferred_draft_id = payload.draft_id or assets[0].draft_id
+        if draft is None and inferred_draft_id:
+            draft = await get_required(session, CopyDraft, inferred_draft_id)
         landing_page_context = await self._landing_page_context(
             session,
             campaign_id=payload.campaign_id,
+        )
+        creative_strategy = _creative_strategy_from_sources(
+            campaign=campaign,  # type: ignore[arg-type]
+            draft=draft,  # type: ignore[arg-type]
+            assets=assets,  # type: ignore[arg-type]
+            metadata=payload.metadata_json,
         )
 
         video = VideoAsset(
             campaign_id=payload.campaign_id,
             draft_id=inferred_draft_id,
             source_asset_ids=payload.creative_asset_ids,
-            prompt=payload.prompt,
+            prompt=_prompt_with_creative_strategy(payload.prompt, creative_strategy),
             storyboard=payload.storyboard,
             duration_seconds=payload.duration_seconds,
             aspect_ratio=payload.aspect_ratio,
@@ -140,6 +149,7 @@ class VideoService:
                 "implementation_status": "configured",
                 "note": "Video generation task is configured. Call generate to start provider job.",
                 "landing_page": landing_page_context,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
         session.add(video)
@@ -159,13 +169,7 @@ class VideoService:
             asset_ids=payload.creative_asset_ids,
         )
         draft = await self._load_draft(session, payload.draft_id, assets)
-        context = {
-            "work_order": campaign.metadata_json.get("work_order"),
-            "landing_page": await self._landing_page_context(
-                session,
-                campaign_id=payload.campaign_id,
-            ),
-        }
+        context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         yield {
             "type": "start",
             "duration_seconds": payload.duration_seconds,
@@ -194,6 +198,7 @@ class VideoService:
             yield {"type": "error", "message": f"视频脚本生成中断：{exc}"}
             return
 
+        full_text = _ensure_storyboard_source_asset_notes(full_text, assets)
         yield {
             "type": "done",
             "duration_seconds": payload.duration_seconds,
@@ -219,13 +224,7 @@ class VideoService:
             asset_ids=payload.creative_asset_ids,
         )
         draft = await self._load_draft(session, payload.draft_id, assets)
-        context = {
-            "work_order": campaign.metadata_json.get("work_order"),
-            "landing_page": await self._landing_page_context(
-                session,
-                campaign_id=payload.campaign_id,
-            ),
-        }
+        context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         llm, llm_settings = self._llm_for_model(payload.model_id)
         storyboard = await llm.revise_video_storyboard(
             campaign=campaign,  # type: ignore[arg-type]
@@ -239,7 +238,11 @@ class VideoService:
             feedback=feedback,
         )
         storyboard_items = [scene.model_dump() for scene in storyboard.scenes]
-        prompt = _storyboard_to_prompt(storyboard_items)
+        creative_strategy = _strategy_from_context(context)
+        prompt = _storyboard_to_prompt(
+            storyboard_items,
+            creative_strategy=creative_strategy,
+        )
         return VideoStoryboardRead(
             campaign_id=payload.campaign_id,
             draft_id=draft.id if draft else None,
@@ -254,6 +257,7 @@ class VideoService:
                 "provider": llm_settings.llm_provider,
                 "model": effective_text_model(llm_settings),
                 "revision_feedback": feedback,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
 
@@ -277,13 +281,7 @@ class VideoService:
             asset_ids=payload.creative_asset_ids,
         )
         draft = await self._load_draft(session, payload.draft_id, assets)
-        context = {
-            "work_order": campaign.metadata_json.get("work_order"),
-            "landing_page": await self._landing_page_context(
-                session,
-                campaign_id=payload.campaign_id,
-            ),
-        }
+        context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         yield {
             "type": "start",
             "duration_seconds": payload.duration_seconds,
@@ -314,6 +312,7 @@ class VideoService:
             yield {"type": "error", "message": f"视频脚本改写中断：{exc}"}
             return
 
+        full_text = _ensure_storyboard_source_asset_notes(full_text, assets)
         yield {
             "type": "done",
             "duration_seconds": payload.duration_seconds,
@@ -480,6 +479,30 @@ class VideoService:
         latest_snapshot = await self.landing_pages.get_latest_snapshot(session, campaign_id)
         return snapshot_to_context(latest_snapshot) if latest_snapshot else None
 
+    async def _video_context(
+        self,
+        session: AsyncSession,
+        campaign: Campaign,
+        draft: CopyDraft | None,
+        assets: list[CreativeAsset],
+        metadata: dict | None,
+    ) -> dict[str, Any]:
+        landing_page_context = await self._landing_page_context(
+            session,
+            campaign_id=campaign.id,
+        )
+        creative_strategy = _creative_strategy_from_sources(
+            campaign=campaign,
+            draft=draft,
+            assets=assets,
+            metadata=metadata,
+        )
+        return {
+            "work_order": (campaign.metadata_json or {}).get("work_order"),
+            "landing_page": landing_page_context,
+            **({"creative_strategy": creative_strategy} if creative_strategy else {}),
+        }
+
     async def _build_provider_request(
         self,
         session: AsyncSession,
@@ -525,7 +548,14 @@ class VideoService:
                 "Please create a supported duration task."
             )
 
-        prompt = (video.prompt or _storyboard_to_prompt(video.storyboard or [])).strip()
+        creative_strategy = _strategy_from_metadata(video.metadata_json)
+        prompt = (
+            _prompt_with_creative_strategy(video.prompt, creative_strategy)
+            or _storyboard_to_prompt(
+                video.storyboard or [],
+                creative_strategy=creative_strategy,
+            )
+        ).strip()
         return VideoGenerationRequest(
             prompt=prompt,
             source_images=source_images,
@@ -535,6 +565,7 @@ class VideoService:
                 "campaign_id": video.campaign_id,
                 "draft_id": video.draft_id,
                 "video_id": video.id,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
 
@@ -546,11 +577,17 @@ class VideoService:
         return True
 
 
-def _storyboard_to_prompt(storyboard: list[dict]) -> str:
+def _storyboard_to_prompt(
+    storyboard: list[dict],
+    creative_strategy: dict | None = None,
+) -> str:
     lines = [
         "Create a short ad video using this approved storyboard:",
         BRAND_SAFETY_VISUAL_BAN,
     ]
+    strategy_block = _creative_strategy_prompt_block(creative_strategy)
+    if strategy_block:
+        lines.append(strategy_block)
     for scene in storyboard:
         lines.append(
             " | ".join(
@@ -567,6 +604,109 @@ def _storyboard_to_prompt(storyboard: list[dict]) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def _prompt_with_creative_strategy(
+    prompt: str | None,
+    creative_strategy: dict | None,
+) -> str | None:
+    if not prompt:
+        return None
+    strategy_block = _creative_strategy_prompt_block(creative_strategy)
+    if not strategy_block or "creative_strategy:" in prompt:
+        return prompt
+    return f"{prompt.strip()}\n\n{strategy_block}"
+
+
+def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
+    if not isinstance(creative_strategy, dict):
+        return ""
+    template_id = creative_strategy.get("template_id") or "unknown"
+    first_frame = creative_strategy.get("first_frame")
+    last_frame = creative_strategy.get("last_frame")
+    motion_direction = creative_strategy.get("motion_direction")
+    guardrails = creative_strategy.get("compliance_guardrails")
+    lines = [
+        f"creative_strategy: {template_id}",
+        "Use this as a 12-second first/last-frame workflow.",
+        f"first-frame hook: {_strategy_frame_summary(first_frame)}",
+        f"last-frame resolution: {_strategy_frame_summary(last_frame)}",
+    ]
+    if template_id == "mini_game_pool":
+        lines.append(
+            "Mini-game-pool rule: open with gameplay-led curiosity and end on the GAJA777 "
+            "game hub with Register or Play Now CTA."
+        )
+    elif template_id == "gaja_brand":
+        lines.append(
+            "GAJA brand rule: make GAJA777 visible from the first frame and end on a "
+            "Register or Play Now CTA."
+        )
+    if isinstance(motion_direction, list) and motion_direction:
+        lines.append(f"Motion direction: {'; '.join(str(item) for item in motion_direction[:4])}")
+    if isinstance(guardrails, list) and guardrails:
+        lines.append(f"Compliance guardrails: {'; '.join(str(item) for item in guardrails[:4])}")
+    return "\n".join(lines)
+
+
+def _strategy_frame_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "follow the approved frame role."
+    role = value.get("role")
+    visual_must_include = value.get("visual_must_include")
+    parts = [str(role)] if role else []
+    if isinstance(visual_must_include, list):
+        parts.extend(str(item) for item in visual_must_include[:5])
+    composition = value.get("composition")
+    if composition:
+        parts.append(str(composition))
+    return "; ".join(parts) if parts else "follow the approved frame role."
+
+
+def _strategy_from_context(context: dict[str, Any]) -> dict | None:
+    return _strategy_from_metadata(context)
+
+
+def _creative_strategy_from_sources(
+    campaign: Campaign,
+    draft: CopyDraft | None,
+    assets: list[CreativeAsset],
+    metadata: dict | None = None,
+) -> dict | None:
+    for source in (
+        metadata,
+        campaign.metadata_json if isinstance(campaign.metadata_json, dict) else None,
+        draft.metadata_json if draft and isinstance(draft.metadata_json, dict) else None,
+        *(
+            asset.metadata_json if isinstance(asset.metadata_json, dict) else None
+            for asset in assets
+        ),
+    ):
+        strategy = _strategy_from_metadata(source)
+        if strategy:
+            return strategy
+    return None
+
+
+def _strategy_from_metadata(metadata: Any) -> dict | None:
+    if not isinstance(metadata, dict):
+        return None
+    strategy = metadata.get("creative_strategy")
+    return strategy if isinstance(strategy, dict) else None
+
+
+def _ensure_storyboard_source_asset_notes(text: str, assets: list[CreativeAsset]) -> str:
+    asset_ids = [asset.id for asset in assets if asset.id]
+    if not asset_ids or "No source image provided" not in text:
+        return text
+    source_note = ", ".join(asset_ids)
+    return text.replace(
+        "Source image id notes: No source image provided.",
+        f"Source image id notes: {source_note}.",
+    ).replace(
+        "Source image id notes: No source image provided",
+        f"Source image id notes: {source_note}",
+    )
 
 
 async def _stream_text_with_heartbeat(

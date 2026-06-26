@@ -147,6 +147,8 @@ class OpenAILLMProvider:
                 "previous_topics, and explain the adjustment in rationale. If "
                 "signals.previous_topics is present without feedback, still avoid repeating "
                 "those existing topics.\n\n"
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -321,7 +323,9 @@ class OpenAILLMProvider:
                 "video_keyframe_variants, create paired variants: each group has one "
                 "first-frame hook image and one last-frame resolution image for the same "
                 "12-second video idea. Make each pair visually coherent while keeping the "
-                "three groups distinct enough for an operator to choose between.\n\n"
+                "three groups distinct enough for an operator to choose between. "
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -360,14 +364,20 @@ class OpenAILLMProvider:
                 "with duration_seconds, aspect_ratio, scenes, and rationale. Each scene "
                 "must include scene_index, start_second, end_second, visual, subtitle, "
                 "motion, voiceover, source_asset_ids, and notes. Use the selected images "
-                "as source assets; do not invent unavailable image ids. Keep subtitles "
+                "as source assets; do not invent unavailable image ids. If assets is "
+                "non-empty, every scene's source_asset_ids must include one or more exact "
+                "ids from selected_asset_ids. Never leave source_asset_ids empty when "
+                "assets are provided. If assets is empty, use an empty source_asset_ids "
+                "list. Keep subtitles "
                 "short, readable, and suitable for mobile feed placements. Do not script "
                 "unlicensed IP, fake UI, misleading controls, platform logos/UI, or "
                 "unsupported claims. "
                 "subtitle and voiceover are user-facing and must use the target audience "
                 "language. visual, motion, notes, and rationale may use Simplified Chinese "
                 "for operator review, but any visible text requested in visual must use "
-                "the target audience language.\n\n"
+                "the target audience language. "
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -381,6 +391,7 @@ class OpenAILLMProvider:
                     },
                     "copy_draft": _draft_context(draft),
                     "assets": [_asset_context(asset) for asset in assets],
+                    "selected_asset_ids": [asset.id for asset in assets],
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
                     "context": context,
@@ -428,6 +439,7 @@ class OpenAILLMProvider:
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
+                            "selected_asset_ids": [asset.id for asset in assets],
                             "duration_seconds": duration_seconds,
                             "aspect_ratio": aspect_ratio,
                             "context": context,
@@ -469,13 +481,20 @@ class OpenAILLMProvider:
                 "voiceover, source_asset_ids, and notes. Preserve the current storyboard's "
                 "usable structure, timing, selected source image ids, product intent, and "
                 "approved copy unless the feedback explicitly asks to change them. Apply "
-                "the feedback as mandatory. Do not invent unavailable image ids. Keep "
+                "the feedback as mandatory. Do not invent unavailable image ids. "
+                "If assets is non-empty, every scene's source_asset_ids must include one "
+                "or more exact ids from selected_asset_ids; preserve existing valid ids "
+                "when useful and fill missing scene ids from selected_asset_ids. Never "
+                "leave source_asset_ids empty when assets are provided. If assets is "
+                "empty, use an empty source_asset_ids list. Keep "
                 "subtitles short, readable, and suitable for mobile feed placements. Do "
                 "not script unlicensed IP, fake UI, misleading controls, platform "
                 "logos/UI, or unsupported claims. subtitle and voiceover are user-facing "
                 "and must use the target audience language. visual, motion, notes, and "
                 "rationale may use Simplified Chinese for operator review, but any visible "
-                "text requested in visual must use the target audience language.\n\n"
+                "text requested in visual must use the target audience language. "
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -489,6 +508,7 @@ class OpenAILLMProvider:
                     },
                     "copy_draft": _draft_context(draft),
                     "assets": [_asset_context(asset) for asset in assets],
+                    "selected_asset_ids": [asset.id for asset in assets],
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
                     "context": context,
@@ -540,6 +560,7 @@ class OpenAILLMProvider:
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
+                            "selected_asset_ids": [asset.id for asset in assets],
                             "duration_seconds": duration_seconds,
                             "aspect_ratio": aspect_ratio,
                             "context": context,
@@ -787,15 +808,36 @@ def _video_storyboard_text_system_prompt(revision: bool) -> str:
         task
         + "Do not return JSON, markdown tables, code fences, or analysis. Stream only the "
         "script text that an operator can edit directly in a textarea. Use concise scene "
-        "blocks with time ranges, visual direction, subtitle, motion, voiceover, and source "
-        "image id notes when available. Use the selected images as source assets and do not "
-        "invent unavailable image ids. Keep subtitles short, readable, and suitable for "
+        "blocks with time ranges, visual direction, subtitle, motion, voiceover, and an "
+        "exact `Source image id notes:` line. Asset reference rule: If assets is non-empty, "
+        "every scene block must include `Source image id notes:` with one or more exact "
+        "ids from `selected_asset_ids`. Never write `No source image provided` when assets "
+        "is non-empty. If assets is empty, write `Source image id notes: No source image "
+        "provided.` Use the selected images as source assets and do not invent unavailable "
+        "image ids. Keep subtitles short, readable, and suitable for "
         "mobile feed placements. Do not script unlicensed IP, fake UI, misleading controls, "
         "platform logos/UI, QR codes, watermarks, or unsupported claims. subtitle and "
         "voiceover are user-facing and must use the target audience language. Operator-facing "
         "labels, visual direction, motion notes, and review notes may use Simplified Chinese, "
-        "but any visible text requested in the video must use the target audience language.\n\n"
+        "but any visible text requested in the video must use the target audience language. "
+        + _creative_strategy_system_instruction()
+        + "\n\n"
         + language_requirements_prompt()
+    )
+
+
+def _creative_strategy_system_instruction() -> str:
+    return (
+        "If draft_metadata.creative_strategy, campaign.metadata.creative_strategy, or "
+        "context.creative_strategy is provided, treat creative_strategy as mandatory "
+        "ad-direction context. Honor its template_id, duration_seconds, first_frame, "
+        "last_frame, motion_direction, and compliance_guardrails. For a 12-second "
+        "first/last-frame workflow, make the first-frame hook and last-frame resolution "
+        "explicit. For mini_game_pool, lead with a gameplay-led mini-game challenge and "
+        "finish on a GAJA777 game hub end card. For gaja_brand, make GAJA777 visible from "
+        "the first frame and finish on a Register or Play Now CTA. Keep all claims about "
+        "navigation, variety, simple start, and app experience. Avoid outcome promises, "
+        "value-return implications, fake platform UI, or fake browser/app screenshots."
     )
 
 
@@ -816,6 +858,8 @@ def _topic_stream_system_prompt() -> str:
         "If signals.topic_revision_feedback is present, treat it as mandatory operator "
         "feedback: adjust the new topics to satisfy it, avoid repeating previous_topics, "
         "and explain the adjustment in rationale.\n\n"
+        + _creative_strategy_system_instruction()
+        + "\n\n"
         + language_requirements_prompt()
     )
 
@@ -925,6 +969,10 @@ def _compact_topic_signals(signals: dict[str, Any]) -> dict[str, Any]:
     )
     if selling_points:
         compact["selling_points"] = selling_points
+
+    creative_strategy = _compact_creative_strategy(signals.get("creative_strategy"))
+    if creative_strategy:
+        compact["creative_strategy"] = creative_strategy
 
     return compact
 
@@ -1213,7 +1261,13 @@ def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | No
     storyboard_text = _truncate(_coerce_optional_text(value.get("storyboard_text")), 4000)
     keyframe_plan = value.get("keyframe_plan")
     compact_keyframe_plan = keyframe_plan if isinstance(keyframe_plan, dict) else None
-    if not compact_scenes and not storyboard_text and not compact_keyframe_plan:
+    creative_strategy = _compact_creative_strategy(value.get("creative_strategy"))
+    if (
+        not compact_scenes
+        and not storyboard_text
+        and not compact_keyframe_plan
+        and not creative_strategy
+    ):
         return None
     context = {
         "scenes": [
@@ -1234,7 +1288,32 @@ def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | No
             )
             if compact_keyframe_plan.get(key) not in (None, "", [])
         }
+    if creative_strategy:
+        context["creative_strategy"] = creative_strategy
     return context
+
+
+def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for key in (
+        "template_id",
+        "template_name",
+        "duration_seconds",
+        "aspect_ratio",
+        "brand",
+        "game_pool_examples",
+        "meta_restricted_game_ad_safe_mode",
+        "first_frame",
+        "last_frame",
+        "motion_direction",
+        "compliance_guardrails",
+    ):
+        item = value.get(key)
+        if item not in (None, "", []):
+            compact[key] = item
+    return compact or None
 
 
 def _coerce_text(value: Any) -> str:

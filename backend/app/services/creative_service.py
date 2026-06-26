@@ -68,7 +68,13 @@ class CreativeService:
         keyframe_plan: dict | None = None,
     ) -> list[CreativeAsset]:
         draft = await get_required(session, CopyDraft, draft_id)
-        storyboard_context = _storyboard_context(storyboard or [], storyboard_text, keyframe_plan)
+        creative_strategy = _creative_strategy_from_draft(draft)
+        storyboard_context = _storyboard_context(
+            storyboard or [],
+            storyboard_text,
+            keyframe_plan,
+            creative_strategy,
+        )
         briefs = await self.llm.generate_image_briefs(
             draft=draft,  # type: ignore[arg-type]
             count=count,
@@ -90,6 +96,7 @@ class CreativeService:
                 extra_metadata={
                     **extra_metadata,
                     **({"storyboard_context": storyboard_context} if storyboard_context else {}),
+                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                     **_keyframe_metadata(brief.image_index, keyframe_plan),
                     "image_model": effective_image_model(image_settings),
                     "image_provider": image_settings.image_provider,
@@ -106,10 +113,12 @@ class CreativeService:
         draft = await get_required(session, CopyDraft, payload.draft_id)
         slot_indices = _slot_indices(payload)
         keyframe_plan = _keyframe_plan(payload)
+        creative_strategy = _creative_strategy_from_draft(draft)
         storyboard_context = _storyboard_context(
             payload.storyboard,
             payload.storyboard_text,
             keyframe_plan,
+            creative_strategy,
         )
         yield {"type": "start", "limit": len(slot_indices), "indices": slot_indices}
         for index in slot_indices:
@@ -155,6 +164,7 @@ class CreativeService:
                         storyboard_context=storyboard_context,
                         keyframe_plan=keyframe_plan,
                         image_index=brief.image_index,
+                        creative_strategy=creative_strategy,
                     ),
                     image_model_id=payload.model_id,
                 )
@@ -226,6 +236,11 @@ class CreativeService:
             version=source_asset.version + 1,
             extra_metadata={
                 "streamed": False,
+                **(
+                    {"creative_strategy": _creative_strategy_from_draft(draft)}
+                    if _creative_strategy_from_draft(draft)
+                    else {}
+                ),
                 **_source_keyframe_metadata(source_asset),
                 "revision_feedback": feedback,
                 "source_creative_asset_id": source_asset.id,
@@ -369,10 +384,11 @@ def _storyboard_context(
     storyboard: list[dict],
     storyboard_text: str | None,
     keyframe_plan: dict | None = None,
+    creative_strategy: dict | None = None,
 ) -> dict | None:
     clean_scenes = [scene for scene in storyboard if isinstance(scene, dict)]
     clean_text = (storyboard_text or "").strip()
-    if not clean_scenes and not clean_text and not keyframe_plan:
+    if not clean_scenes and not clean_text and not keyframe_plan and not creative_strategy:
         return None
     context = {
         "storyboard": clean_scenes[:10],
@@ -380,6 +396,8 @@ def _storyboard_context(
     }
     if keyframe_plan:
         context["keyframe_plan"] = keyframe_plan
+    if creative_strategy:
+        context["creative_strategy"] = creative_strategy
     return context
 
 
@@ -388,13 +406,22 @@ def _creative_metadata(
     storyboard_context: dict | None = None,
     keyframe_plan: dict | None = None,
     image_index: int | None = None,
+    creative_strategy: dict | None = None,
 ) -> dict:
     metadata = {"streamed": streamed}
     if storyboard_context:
         metadata["storyboard_context"] = storyboard_context
+    if creative_strategy:
+        metadata["creative_strategy"] = creative_strategy
     if image_index is not None:
         metadata.update(_keyframe_metadata(image_index, keyframe_plan))
     return metadata
+
+
+def _creative_strategy_from_draft(draft: CopyDraft) -> dict | None:
+    metadata = draft.metadata_json if isinstance(draft.metadata_json, dict) else {}
+    strategy = metadata.get("creative_strategy")
+    return strategy if isinstance(strategy, dict) else None
 
 
 def _keyframe_plan(payload: CreativeGenerateRequest) -> dict | None:

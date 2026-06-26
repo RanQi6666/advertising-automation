@@ -125,6 +125,55 @@ async def test_publishing_ad_generation_builds_single_country_package() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publishing_ad_generation_persists_game_creative_strategy() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-gaja",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: GAJA777\n"
+                        "Country: India\n"
+                        "Event: complete_registration\n"
+                        "Brief: \u5c0f\u6e38\u620f\u6d41\u91cf\u6c60, "
+                        "\u6700\u7ec8\u5bfc\u5230 GAJA \u5c0f\u6e38\u620f\u5408\u96c6\n"
+                        "Landing: https://www.gaja777.game/#/?invite=YBG71118&register=true"
+                    ),
+                    structured_fields={
+                        "project_name": "GAJA777",
+                        "product_name": "GAJA777",
+                        "country": "India",
+                        "event_name": "complete_registration",
+                        "landing_url": (
+                            "https://www.gaja777.game/#/?invite=YBG71118&register=true"
+                        ),
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+
+        completed = await service.process_job(session, job.id)
+        campaign = await session.scalar(select(Campaign).where(Campaign.name == "GAJA777"))
+
+    assert campaign is not None
+    assert campaign.metadata_json["creative_strategy"]["template_id"] == "mini_game_pool"
+    assert (
+        completed.result_payload["metadata_json"]["creative_strategy"]["template_id"]
+        == "mini_game_pool"
+    )
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publishing_ad_generation_result_endpoint_requires_returned_status(
     tmp_path,
 ) -> None:
@@ -907,6 +956,152 @@ async def test_confirm_review_blocks_brand_safety_risks() -> None:
     assert brand_safety["status"] == "blocked"
     assert brand_safety["highest_severity"] == "high"
     assert {item["category"] for item in brand_safety["findings"]} >= {"price_promotion"}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_confirm_review_warns_but_returns_when_brand_safety_mode_is_warn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAND_SAFETY_MODE", "warn")
+    get_settings.cache_clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-brand-warn",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: brand warn\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: traffic\n"
+                        "Landing: https://example.com/brand-warn"
+                    ),
+                    structured_fields={
+                        "project_name": "Brand Warn",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "traffic",
+                        "landing_url": "https://example.com/brand-warn",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        generated = await service.process_job(session, job.id)
+        risky_payload = {
+            **generated.result_payload,
+            "status": "final_review",
+            "creative_payload": {
+                "name": "Brand Warn - image",
+                "type": "image",
+                "message": "Free deal today with cash and chips.",
+                "link": "https://example.com/brand-warn",
+                "ads_name": "Daily setup",
+                "description": "Simple setup guide",
+                "asset_url": "https://cdn.example/image.png",
+                "image_asset_url": "https://cdn.example/image.png",
+                "draft": 1,
+            },
+        }
+
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
+        )
+
+    assert returned.status == "returned"
+    assert returned.result_payload["status"] == "returned"
+    brand_safety = returned.result_payload["review"]["brand_safety"]
+    assert brand_safety["status"] == "blocked"
+    assert {item["category"] for item in brand_safety["findings"]} >= {
+        "gambling",
+        "money",
+        "price_promotion",
+    }
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_confirm_review_skips_brand_safety_when_mode_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAND_SAFETY_MODE", "off")
+    get_settings.cache_clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-brand-off",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: brand off\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: traffic\n"
+                        "Landing: https://example.com/brand-off"
+                    ),
+                    structured_fields={
+                        "project_name": "Brand Off",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "traffic",
+                        "landing_url": "https://example.com/brand-off",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        generated = await service.process_job(session, job.id)
+        risky_payload = {
+            **generated.result_payload,
+            "status": "final_review",
+            "creative_payload": {
+                "name": "Brand Off - image",
+                "type": "image",
+                "message": "Free deal today with cash and chips.",
+                "link": "https://example.com/brand-off",
+                "ads_name": "Daily setup",
+                "description": "Simple setup guide",
+                "asset_url": "https://cdn.example/image.png",
+                "image_asset_url": "https://cdn.example/image.png",
+                "draft": 1,
+            },
+        }
+
+        returned = await service.confirm_review(
+            session,
+            generated.id,
+            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
+        )
+
+    assert returned.status == "returned"
+    assert returned.result_payload["status"] == "returned"
+    assert returned.result_payload["review"]["brand_safety"] == {
+        "status": "skipped",
+        "highest_severity": None,
+        "findings": [],
+    }
 
     await engine.dispose()
 

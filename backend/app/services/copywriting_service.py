@@ -41,6 +41,11 @@ class CopywritingService:
             campaign=campaign,
             context={"landing_page": landing_page_context},
         )
+        campaign_metadata = campaign.metadata_json or {}
+        topic_source_data = topic.source_data or {}
+        creative_strategy = campaign_metadata.get("creative_strategy") or topic_source_data.get(
+            "creative_strategy"
+        )
         llm, llm_settings = self._llm_for_model(payload.model_id)
         model_name = effective_text_model(llm_settings)
         candidate = await llm.generate_copy(
@@ -62,6 +67,7 @@ class CopywritingService:
                 **({"landing_page": landing_page_context} if landing_page_context else {}),
                 "target_language": target_language,
                 "provider": llm_settings.llm_provider,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
         session.add(draft)

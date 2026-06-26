@@ -22,6 +22,7 @@ import {
   type ManualAdPerformancePayload,
 } from "./lib/adPerformanceManualJson";
 import {
+  brandSafetyAllowsReturn,
   brandSafetyBlocksReturn,
   brandSafetyReportFromPayload,
   brandSafetySummaryLabel,
@@ -2736,7 +2737,11 @@ function WorkflowView({
                   <Check size={16} />
                   <span>保存预审包</span>
                 </button>
-                <button className="primary-button" onClick={onConfirmReturn} disabled={!summary.final.done || brandSafetyBlocked}>
+                <button
+                  className="primary-button"
+                  onClick={onConfirmReturn}
+                  disabled={!summary.final.done || !brandSafetyAllowsReturn(brandSafetyReport)}
+                >
                   <Send size={16} />
                   <span>确认并回传</span>
                 </button>

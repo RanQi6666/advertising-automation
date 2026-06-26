@@ -14,6 +14,7 @@ from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import TopicCandidate
 from backend.app.schemas.landing_page import LandingPageAnalyzeRequest
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
+from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.landing_page_service import (
     LandingPageService,
     snapshot_to_context,
@@ -160,6 +161,11 @@ class TopicService:
                 "provider": provider,
                 "model": model,
                 "streamed": streamed,
+                **(
+                    {"creative_strategy": signals["creative_strategy"]}
+                    if isinstance(signals.get("creative_strategy"), dict)
+                    else {}
+                ),
             },
         )
 
@@ -230,6 +236,15 @@ class TopicService:
         selling_points = _topic_selling_points(request_signals, landing_page)
         if selling_points:
             signals["selling_points"] = selling_points
+
+        creative_strategy = _topic_creative_strategy(
+            campaign=campaign,
+            work_order_context=work_order_context,
+            landing_page_context=landing_page_context,
+            landing_page=landing_page,
+        )
+        if creative_strategy:
+            signals["creative_strategy"] = creative_strategy
 
         signals["target_language"] = build_target_language_context(
             campaign=campaign,
@@ -435,6 +450,82 @@ def _topic_selling_points(request_signals: dict, landing_page: dict) -> list[str
         if len(unique_points) >= TOPIC_SELLING_POINT_LIMIT:
             break
     return unique_points
+
+
+def _topic_creative_strategy(
+    campaign: Campaign,
+    work_order_context: dict | None,
+    landing_page_context: dict | None,
+    landing_page: dict,
+) -> dict | None:
+    campaign_metadata = _dict_value(campaign.metadata_json)
+    existing_strategy = _compact_creative_strategy(
+        campaign_metadata.get("creative_strategy")
+    )
+    if existing_strategy:
+        return existing_strategy
+
+    work_order = _dict_value(work_order_context)
+    parsed_fields = _dict_value(work_order.get("parsed_fields"))
+    landing_context = _dict_value(landing_page_context)
+    landing_url = _first_text(
+        landing_page.get("url"),
+        landing_context.get("url"),
+        _landing_url_from_context(work_order),
+    )
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": campaign.product_name,
+            "project_name": campaign.name,
+            "campaign_name": campaign.name,
+            "objective": campaign.objective,
+            "audience_description": campaign.audience_description,
+            "landing_url": landing_url,
+            "landing_page": landing_page,
+            "work_order": work_order,
+            "structured_fields": parsed_fields,
+            "reviewed_fields": _dict_value(work_order.get("reviewed_delivery_fields")),
+            "raw_content": work_order.get("raw_content"),
+            "brief": _first_text(
+                work_order.get("brief"),
+                parsed_fields.get("brief"),
+                parsed_fields.get("description"),
+                parsed_fields.get("audience_description_raw"),
+            ),
+            "event_name": _first_text(
+                work_order.get("event_name"),
+                parsed_fields.get("event_name"),
+                parsed_fields.get("objective"),
+                campaign.objective,
+            ),
+            "country": _first_text(work_order.get("country"), parsed_fields.get("country")),
+            "media": _first_text(work_order.get("media"), parsed_fields.get("media")),
+        }
+    )
+    return _compact_creative_strategy(strategy)
+
+
+def _compact_creative_strategy(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    compact = {
+        key: value.get(key)
+        for key in (
+            "template_id",
+            "template_name",
+            "duration_seconds",
+            "aspect_ratio",
+            "brand",
+            "game_pool_examples",
+            "meta_restricted_game_ad_safe_mode",
+            "first_frame",
+            "last_frame",
+            "motion_direction",
+            "compliance_guardrails",
+        )
+        if value.get(key) not in (None, "", [])
+    }
+    return compact or None
 
 
 def _compact_previous_topic(value: object) -> dict | None:

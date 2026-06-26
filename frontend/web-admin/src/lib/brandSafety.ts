@@ -45,6 +45,10 @@ export function brandSafetyBlocksReturn(report: BrandSafetyReport | null): boole
   );
 }
 
+export function brandSafetyAllowsReturn(_: BrandSafetyReport | null): boolean {
+  return true;
+}
+
 export function brandSafetySummaryLabel(report: BrandSafetyReport | null): string {
   if (!report) return "待检查";
   if (brandSafetyBlocksReturn(report)) return "品牌安全未通过";

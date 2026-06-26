@@ -8,8 +8,10 @@ from backend.app.core.config import get_settings
 from backend.app.db.models.campaign import Campaign
 from backend.app.integrations.llm.openai_provider import (
     OpenAILLMProvider,
+    _topic_stream_system_prompt,
     _TopicNDJSONStreamParser,
 )
+from backend.app.schemas.ai import TopicCandidate
 from backend.app.services.topic_service import TopicService
 
 
@@ -83,6 +85,75 @@ async def test_topic_service_builds_slim_signals_without_raw_work_order() -> Non
 
 
 @pytest.mark.asyncio
+async def test_topic_service_adds_game_creative_strategy_to_signals() -> None:
+    service = TopicService()
+    mini_game_brief = (
+        "\u5c0f\u6e38\u620f\u6d41\u91cf\u6c60\uff0c\u6700\u7ec8"
+        "\u5bfc\u5230 GAJA \u91cc\u7684\u5c0f\u6e38\u620f\u5408\u96c6"
+    )
+    campaign = Campaign(
+        id="campaign-gaja",
+        name="GAJA777 India",
+        objective="first recharge",
+        product_name="GAJA777",
+        audience_description="India users age 18-65",
+        metadata_json={
+            "work_order": {
+                "raw_content": mini_game_brief,
+                "country": "IN",
+                "media": "fb",
+                "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+                "parsed_fields": {
+                    "event_name": "first recharge",
+                    "age_min": 18,
+                    "age_max": 65,
+                },
+            },
+            "landing_page": {
+                "url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+                "status": "fetched",
+                "title": "GAJA777",
+                "description": "Casual game hub",
+            },
+        },
+    )
+
+    signals = await service._build_effective_signals(  # noqa: SLF001
+        session=None,  # type: ignore[arg-type]
+        campaign=campaign,
+        request_signals={"integration": "publishing_jump_workflow"},
+    )
+
+    assert signals["creative_strategy"]["template_id"] == "mini_game_pool"
+    assert signals["creative_strategy"]["duration_seconds"] == 12
+    assert signals["creative_strategy"]["brand"]["display_name"] == "GAJA777"
+    serialized = json.dumps(signals, ensure_ascii=False)
+    assert "raw_content" not in serialized
+    assert mini_game_brief not in serialized
+
+
+def test_topic_source_data_promotes_creative_strategy_for_downstream() -> None:
+    topic = TopicService()._topic_from_candidate(  # noqa: SLF001
+        campaign_id="campaign-gaja",
+        candidate=TopicCandidate(
+            title="GAJA777 game hub",
+            angle="Lead with easy platform navigation.",
+            audience="India users",
+            selling_points=["Casual game hub"],
+            risk_notes="Avoid outcome promises.",
+            rationale="Keeps the topic aligned with GAJA platform traffic.",
+            score=0.9,
+        ),
+        signals={"creative_strategy": {"template_id": "gaja_brand"}},
+        streamed=True,
+        provider="mock",
+        model="mock-model",
+    )
+
+    assert topic.source_data["creative_strategy"]["template_id"] == "gaja_brand"
+
+
+@pytest.mark.asyncio
 async def test_topic_service_fetches_landing_snapshot_before_generation() -> None:
     service = TopicService()
     analyzed_urls: list[str] = []
@@ -145,6 +216,7 @@ async def test_openai_topic_generation_sends_compact_payload(
     captured: dict[str, object] = {}
 
     async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
         captured["payload"] = json.loads(user)
         return {
             "topics": [
@@ -202,6 +274,21 @@ async def test_openai_topic_generation_sends_compact_payload(
                 }
             ],
             "topic_revision_feedback": "Make it more family-oriented.",
+            "creative_strategy": {
+                "template_id": "mini_game_pool",
+                "template_name": "Mini-game pool to GAJA game hub ad",
+                "duration_seconds": 12,
+                "aspect_ratio": "9:16",
+                "brand": {
+                    "display_name": "GAJA777",
+                    "landing_domain": "gaja777.game",
+                },
+                "first_frame": {"visual_must_include": ["light GAJA777 corner logo"]},
+                "last_frame": {"cta_must_include": ["Register", "Play Now"]},
+                "motion_direction": "Expand into GAJA777 game hub.",
+                "compliance_guardrails": ["Meta-safe casual-game visuals"],
+                "ignored": "SHOULD NOT BE SENT",
+            },
             "unrelated_large_blob": "SHOULD NOT BE SENT",
         },
     )
@@ -218,6 +305,17 @@ async def test_openai_topic_generation_sends_compact_payload(
     assert signals["work_order"]["landing_domain"] == "example.com"  # type: ignore[index]
     assert len(signals["landing_page"]["text_excerpt"]) <= 600  # type: ignore[index]
     assert signals["selling_points"][:2] == ["Live TV", "HD shows"]  # type: ignore[index]
+    assert signals["creative_strategy"]["template_id"] == "mini_game_pool"  # type: ignore[index]
+    assert "ignored" not in signals["creative_strategy"]  # type: ignore[index]
+    assert "creative_strategy" in captured["system"]  # type: ignore[operator]
+    assert "mandatory" in captured["system"]  # type: ignore[operator]
+
+
+def test_topic_stream_prompt_mentions_creative_strategy() -> None:
+    prompt = _topic_stream_system_prompt()
+
+    assert "creative_strategy" in prompt
+    assert "mandatory" in prompt
 
 
 def test_topic_stream_parser_yields_ndjson_topics_incrementally() -> None:

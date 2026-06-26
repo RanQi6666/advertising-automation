@@ -55,7 +55,12 @@ _POLICIES: dict[str, tuple[str, ...]] = {
         r"\bbet(?:ting)?\b",
         r"\bodds?\b",
         r"\bjackpot\b",
+        r"\bbonuses?\b",
+        r"\bwelcome\s+bonuses?\b",
         r"\blottery\b",
+        r"\bdice\b",
+        r"\baviator\b",
+        r"\bteen\s+patti\b",
         r"\bpoker\b",
         r"\broulette\b",
         r"\bslot\s*machine\b",
@@ -234,6 +239,8 @@ def _walk_text(value: Any, path: str = "$") -> Iterator[tuple[str, str]]:
         for key, child in value.items():
             key_text = str(key)
             child_path = f"{path}.{key_text}" if path else key_text
+            if _is_ignored_path(child_path):
+                continue
             if _is_url_path(child_path):
                 continue
             yield from _walk_text(child, child_path)
@@ -258,3 +265,10 @@ def _is_url_path(path: str) -> bool:
     normalized = path.lower().replace("-", "_")
     last_segment = normalized.rsplit(".", maxsplit=1)[-1]
     return last_segment in _URL_FIELD_NAMES or last_segment.endswith("_url")
+
+
+def _is_ignored_path(path: str) -> bool:
+    normalized = path.lower().replace("-", "_")
+    return normalized == "$.review.brand_safety" or normalized.startswith(
+        "$.review.brand_safety."
+    )

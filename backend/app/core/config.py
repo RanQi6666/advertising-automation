@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
     ad_performance_video_input_fps: float = Field(default=1.0, ge=0.2, le=5.0)
+    brand_safety_mode: Literal["block", "warn", "off"] = "block"
     ark_api_key: str | None = None
     volcengine_api_key: str | None = None
     volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
@@ -89,6 +90,13 @@ class Settings(BaseSettings):
     def parse_model_gateway_models(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [model.strip() for model in value.split(",") if model.strip()]
+        return value
+
+    @field_validator("brand_safety_mode", mode="before")
+    @classmethod
+    def normalize_brand_safety_mode(cls, value: str) -> str:
+        if isinstance(value, str):
+            return value.strip().lower()
         return value
 
 

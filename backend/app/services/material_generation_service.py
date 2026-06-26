@@ -27,6 +27,7 @@ from backend.app.schemas.material_generation import (
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
+from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.model_selection import effective_text_model
 from backend.app.services.video_service import VideoService
@@ -59,6 +60,7 @@ class MaterialGenerationService:
                 constraints=payload.constraints,
             )
             custom_event_type = payload.customEventType or _custom_event_type(payload.event_name)
+            creative_strategy = (campaign.metadata_json or {}).get("creative_strategy")
             draft = CopyDraft(
                 campaign_id=campaign.id,
                 topic_id=topic.id,
@@ -75,6 +77,7 @@ class MaterialGenerationService:
                     "material_type": "copy",
                     "customEventType": custom_event_type,
                     "provider": llm_settings.llm_provider,
+                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                 },
             )
             session.add(draft)
@@ -155,6 +158,7 @@ class MaterialGenerationService:
 
         try:
             campaign, topic = await self._create_context(session, payload, material_type="video")
+            creative_strategy = (campaign.metadata_json or {}).get("creative_strategy")
             draft = CopyDraft(
                 campaign_id=campaign.id,
                 topic_id=topic.id,
@@ -171,6 +175,7 @@ class MaterialGenerationService:
                     "material_type": "video",
                     "customEventType": payload.customEventType
                     or _custom_event_type(payload.event_name),
+                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                 },
             )
             session.add(draft)
@@ -194,6 +199,7 @@ class MaterialGenerationService:
                         "external_request_id": payload.external_request_id,
                         "material_type": "video_source_image",
                         "provider_image_url": url,
+                        **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                     },
                 )
                 session.add(asset)
@@ -213,6 +219,7 @@ class MaterialGenerationService:
                     "external_request_id": payload.external_request_id,
                     "material_type": "video",
                     "implementation_status": "configured",
+                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                     "note": (
                         "Video generation task is configured. "
                         "Provider generation starts immediately."
@@ -285,6 +292,9 @@ class MaterialGenerationService:
             "selling_points": selling_points,
             "constraints": payload.constraints,
         }
+        creative_strategy = build_game_creative_strategy(external_context)
+        if creative_strategy:
+            external_context["creative_strategy"] = creative_strategy
         work_order = {
             "source": SOURCE,
             "landing_url": landing_url,

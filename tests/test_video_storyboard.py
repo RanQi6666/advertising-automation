@@ -10,6 +10,7 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
+from backend.app.integrations.llm.openai_provider import _video_storyboard_text_system_prompt
 from backend.app.schemas.video import (
     VideoGenerateRequest,
     VideoStoryboardGenerateRequest,
@@ -17,6 +18,7 @@ from backend.app.schemas.video import (
 )
 from backend.app.services import video_service
 from backend.app.services.brand_safety_policy import scan_brand_safety
+from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     VideoService,
@@ -80,6 +82,48 @@ async def test_mock_provider_generates_video_storyboard() -> None:
     assert len(storyboard.scenes) == 3
     assert storyboard.scenes[0].source_asset_ids == ["asset-1"]
     assert storyboard.scenes[-1].subtitle == "Download Now"
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_uses_game_strategy_for_video_storyboard() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "brief": "\u5c0f\u6e38\u620f\u6d41\u91cf\u6c60",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA777 campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Mini game ad copy.",
+        primary_text="Try a quick mini-game and find more games on GAJA777.",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions=None,
+    )
+
+    assert "mini-game challenge" in storyboard.scenes[0].visual
+    assert "GAJA777 game hub" in storyboard.scenes[-1].visual
+    assert storyboard.scenes[-1].subtitle in {"Register", "Play Now"}
 
 
 @pytest.mark.asyncio
@@ -209,6 +253,74 @@ async def test_video_service_generates_storyboard_from_draft_without_reference_i
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_video_service_done_text_replaces_empty_source_notes_when_assets_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProviderThatOmitsSourceIds:
+        async def stream_video_storyboard_text(self, **_: object) -> AsyncIterator[str]:
+            yield "Scene 1 | 0.0-2.0s\n"
+            yield "Source image id notes: No source image provided.\n"
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    service = VideoService()
+    monkeypatch.setattr(
+        service,
+        "_llm_for_model",
+        lambda _model_id: (ProviderThatOmitsSourceIds(), None),
+    )
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-1",
+            name="GAJA777 campaign",
+            product_name="GAJA777",
+            audience_description="India users",
+            metadata_json={},
+        )
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Create a short game-platform video.",
+            metadata_json={},
+        )
+        asset = CreativeAsset(
+            id="asset-1",
+            campaign_id=campaign.id,
+            draft_id=draft.id,
+            prompt="GAJA777 brand lobby reference image.",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft, asset])
+        await session.commit()
+
+        events = [
+            event
+            async for event in service.stream_storyboard_text(
+                session,
+                VideoStoryboardGenerateRequest(
+                    campaign_id=campaign.id,
+                    creative_asset_ids=[asset.id],
+                    draft_id=draft.id,
+                    duration_seconds=12,
+                    aspect_ratio="9:16",
+                ),
+            )
+        ]
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert "Source image id notes: asset-1" in done["text"]
+    assert "No source image provided" not in done["text"]
+
+    await engine.dispose()
+
+
 def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() -> None:
     prompt = _storyboard_to_prompt(
         [
@@ -230,6 +342,58 @@ def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() ->
     assert "coupons" not in prompt
     assert "casinos" not in prompt
     assert "pills" not in prompt
+
+
+def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "brief": "\u5c0f\u6e38\u620f\u6d41\u91cf\u6c60",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 4,
+                "visual": "Open with a playable mini-game challenge.",
+                "subtitle": "Play Now",
+            },
+            {
+                "scene_index": 3,
+                "start_second": 8,
+                "end_second": 12,
+                "visual": "End on the GAJA777 lobby.",
+                "subtitle": "Register",
+            },
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "creative_strategy: mini_game_pool" in prompt
+    assert "12-second first/last-frame workflow" in prompt
+    assert "first-frame hook" in prompt
+    assert "last-frame" in prompt
+    assert "GAJA777 game hub" in prompt
+
+
+@pytest.mark.parametrize("revision", [False, True])
+def test_video_storyboard_text_prompt_requires_selected_source_image_ids(
+    revision: bool,
+) -> None:
+    prompt = _video_storyboard_text_system_prompt(revision=revision)
+
+    assert "If assets is non-empty" in prompt
+    assert "every scene block must include `Source image id notes:`" in prompt
+    assert "one or more exact ids from `selected_asset_ids`" in prompt
+    assert "Never write `No source image provided` when assets is non-empty" in prompt
+    assert (
+        "If assets is empty, write `Source image id notes: No source image provided.`"
+        in prompt
+    )
 
 
 @pytest.mark.asyncio

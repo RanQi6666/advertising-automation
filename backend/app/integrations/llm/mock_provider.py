@@ -432,6 +432,7 @@ class MockLLMProvider:
         landing_page = draft.metadata_json.get("landing_page") or {}
         landing_hint = landing_page.get("title") or landing_page.get("url")
         storyboard_hint = _mock_storyboard_hint(storyboard_context)
+        creative_strategy = _mock_creative_strategy(draft.metadata_json, storyboard_context)
         for index in range(count):
             revision_hint = (
                 f" Apply operator revision request: {feedback.strip()[:280]}."
@@ -443,6 +444,11 @@ class MockLLMProvider:
                 if source_asset is not None
                 else ""
             )
+            strategy_hint = _mock_strategy_image_hint(
+                creative_strategy,
+                index + 1,
+                storyboard_context,
+            )
             briefs.append(
                 ImageBrief(
                     image_index=index + 1,
@@ -452,6 +458,7 @@ class MockLLMProvider:
                         "Clean standalone performance-ad layout with readable text, product focus, "
                         "and enough negative space for mobile feed placements. "
                         f"Use landing page context: {landing_hint or 'not available'}."
+                        f"{strategy_hint}"
                         f"{storyboard_hint}"
                         f"{source_hint}{revision_hint}"
                     ),
@@ -472,6 +479,12 @@ class MockLLMProvider:
     ) -> VideoStoryboardCandidate:
         product = campaign.product_name or campaign.name
         target_language = build_target_language_context(campaign=campaign, context=context)
+        creative_strategy = _mock_creative_strategy(
+            campaign.metadata_json,
+            draft.metadata_json if draft else None,
+            context,
+            *[asset.metadata_json for asset in assets],
+        )
         asset_count = max(1, len(assets))
         scene_count = min(max(asset_count, 3), 5)
         segment = max(1, duration_seconds // scene_count)
@@ -484,15 +497,23 @@ class MockLLMProvider:
             start_second = index * segment
             end_second = duration_seconds if index == scene_count - 1 else (index + 1) * segment
             if index == 0:
-                visual = f"Open with the strongest product benefit for {product}."
+                visual = _mock_strategy_scene_visual(
+                    creative_strategy,
+                    role="first_frame",
+                    fallback=f"Open with the strongest product benefit for {product}.",
+                )
                 subtitle = (
                     f"{product}: तुरंत देखें"
                     if target_language["country_code"] == "IN"
                     else f"{product}: watch instantly"
                 )
             elif index == scene_count - 1:
-                visual = "End on a clear call to action and keep the final frame readable."
-                subtitle = (
+                visual = _mock_strategy_scene_visual(
+                    creative_strategy,
+                    role="last_frame",
+                    fallback="End on a clear call to action and keep the final frame readable.",
+                )
+                subtitle = "Register" if creative_strategy else (
                     "अभी डाउनलोड करें"
                     if target_language["country_code"] == "IN"
                     else "Download Now"
@@ -907,6 +928,84 @@ def _storyboard_script_text(storyboard: VideoStoryboardCandidate) -> str:
     if storyboard.rationale:
         lines.append(f"生成思路：{storyboard.rationale}")
     return "\n".join(lines).strip() + "\n"
+
+
+def _mock_creative_strategy(*sources: Any) -> dict[str, Any] | None:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        strategy = source.get("creative_strategy")
+        if isinstance(strategy, dict):
+            return strategy
+    return None
+
+
+def _mock_strategy_image_hint(
+    creative_strategy: dict[str, Any] | None,
+    image_index: int,
+    storyboard_context: dict | None,
+) -> str:
+    if not isinstance(creative_strategy, dict):
+        return ""
+    template_id = creative_strategy.get("template_id")
+    role = _mock_keyframe_role(image_index, storyboard_context)
+    if template_id == "mini_game_pool":
+        if role == "last_frame":
+            return (
+                " Follow creative_strategy mini_game_pool: last-frame GAJA777 game hub "
+                "end card with Register / Play Now CTA."
+            )
+        return (
+            " Follow creative_strategy mini_game_pool: first-frame mini-game challenge "
+            "with light GAJA777 corner logo."
+        )
+    if template_id == "gaja_brand":
+        if role == "last_frame":
+            return (
+                " Follow creative_strategy gaja_brand: last-frame GAJA777 register "
+                "end card with orange CTA."
+            )
+        return (
+            " Follow creative_strategy gaja_brand: first-frame GAJA777 logo, Ganesha "
+            "gold hero, and welcome-bonus platform identity."
+        )
+    return f" Follow creative_strategy {template_id}."
+
+
+def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> str:
+    keyframe_plan = (
+        storyboard_context.get("keyframe_plan") if isinstance(storyboard_context, dict) else None
+    )
+    if not isinstance(keyframe_plan, dict):
+        return "first_frame"
+    frames_per_variant = _int_or(keyframe_plan.get("frames_per_variant"), 2)
+    position = ((image_index - 1) % max(1, frames_per_variant)) + 1
+    return "first_frame" if position == 1 else "last_frame"
+
+
+def _mock_strategy_scene_visual(
+    creative_strategy: dict[str, Any] | None,
+    role: str,
+    fallback: str,
+) -> str:
+    if not isinstance(creative_strategy, dict):
+        return fallback
+    template_id = creative_strategy.get("template_id")
+    if template_id == "mini_game_pool":
+        if role == "last_frame":
+            return "End on the GAJA777 game hub with multiple mini-game cards and Register CTA."
+        return (
+            "Open with a playable mini-game challenge, light GAJA777 logo, "
+            "and fast curiosity hook."
+        )
+    if template_id == "gaja_brand":
+        if role == "last_frame":
+            return "End on a GAJA777 register end card with game lobby and orange CTA."
+        return (
+            "Open with GAJA777 logo, Ganesha gold hero, light trails, and welcome-bonus "
+            "platform energy."
+        )
+    return fallback
 
 
 def _mock_storyboard_hint(storyboard_context: dict | None) -> str:

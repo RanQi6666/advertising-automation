@@ -39,6 +39,7 @@ from backend.app.schemas.work_order import (
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.campaign_service import CampaignService
 from backend.app.services.custom_event_types import custom_event_key, custom_event_type
+from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -397,9 +398,14 @@ class AdGenerationService:
         result_payload = job.result_payload or {}
         if payload.result_payload is not None:
             result_payload = _merge_result_payload(result_payload, payload.result_payload)
-        brand_safety_report = scan_brand_safety(result_payload)
+        brand_safety_mode = get_settings().brand_safety_mode
+        brand_safety_report = (
+            _skipped_brand_safety_report()
+            if brand_safety_mode == "off"
+            else scan_brand_safety(result_payload)
+        )
         result_payload = _with_brand_safety_report(result_payload, brand_safety_report)
-        if brand_safety_report["status"] == "blocked":
+        if brand_safety_mode == "block" and brand_safety_report["status"] == "blocked":
             payload_status = result_payload.get("status")
             blocked_status = (
                 payload_status
@@ -412,6 +418,7 @@ class AdGenerationService:
             job.metadata_json = {
                 **(job.metadata_json or {}),
                 "review_notes": payload.review_notes,
+                "brand_safety_mode": brand_safety_mode,
                 "brand_safety_status": "blocked",
                 "review_blocked_at": utcnow().isoformat(),
                 "workflow_stage": blocked_status,
@@ -426,6 +433,8 @@ class AdGenerationService:
         job.metadata_json = {
             **(job.metadata_json or {}),
             "review_notes": payload.review_notes,
+            "brand_safety_mode": brand_safety_mode,
+            "brand_safety_status": brand_safety_report["status"],
             "review_confirmed_at": utcnow().isoformat(),
             "workflow_stage": "returned",
         }
@@ -528,6 +537,27 @@ class AdGenerationService:
 
         landing_url = _field_value(reviewed_fields, "landing_url") or work_order.landing_url
         event_name = _field_value(reviewed_fields, "event_name") or work_order.event_name
+        country_value = _field_value(reviewed_fields, "country")
+        creative_strategy = build_game_creative_strategy(
+            {
+                "raw_content": raw_content,
+                "structured_fields": structured_fields,
+                "reviewed_fields": reviewed_fields,
+                "product_name": _structured_value(structured_fields, "product_name"),
+                "project_name": _campaign_name(structured_fields, work_order.project_name),
+                "landing_url": landing_url,
+                "event_name": event_name,
+                "country": country_value or work_order.country,
+                "work_order": {
+                    "raw_content": raw_content,
+                    "parsed_fields": work_order.parsed_fields,
+                    "country": work_order.country,
+                    "media": work_order.media,
+                    "landing_url": landing_url,
+                    "report_timezone": work_order.report_timezone,
+                },
+            }
+        )
         campaign = await self.campaigns.create_campaign_from_work_order(
             session,
             work_order.id,
@@ -538,7 +568,11 @@ class AdGenerationService:
                 audience_description=_text_or_none(
                     _field_value(reviewed_fields, "audience_description_raw")
                 ),
-                metadata_json={"source": "publishing_system", "ad_generation_job_id": job.id},
+                metadata_json={
+                    "source": "publishing_system",
+                    "ad_generation_job_id": job.id,
+                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
+                },
             ),
         )
 
@@ -568,7 +602,6 @@ class AdGenerationService:
                 "workflow starts with targeting and requires manual creative production."
             )
 
-        country_value = _field_value(reviewed_fields, "country")
         country_is_missing = not _text_or_none(country_value)
         country_code, country_label = _country_code_and_label(country_value)
         if country_is_missing:
@@ -633,6 +666,7 @@ class AdGenerationService:
                 "reviewed_delivery_fields": reviewed_fields,
                 "llm_extraction_review": extraction_data.get("review") or {},
                 "extraction_source": extraction_source,
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
             },
         )
         return result
@@ -742,6 +776,14 @@ def _with_brand_safety_report(payload: dict, report: dict[str, Any]) -> dict:
         review = {}
     next_payload["review"] = {**review, "brand_safety": report}
     return next_payload
+
+
+def _skipped_brand_safety_report() -> dict[str, Any]:
+    return {
+        "status": "skipped",
+        "highest_severity": None,
+        "findings": [],
+    }
 
 
 def _with_access_token(url: str, access_token: str | None) -> str:

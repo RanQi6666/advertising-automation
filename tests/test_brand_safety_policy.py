@@ -36,6 +36,20 @@ def test_brand_safety_scanner_blocks_gambling_medicine_and_money_terms() -> None
     }
 
 
+def test_brand_safety_scanner_blocks_meta_game_review_triggers() -> None:
+    report = scan_brand_safety(
+        {
+            "image_prompt": (
+                "Create a GAJA777 welcome bonus poster with dice and Aviator-style "
+                "game graphics."
+            ),
+        }
+    )
+
+    assert report["status"] == "blocked"
+    assert {item["category"] for item in report["findings"]} >= {"gambling"}
+
+
 def test_brand_safety_scanner_blocks_chinese_only_terms() -> None:
     report = scan_brand_safety(
         {
@@ -67,6 +81,38 @@ def test_brand_safety_scanner_allows_neutral_value_language() -> None:
                         "prompt": "Clean product scene with simple onboarding visuals.",
                     }
                 ]
+            },
+        }
+    )
+
+    assert report["status"] == "passed"
+    assert report["highest_severity"] is None
+    assert report["findings"] == []
+
+
+def test_brand_safety_scanner_ignores_existing_brand_safety_report() -> None:
+    report = scan_brand_safety(
+        {
+            "creative_payload": {
+                "message": "A smooth daily experience with clear setup steps.",
+            },
+            "review": {
+                "brand_safety": {
+                    "status": "blocked",
+                    "highest_severity": "high",
+                    "findings": [
+                        {
+                            "category": "gambling",
+                            "severity": "high",
+                            "field_path": "$.assets.images[0].prompt",
+                            "matched_text": "chips",
+                            "suggestion": (
+                                "Rewrite around neutral product usage; remove gambling, "
+                                "betting, odds, casino, lottery, and chip references."
+                            ),
+                        }
+                    ],
+                }
             },
         }
     )
