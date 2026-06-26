@@ -1,6 +1,5 @@
 import base64
 import json
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -185,35 +184,46 @@ def test_doubao_image_selector_routes_to_configured_volcengine_image_model() -> 
 
 @pytest.mark.asyncio
 async def test_gateway_image_provider_supports_url_response() -> None:
-    provider = GatewayImageProvider(
-        api_key="gateway-key",
-        base_url="http://127.0.0.1:3000/v1",
-        model="gateway-image-model",
-        provider_size="1024x1024",
-        response_format="url",
-    )
     captured: dict = {}
 
-    async def fake_generate(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(
-            data=[
-                SimpleNamespace(
-                    url="https://images.example.test/generated.png",
-                    b64_json=None,
-                    revised_prompt="revised",
-                )
-            ]
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "url": "https://images.example.test/generated.png",
+                        "b64_json": None,
+                        "revised_prompt": "revised",
+                    }
+                ]
+            },
         )
 
-    provider.client = SimpleNamespace(images=SimpleNamespace(generate=fake_generate))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:3000/v1",
+    ) as client:
+        provider = GatewayImageProvider(
+            api_key="gateway-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="gateway-image-model",
+            provider_size="1024x1024",
+            response_format="url",
+            http_client=client,
+        )
 
-    images = await provider.generate_images([_brief()])
+        images = await provider.generate_images([_brief()])
 
-    assert captured["model"] == "gateway-image-model"
-    assert captured["size"] == "1024x1024"
-    assert captured["response_format"] == "url"
-    assert "Facebook" not in captured["prompt"]
+    assert captured["path"] == "/v1/images/generations"
+    assert captured["authorization"] == "Bearer gateway-key"
+    assert captured["payload"]["model"] == "gateway-image-model"
+    assert captured["payload"]["size"] == "1024x1024"
+    assert captured["payload"]["response_format"] == "url"
+    assert "Facebook" not in captured["payload"]["prompt"]
     assert images[0].url == "https://images.example.test/generated.png"
     assert images[0].storage_key == "gateway://gateway-image-model/1"
     assert images[0].metadata["provider"] == "gateway"
@@ -221,21 +231,25 @@ async def test_gateway_image_provider_supports_url_response() -> None:
 
 @pytest.mark.asyncio
 async def test_gateway_image_provider_supports_base64_response(tmp_path) -> None:
-    provider = GatewayImageProvider(
-        api_key="gateway-key",
-        base_url="http://127.0.0.1:3000/v1",
-        model="gateway-image-model",
-        provider_size="1024x1024",
-        storage_root=str(tmp_path),
-    )
     encoded = base64.b64encode(b"fake image bytes").decode("ascii")
 
-    async def fake_generate(**kwargs):
-        return SimpleNamespace(data=[SimpleNamespace(url=None, b64_json=encoded)])
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"url": None, "b64_json": encoded}]})
 
-    provider.client = SimpleNamespace(images=SimpleNamespace(generate=fake_generate))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:3000/v1",
+    ) as client:
+        provider = GatewayImageProvider(
+            api_key="gateway-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="gateway-image-model",
+            provider_size="1024x1024",
+            storage_root=str(tmp_path),
+            http_client=client,
+        )
 
-    images = await provider.generate_images([_brief()])
+        images = await provider.generate_images([_brief()])
 
     assert images[0].url is None
     assert images[0].storage_key

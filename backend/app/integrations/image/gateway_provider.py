@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from openai import AsyncOpenAI
+import httpx
 
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.image.volcengine_provider import _prompt_from_brief
@@ -21,8 +21,11 @@ class GatewayImageProvider:
         response_format: str | None = None,
         extra_body: dict[str, Any] | None = None,
         storage_root: str = "storage",
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self._http_client = http_client or httpx.AsyncClient(timeout=120.0)
         self.model = model
         self.provider_size = provider_size
         self.response_format = response_format
@@ -41,16 +44,17 @@ class GatewayImageProvider:
             if self.response_format:
                 request["response_format"] = self.response_format
             if self.extra_body:
-                request["extra_body"] = self.extra_body
+                request.update(self.extra_body)
 
-            response = await self.client.images.generate(**request)
-            item = response.data[0] if response.data else None
+            response = await self._post_image_generation(request)
+            data = response.get("data")
+            item = data[0] if isinstance(data, list) and data else None
             if item is None:
                 raise ProviderError("Gateway image API returned no image data.")
 
-            image_url = getattr(item, "url", None)
-            b64_json = getattr(item, "b64_json", None)
-            revised_prompt = getattr(item, "revised_prompt", None)
+            image_url = item.get("url") if isinstance(item, dict) else None
+            b64_json = item.get("b64_json") if isinstance(item, dict) else None
+            revised_prompt = item.get("revised_prompt") if isinstance(item, dict) else None
             if image_url:
                 storage_key = f"gateway://{self.model}/{brief.image_index}"
             elif b64_json:
@@ -77,6 +81,33 @@ class GatewayImageProvider:
                 )
             )
         return images
+
+    async def _post_image_generation(self, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = await self._http_client.post(
+                f"{self.base_url}/images/generations",
+                json=request,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:1000]
+            raise ProviderError(
+                f"Gateway image API returned HTTP {exc.response.status_code}: {body}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Gateway image API request failed: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ProviderError("Gateway image API returned invalid JSON.") from exc
+        if not isinstance(data, dict):
+            raise ProviderError("Gateway image API returned invalid image data.")
+        return data
 
     def _store_base64_image(self, b64_json: str) -> str:
         raw_value = b64_json.strip()
