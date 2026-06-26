@@ -7,6 +7,7 @@ from backend.app.integrations.image.volcengine_provider import _prompt_from_brie
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
 from backend.app.schemas.ai import ImageBrief
+from backend.app.services.brand_safety_policy import scan_brand_safety
 
 
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
@@ -34,12 +35,13 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert "点赞/评论/分享按钮" in prompt
     assert "二维码" in prompt
     assert "水印" in prompt
-    assert "cash" in prompt
-    assert "bank cards" in prompt
-    assert "discount stickers" in prompt
-    assert "coupons" in prompt
-    assert "casinos" in prompt
-    assert "pills" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+    assert "cash" not in prompt
+    assert "bank cards" not in prompt
+    assert "discount stickers" not in prompt
+    assert "coupons" not in prompt
+    assert "casinos" not in prompt
+    assert "pills" not in prompt
 
 
 @pytest.mark.asyncio

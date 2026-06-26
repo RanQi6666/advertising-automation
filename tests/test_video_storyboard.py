@@ -16,6 +16,7 @@ from backend.app.schemas.video import (
     VideoStoryboardRewriteRequest,
 )
 from backend.app.services import video_service
+from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     VideoService,
@@ -208,7 +209,7 @@ async def test_video_service_generates_storyboard_from_draft_without_reference_i
     await engine.dispose()
 
 
-def test_video_storyboard_prompt_includes_brand_safety_visual_bans() -> None:
+def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() -> None:
     prompt = _storyboard_to_prompt(
         [
             {
@@ -221,12 +222,14 @@ def test_video_storyboard_prompt_includes_brand_safety_visual_bans() -> None:
         ]
     )
 
-    assert "cash" in prompt
-    assert "bank cards" in prompt
-    assert "discount stickers" in prompt
-    assert "coupons" in prompt
-    assert "casinos" in prompt
-    assert "pills" in prompt
+    assert "Brand safety visual guidance" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+    assert "cash" not in prompt
+    assert "bank cards" not in prompt
+    assert "discount stickers" not in prompt
+    assert "coupons" not in prompt
+    assert "casinos" not in prompt
+    assert "pills" not in prompt
 
 
 @pytest.mark.asyncio

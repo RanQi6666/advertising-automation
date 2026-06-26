@@ -29,9 +29,11 @@ BRAND_SAFETY_PROMPT_GUARDRAILS = "\n".join(
 )
 
 BRAND_SAFETY_VISUAL_BAN = (
-    "Brand safety visual ban: no cash, coins, currency symbols, bank cards, wallets, "
-    "price tags, discount stickers, sale badges, coupons, chips, casinos, slot machines, "
-    "pills, capsules, medicine bottles, pharmacies, or injection devices."
+    "Brand safety visual guidance: keep the scene neutral, compliance-safe, and "
+    "suitable for broad ad review. Use product, lifestyle, or abstract visuals only. "
+    "If the brief implies a restricted or high-risk category, replace it with a "
+    "generic daily-use scene; avoid symbolic objects, badges, labels, or props that "
+    "suggest regulated activity."
 )
 
 _POLICIES: dict[str, tuple[str, ...]] = {
