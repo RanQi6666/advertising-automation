@@ -1,6 +1,8 @@
 import base64
+import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from backend.app.core.config import Settings
@@ -8,7 +10,7 @@ from backend.app.core.errors import ProviderError
 from backend.app.integrations.image.factory import get_image_provider
 from backend.app.integrations.image.gateway_provider import GatewayImageProvider
 from backend.app.integrations.llm.factory import get_llm_provider
-from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
+from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import ImageBrief
 from backend.app.services.model_selection import (
     effective_image_model,
@@ -29,8 +31,56 @@ def test_gateway_llm_provider_uses_model_gateway_settings() -> None:
 
     provider = get_llm_provider(settings)
 
-    assert isinstance(provider, OpenAILLMProvider)
+    assert isinstance(provider, GatewayResponsesLLMProvider)
     assert provider.model == "gateway-text-model"
+
+
+@pytest.mark.asyncio
+async def test_gateway_responses_llm_provider_posts_json_completion_to_responses() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"summary":"OK","root_causes":[]}',
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://model.ggcss.xyz/v1",
+    ) as client:
+        provider = GatewayResponsesLLMProvider(
+            api_key="gateway-key",
+            base_url="https://model.ggcss.xyz/v1",
+            model="gpt-5.5",
+            http_client=client,
+        )
+
+        data = await provider._json_completion("Return JSON only.", '{"input":"Say OK"}')
+
+    assert captured["path"] == "/v1/responses"
+    assert captured["authorization"] == "Bearer gateway-key"
+    assert captured["payload"]["model"] == "gpt-5.5"
+    assert captured["payload"]["input"][0]["role"] == "system"
+    assert captured["payload"]["input"][1]["role"] == "user"
+    assert data == {"summary": "OK", "root_causes": []}
 
 
 def test_gateway_image_factory_requires_image_model() -> None:

@@ -3,6 +3,7 @@ from backend.app.core.errors import ProviderError
 from backend.app.integrations.llm.base import LLMProvider
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
+from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 
 
 def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
@@ -27,7 +28,7 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
             raise ProviderError("MODEL_GATEWAY_BASE_URL is required when LLM_PROVIDER=gateway.")
         if not model:
             raise ProviderError("MODEL_GATEWAY_TEXT_MODEL is required when LLM_PROVIDER=gateway.")
-        return OpenAILLMProvider(
+        return GatewayResponsesLLMProvider(
             api_key=api_key,
             model=model,
             base_url=base_url,
