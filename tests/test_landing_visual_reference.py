@@ -22,6 +22,19 @@ def test_gaja_domain_returns_premium_visual_fallback() -> None:
     assert reference["video_recipe"]["beats"][0].startswith("0-2s")
 
 
+def test_lookalike_host_does_not_match_gaja_domain() -> None:
+    assert build_landing_visual_reference("https://badgaja777.game") is None
+
+
+def test_gaja_host_with_port_still_matches() -> None:
+    reference = build_landing_visual_reference(
+        "https://www.gaja777.game:443/#/?invite=YBG71118&register=true"
+    )
+
+    assert reference is not None
+    assert reference["source"] == "domain_fallback"
+
+
 def test_reference_images_mark_source_without_network_fetch() -> None:
     reference = build_landing_visual_reference(
         GAJA_URL,

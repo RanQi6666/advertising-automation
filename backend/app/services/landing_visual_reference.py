@@ -123,8 +123,11 @@ def merge_landing_visual_reference(
 
 
 def _is_gaja_url(url: str) -> bool:
-    domain = urlparse(str(url or "")).netloc.lower()
-    return domain.endswith(GAJA_DOMAIN)
+    host = urlparse(str(url or "")).hostname
+    if not host:
+        return False
+    host = host.lower()
+    return host == GAJA_DOMAIN or host.endswith(f".{GAJA_DOMAIN}")
 
 
 def _has_gaja_text(*values: str | None) -> bool:
