@@ -9,6 +9,7 @@ from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.openai_provider import _video_storyboard_text_system_prompt
 from backend.app.schemas.video import (
@@ -321,6 +322,64 @@ async def test_video_service_done_text_replaces_empty_source_notes_when_assets_s
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_video_context_merges_latest_landing_visual_reference_snapshot() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        creative_strategy = {
+            "template_id": "gaja_brand",
+            "first_frame": {"role": "hook"},
+            "last_frame": {"role": "cta"},
+        }
+        reference = {
+            "palette": ["near-black navy background"],
+            "surface_style": ["dark premium mobile game lobby"],
+        }
+        campaign = Campaign(
+            id="campaign-1",
+            name="GAJA777 campaign",
+            product_name="GAJA777",
+            audience_description="India users",
+            metadata_json={"creative_strategy": creative_strategy},
+        )
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="GAJA777 ad copy.",
+            version=1,
+            metadata_json={"creative_strategy": creative_strategy},
+        )
+        session.add_all(
+            [
+                campaign,
+                draft,
+                LandingPageSnapshot(
+                    campaign_id=campaign.id,
+                    url="https://www.gaja777.game",
+                    extracted_data={"visual_reference": reference},
+                ),
+            ]
+        )
+        await session.commit()
+
+        context = await VideoService()._video_context(
+            session,
+            campaign,
+            draft,
+            [],
+            None,
+        )
+
+    assert context["creative_strategy"]["landing_visual_reference"] == reference
+
+    await engine.dispose()
+
+
 def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() -> None:
     prompt = _storyboard_to_prompt(
         [
@@ -427,6 +486,55 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
+def test_video_storyboard_prompt_sanitizes_strategy_list_fields() -> None:
+    creative_strategy = {
+        "template_id": "gaja_brand",
+        "first_frame": {
+            "role": "hook",
+            "visual_must_include": ["dark neon GAJA777 lobby"],
+        },
+        "last_frame": {
+            "role": "cta",
+            "visual_must_include": ["GAJA777 premium game lobby"],
+        },
+        "video_recipe": {
+            "beats": [
+                "0-2s: metallic title treatment over the GAJA777 lobby",
+                "10-12s: show the end card treatment clearly",
+            ]
+        },
+        "negative_style_cues": [
+            "metallic title treatment overlays",
+            "clinical treatment graphics",
+        ],
+        "motion_direction": [
+            "Use a slow title treatment reveal before the card fan-out.",
+        ],
+        "compliance_guardrails": [
+            "Remove any treatment-like medical iconography from the end card.",
+        ],
+    }
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 2,
+                "visual": "Open on GAJA777.",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "title treatment" not in prompt
+    assert "clinical treatment" not in prompt
+    assert "treatment-like" not in prompt
+    assert "title styling" in prompt
+    assert "clinical styling" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
 @pytest.mark.parametrize("revision", [False, True])
 def test_video_storyboard_text_prompt_requires_selected_source_image_ids(
     revision: bool,
@@ -525,6 +633,8 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
     )
 
     assert "dark neon GAJA777 lobby" in storyboard.scenes[0].visual
+    assert "title treatment" not in storyboard.scenes[0].visual
+    assert "title styling" in storyboard.scenes[0].visual
     assert "premium game cards" in storyboard.scenes[0].visual
     assert "GAJA777 premium game lobby" in storyboard.scenes[-1].visual
     assert storyboard.scenes[-1].subtitle in {"Register", "Play Now"}

@@ -970,7 +970,7 @@ def _mock_strategy_image_hint(
             )
         return (
             " Follow creative_strategy gaja_brand: first-frame dark neon GAJA777 lobby "
-            "with metallic title treatment and premium game cards."
+            "with metallic title styling and premium game cards."
         )
     return f" Follow creative_strategy {template_id}."
 
@@ -1038,7 +1038,7 @@ def _mock_strategy_scene_visual(
         if role == "last_frame":
             return "End on the GAJA777 premium game lobby with Register CTA and orange button."
         return (
-            "Open with a dark neon GAJA777 lobby, metallic title treatment, "
+            "Open with a dark neon GAJA777 lobby, metallic title styling, "
             "premium game cards, and cinematic depth."
         )
     return fallback

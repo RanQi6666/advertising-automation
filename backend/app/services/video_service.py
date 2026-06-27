@@ -27,8 +27,8 @@ from backend.app.services.creative_asset_urls import (
     resolve_creative_image_url,
 )
 from backend.app.services.image_storage_service import ImageStorageService
-from backend.app.services.landing_visual_reference import merge_landing_visual_reference
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
+from backend.app.services.landing_visual_reference import merge_landing_visual_reference
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
@@ -660,13 +660,19 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     if isinstance(video_recipe, dict):
         beats = video_recipe.get("beats")
         if isinstance(beats, list) and beats:
-            lines.append(f"12-second beats: {'; '.join(str(item) for item in beats[:4])}")
+            lines.append(f"12-second beats: {'; '.join(_brand_safe_prompt_list(beats[:4]))}")
     if isinstance(negative_style_cues, list) and negative_style_cues:
-        lines.append(f"Avoid style cues: {'; '.join(str(item) for item in negative_style_cues[:6])}")
+        lines.append(
+            f"Avoid style cues: {'; '.join(_brand_safe_prompt_list(negative_style_cues[:6]))}"
+        )
     if isinstance(motion_direction, list) and motion_direction:
-        lines.append(f"Motion direction: {'; '.join(str(item) for item in motion_direction[:4])}")
+        lines.append(
+            f"Motion direction: {'; '.join(_brand_safe_prompt_list(motion_direction[:4]))}"
+        )
     if isinstance(guardrails, list) and guardrails:
-        lines.append(f"Compliance guardrails: {'; '.join(str(item) for item in guardrails[:4])}")
+        lines.append(
+            f"Compliance guardrails: {'; '.join(_brand_safe_prompt_list(guardrails[:4]))}"
+        )
     return "\n".join(lines)
 
 
@@ -713,6 +719,10 @@ def _brand_safe_prompt_text(value: str) -> str:
     for source, target in replacements.items():
         text = text.replace(source, target)
     return text
+
+
+def _brand_safe_prompt_list(values: list[Any]) -> list[str]:
+    return [_brand_safe_prompt_text(str(item)) for item in values if str(item).strip()]
 
 
 def _strategy_from_context(context: dict[str, Any]) -> dict | None:
