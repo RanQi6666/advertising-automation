@@ -41,6 +41,18 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert "0-2s" in " ".join(strategy["video_recipe"]["beats"])
 
 
+def test_plain_gaja_url_uses_domain_fallback_landing_visual_reference() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    assert strategy is not None
+    assert strategy["landing_visual_reference"]["source"] == "domain_fallback"
+
+
 def test_gaja_strategy_uses_landing_visual_reference() -> None:
     visual_reference = {
         "source": "reference_image",
@@ -174,6 +186,9 @@ def test_gaja_strategy_avoids_meta_gambling_review_triggers() -> None:
     assert "meta_restricted_game_ad_safe_mode" in strategy_text
     assert "dark premium mobile game lobby" in strategy_text
     assert "casual game hub" not in strategy_text
+    assert "restricted review props" not in strategy_text
+    assert "financial prop cues" not in strategy_text
+    assert "outcome claim cues" not in strategy_text
 
 
 async def _session_factory(tmp_path):

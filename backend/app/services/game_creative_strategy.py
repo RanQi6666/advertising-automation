@@ -3,6 +3,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from backend.app.services.landing_visual_reference import (
+    build_landing_visual_reference,
     extract_landing_visual_reference,
 )
 
@@ -36,6 +37,13 @@ def build_game_creative_strategy(context: Mapping[str, Any]) -> dict[str, Any] |
     else:
         strategy = _gaja_brand_strategy()
     visual_reference = extract_landing_visual_reference(context.get("landing_page"))
+    if not visual_reference:
+        visual_reference = build_landing_visual_reference(
+            url=landing_url,
+            metadata=context,
+            title=product_name,
+            text_excerpt=haystack,
+        )
     if visual_reference:
         strategy = {**strategy, "landing_visual_reference": visual_reference}
     return strategy

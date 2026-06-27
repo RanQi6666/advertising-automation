@@ -16,7 +16,9 @@ def test_gaja_domain_returns_premium_visual_fallback() -> None:
     assert "near-black navy background" in reference["palette"]
     assert "dark premium mobile game lobby" in reference["surface_style"]
     assert "mythic fire warrior card" in reference["original_game_card_archetypes"]
-    assert "childlike puzzle blocks" in reference["negative_style_cues"]
+    assert "restricted_review_props" in reference["negative_style_cues"]
+    assert "financial_prop_cues" in reference["negative_style_cues"]
+    assert "outcome_claim_cues" in reference["negative_style_cues"]
     assert reference["video_recipe"]["duration_seconds"] == 12
     assert reference["video_recipe"]["beats"][0].startswith("0-2s")
 

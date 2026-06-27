@@ -40,9 +40,9 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
         "flat preschool cartoon style",
         "plain runner-game track",
         "generic falling-block game look",
-        "restricted review props",
-        "financial prop cues",
-        "outcome claim cues",
+        "restricted_review_props",
+        "financial_prop_cues",
+        "outcome_claim_cues",
     ],
     "video_recipe": {
         "duration_seconds": 12,
