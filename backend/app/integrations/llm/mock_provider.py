@@ -1036,10 +1036,10 @@ def _mock_strategy_scene_visual(
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
-            return "End on a GAJA777 register end card with game lobby and orange CTA."
+            return "End on the GAJA777 premium game lobby with Register CTA and orange button."
         return (
-            "Open with GAJA777 logo, Ganesha gold hero, light trails, and welcome-bonus "
-            "platform energy."
+            "Open with a dark neon GAJA777 lobby, metallic title treatment, "
+            "premium game cards, and cinematic depth."
         )
     return fallback
 

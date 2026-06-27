@@ -27,6 +27,7 @@ from backend.app.services.creative_asset_urls import (
     resolve_creative_image_url,
 )
 from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.landing_visual_reference import merge_landing_visual_reference
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
@@ -134,6 +135,10 @@ class VideoService:
             draft=draft,  # type: ignore[arg-type]
             assets=assets,  # type: ignore[arg-type]
             metadata=payload.metadata_json,
+        )
+        creative_strategy = merge_landing_visual_reference(
+            creative_strategy,
+            landing_page_context,
         )
 
         video = VideoAsset(
@@ -497,6 +502,10 @@ class VideoService:
             assets=assets,
             metadata=metadata,
         )
+        creative_strategy = merge_landing_visual_reference(
+            creative_strategy,
+            landing_page_context,
+        )
         return {
             "work_order": (campaign.metadata_json or {}).get("work_order"),
             "landing_page": landing_page_context,
@@ -626,6 +635,9 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     last_frame = creative_strategy.get("last_frame")
     motion_direction = creative_strategy.get("motion_direction")
     guardrails = creative_strategy.get("compliance_guardrails")
+    landing_visual_reference = creative_strategy.get("landing_visual_reference")
+    negative_style_cues = creative_strategy.get("negative_style_cues")
+    video_recipe = creative_strategy.get("video_recipe")
     lines = [
         f"creative_strategy: {template_id}",
         "Use this as a 12-second first/last-frame workflow.",
@@ -642,6 +654,15 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
             "GAJA brand rule: make GAJA777 visible from the first frame and end on a "
             "Register or Play Now CTA."
         )
+    reference_block = _landing_visual_reference_summary(landing_visual_reference)
+    if reference_block:
+        lines.append(reference_block)
+    if isinstance(video_recipe, dict):
+        beats = video_recipe.get("beats")
+        if isinstance(beats, list) and beats:
+            lines.append(f"12-second beats: {'; '.join(str(item) for item in beats[:4])}")
+    if isinstance(negative_style_cues, list) and negative_style_cues:
+        lines.append(f"Avoid style cues: {'; '.join(str(item) for item in negative_style_cues[:6])}")
     if isinstance(motion_direction, list) and motion_direction:
         lines.append(f"Motion direction: {'; '.join(str(item) for item in motion_direction[:4])}")
     if isinstance(guardrails, list) and guardrails:
@@ -654,13 +675,44 @@ def _strategy_frame_summary(value: Any) -> str:
         return "follow the approved frame role."
     role = value.get("role")
     visual_must_include = value.get("visual_must_include")
-    parts = [str(role)] if role else []
+    parts = [_brand_safe_prompt_text(str(role))] if role else []
     if isinstance(visual_must_include, list):
-        parts.extend(str(item) for item in visual_must_include[:5])
+        parts.extend(_brand_safe_prompt_text(str(item)) for item in visual_must_include[:5])
     composition = value.get("composition")
     if composition:
-        parts.append(str(composition))
+        parts.append(_brand_safe_prompt_text(str(composition)))
     return "; ".join(parts) if parts else "follow the approved frame role."
+
+
+def _landing_visual_reference_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts = ["Landing visual reference:"]
+    for key, label in (
+        ("palette", "palette"),
+        ("surface_style", "surface style"),
+        ("original_game_card_archetypes", "game-card archetypes"),
+        ("composition_cues", "composition cues"),
+    ):
+        item = value.get(key)
+        if isinstance(item, list) and item:
+            parts.append(
+                f"{label}: {', '.join(_brand_safe_prompt_text(str(entry)) for entry in item[:4])}"
+            )
+    return " | ".join(parts) if len(parts) > 1 else ""
+
+
+def _brand_safe_prompt_text(value: str) -> str:
+    text = str(value).strip()
+    replacements = {
+        "title treatment": "title styling",
+        "Title treatment": "Title styling",
+        "treatment": "styling",
+        "Treatment": "Styling",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
 
 
 def _strategy_from_context(context: dict[str, Any]) -> dict | None:

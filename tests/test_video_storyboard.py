@@ -380,6 +380,53 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "GAJA777 game hub" in prompt
 
 
+def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "landing_page": {
+                "extracted_data": {
+                    "visual_reference": {
+                        "source": "reference_image",
+                        "status": "analyzed",
+                        "palette": ["near-black navy background"],
+                        "surface_style": ["dark premium mobile game lobby"],
+                        "composition_cues": ["premium cards angled in depth"],
+                        "negative_style_cues": ["childlike puzzle blocks"],
+                        "video_recipe": {
+                            "duration_seconds": 12,
+                            "beats": [
+                                "0-2s: dark neon GAJA777 lobby hook with premium cards",
+                                "10-12s: Register / Play Now end card",
+                            ],
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 2,
+                "visual": "Open on GAJA777.",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "Landing visual reference" in prompt
+    assert "dark premium mobile game lobby" in prompt
+    assert "near-black navy background" in prompt
+    assert "0-2s: dark neon GAJA777 lobby hook with premium cards" in prompt
+    assert "Avoid style cues: childlike puzzle blocks" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
 @pytest.mark.parametrize("revision", [False, True])
 def test_video_storyboard_text_prompt_requires_selected_source_image_ids(
     revision: bool,
@@ -439,6 +486,48 @@ async def test_mock_provider_revises_video_storyboard() -> None:
     assert storyboard.aspect_ratio == "9:16"
     assert storyboard.scenes[0].source_asset_ids == ["asset-1"]
     assert storyboard.scenes[0].notes == "Revision applied: Make the hook faster."
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA777 campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="GAJA777 ad copy.",
+        primary_text="Explore GAJA777 game lobby.",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions=None,
+    )
+
+    assert "dark neon GAJA777 lobby" in storyboard.scenes[0].visual
+    assert "premium game cards" in storyboard.scenes[0].visual
+    assert "GAJA777 premium game lobby" in storyboard.scenes[-1].visual
+    assert storyboard.scenes[-1].subtitle in {"Register", "Play Now"}
 
 
 @pytest.mark.asyncio
