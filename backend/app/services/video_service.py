@@ -21,7 +21,10 @@ from backend.app.schemas.video import (
     VideoStoryboardRead,
     VideoStoryboardRewriteRequest,
 )
-from backend.app.services.brand_safety_policy import BRAND_SAFETY_VISUAL_BAN
+from backend.app.services.brand_safety_policy import (
+    BRAND_SAFETY_VISUAL_BAN,
+    scan_brand_safety,
+)
 from backend.app.services.creative_asset_urls import (
     repair_creative_asset_urls,
     resolve_creative_image_url,
@@ -681,12 +684,18 @@ def _strategy_frame_summary(value: Any) -> str:
         return "follow the approved frame role."
     role = value.get("role")
     visual_must_include = value.get("visual_must_include")
-    parts = [_brand_safe_prompt_text(str(role))] if role else []
+    parts = []
+    if role:
+        safe_role = _brand_safe_prompt_text(str(role))
+        if safe_role:
+            parts.append(safe_role)
     if isinstance(visual_must_include, list):
-        parts.extend(_brand_safe_prompt_text(str(item)) for item in visual_must_include[:5])
+        parts.extend(_brand_safe_prompt_list(visual_must_include[:5]))
     composition = value.get("composition")
     if composition:
-        parts.append(_brand_safe_prompt_text(str(composition)))
+        safe_composition = _brand_safe_prompt_text(str(composition))
+        if safe_composition:
+            parts.append(safe_composition)
     return "; ".join(parts) if parts else "follow the approved frame role."
 
 
@@ -702,8 +711,11 @@ def _landing_visual_reference_summary(value: Any) -> str:
     ):
         item = value.get(key)
         if isinstance(item, list) and item:
+            safe_items = _brand_safe_prompt_list(item[:4])
+            if not safe_items:
+                continue
             parts.append(
-                f"{label}: {', '.join(_brand_safe_prompt_text(str(entry)) for entry in item[:4])}"
+                f"{label}: {', '.join(safe_items)}"
             )
     return " | ".join(parts) if len(parts) > 1 else ""
 
@@ -718,11 +730,25 @@ def _brand_safe_prompt_text(value: str) -> str:
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
+    if not text:
+        return ""
+    normalized_text = text.replace("-", " ").replace("_", " ")
+    if (
+        scan_brand_safety({"prompt": text})["status"] != "passed"
+        or scan_brand_safety({"prompt": normalized_text})["status"] != "passed"
+    ):
+        return ""
     return text
 
 
 def _brand_safe_prompt_list(values: list[Any]) -> list[str]:
-    return [_brand_safe_prompt_text(str(item)) for item in values if str(item).strip()]
+    return [
+        safe_item
+        for item in values
+        if str(item).strip()
+        for safe_item in [_brand_safe_prompt_text(str(item))]
+        if safe_item
+    ]
 
 
 def _strategy_from_context(context: dict[str, Any]) -> dict | None:

@@ -59,6 +59,15 @@ def test_non_gaja_without_reference_images_returns_none() -> None:
     assert build_landing_visual_reference("https://example.com/app") is None
 
 
+def test_non_gaja_reference_images_do_not_return_gaja_reference() -> None:
+    reference = build_landing_visual_reference(
+        "https://example.com/app",
+        metadata={"reference_images": ["C:/tmp/example.png"]},
+    )
+
+    assert reference is None
+
+
 def test_extract_landing_visual_reference_accepts_snapshot_context_shapes() -> None:
     reference = build_landing_visual_reference(GAJA_URL)
     context = {"extracted_data": {"visual_reference": reference}}

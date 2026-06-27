@@ -137,6 +137,34 @@ def test_game_strategy_metadata_is_brand_safety_neutral() -> None:
     )
 
 
+def test_default_gaja_brand_strategy_metadata_passes_brand_safety_scan() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "brief": "Brand ad for GAJA777.",
+        }
+    )
+
+    assert strategy is not None
+    assert scan_brand_safety({"metadata_json": {"creative_strategy": strategy}})["status"] == (
+        "passed"
+    )
+    assert "treatment" not in str(strategy).lower()
+
+
+def test_gaja_strategy_rejects_lookalike_domain() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "Daily Planner",
+            "landing_url": "https://badgaja777.game/welcome",
+            "brief": "Promote a productivity app.",
+        }
+    )
+
+    assert strategy is None
+
+
 def test_gaja_strategy_avoids_meta_gambling_review_triggers() -> None:
     strategy = build_game_creative_strategy(
         {

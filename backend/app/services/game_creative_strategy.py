@@ -1,8 +1,8 @@
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlparse
 
 from backend.app.services.landing_visual_reference import (
+    _is_gaja_url,
     build_landing_visual_reference,
     extract_landing_visual_reference,
 )
@@ -98,7 +98,7 @@ def _gaja_brand_strategy() -> dict[str, Any]:
                 "large GAJA777 wordmark",
                 "dark premium mobile game lobby",
                 "premium game cards angled in depth",
-                "metallic 3D title treatment",
+                "metallic 3D title styling",
                 "cinematic neon rim light",
             ],
             "composition": (
@@ -223,10 +223,15 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
 
 
 def _has_gaja_signal(haystack: str, landing_url: str, product_name: str) -> bool:
-    parsed_domain = urlparse(landing_url).netloc.lower()
-    if parsed_domain.endswith(GAJA_DOMAIN):
+    if _is_gaja_url(landing_url):
         return True
-    return any(keyword in haystack for keyword in GAJA_KEYWORDS) or "gaja" in product_name.lower()
+    filtered_haystack = haystack
+    normalized_landing_url = landing_url.lower().strip()
+    if normalized_landing_url:
+        filtered_haystack = filtered_haystack.replace(normalized_landing_url, " ")
+    return any(keyword in filtered_haystack for keyword in GAJA_KEYWORDS) or (
+        "gaja" in product_name.lower()
+    )
 
 
 def _has_mini_game_signal(haystack: str) -> bool:

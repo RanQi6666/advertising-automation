@@ -66,7 +66,7 @@ def build_landing_visual_reference(
     reference_images = _reference_images(metadata.get("reference_images"))
     is_gaja = _is_gaja_url(url) or _has_gaja_text(title, text_excerpt)
 
-    if not is_gaja and not reference_images:
+    if not is_gaja:
         return None
 
     reference = deepcopy(_GAJA_BASE_REFERENCE)

@@ -486,6 +486,50 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
+def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> None:
+    creative_strategy = {
+        "template_id": "gaja_brand",
+        "first_frame": {
+            "role": "hook",
+            "visual_must_include": ["dark neon GAJA777 lobby"],
+        },
+        "last_frame": {
+            "role": "cta",
+            "visual_must_include": ["GAJA777 premium game lobby"],
+        },
+        "landing_visual_reference": {
+            "palette": [
+                "casino gold glow",
+                "cash-green accent",
+            ],
+            "surface_style": [
+                "slot-machine chrome framing",
+                "metallic title treatment",
+            ],
+            "composition_cues": ["dark premium mobile game lobby"],
+        },
+    }
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 2,
+                "visual": "Open on GAJA777.",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "casino" not in prompt.lower()
+    assert "slot" not in prompt.lower()
+    assert "cash" not in prompt.lower()
+    assert "treatment" not in prompt.lower()
+    assert "styling" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
 def test_video_storyboard_prompt_sanitizes_strategy_list_fields() -> None:
     creative_strategy = {
         "template_id": "gaja_brand",
