@@ -997,7 +997,7 @@ def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> st
         storyboard_context.get("keyframe_plan") if isinstance(storyboard_context, dict) else None
     )
     if not isinstance(keyframe_plan, dict):
-        return "first_frame" if image_index % 2 == 1 else "last_frame"
+        return "first_frame"
     frames_per_variant = _int_or(keyframe_plan.get("frames_per_variant"), 2)
     position = ((image_index - 1) % max(1, frames_per_variant)) + 1
     return "first_frame" if position == 1 else "last_frame"

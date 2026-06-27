@@ -4,7 +4,10 @@ import pytest
 
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.integrations.image.volcengine_provider import _prompt_from_brief
-from backend.app.integrations.llm.mock_provider import MockLLMProvider
+from backend.app.integrations.llm.mock_provider import (
+    MockLLMProvider,
+    _mock_keyframe_role,
+)
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
 from backend.app.schemas.ai import ImageBrief
 from backend.app.services.brand_safety_policy import scan_brand_safety
@@ -244,6 +247,11 @@ async def test_mock_image_briefs_are_platform_neutral() -> None:
     assert "platform logos" not in briefs[0].visual_direction
 
 
+def test_mock_keyframe_role_defaults_to_first_frame_without_plan() -> None:
+    assert _mock_keyframe_role(1, None) == "first_frame"
+    assert _mock_keyframe_role(2, None) == "first_frame"
+
+
 @pytest.mark.asyncio
 async def test_mock_image_briefs_include_game_strategy_direction() -> None:
     provider = MockLLMProvider()
@@ -301,7 +309,19 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
         metadata_json={"creative_strategy": creative_strategy},
     )
 
-    briefs = await provider.generate_image_briefs(draft=draft, count=2, size="9:16")
+    briefs = await provider.generate_image_briefs(
+        draft=draft,
+        count=2,
+        size="9:16",
+        storyboard_context={
+            "keyframe_plan": {
+                "mode": "video_keyframe_variants",
+                "frames_per_variant": 2,
+                "video_duration_seconds": 12,
+            },
+            "creative_strategy": creative_strategy,
+        },
+    )
 
     assert "dark neon GAJA777 lobby" in briefs[0].visual_direction
     assert "premium game cards" in briefs[0].visual_direction
