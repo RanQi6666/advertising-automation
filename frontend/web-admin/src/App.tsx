@@ -32,11 +32,20 @@ import {
   KEYFRAME_FRAMES_PER_VARIANT,
   KEYFRAME_VARIANT_OPTIONS,
   buildKeyframePlanProgress,
-  creativeGenerationPlan,
+  imageGenerationPlanForMode,
+  isVideoKeyframeMode,
   keyframeGroupSlotIndices,
   normalizeKeyframeVariantCount,
+  type CreativeGenerationUiMode,
   type KeyframeVariantCount,
 } from "./lib/creativeKeyframes";
+import {
+  adPreviewCreativeOptions,
+  buildCreativeReviewState,
+  filterWorkflowArtifactsForTopic,
+  videoCreativeReferenceOptions,
+  type CreativeReviewKeyframeGroup,
+} from "./lib/workflowArtifacts";
 import { displayAssetUrl } from "./lib/assetUrls";
 import type {
   AdPerformanceAnalysisStreamEvent,
@@ -196,7 +205,25 @@ const viewSubtitles: Record<ViewKey, string> = {
   videos: "根据已审核图片生成视频，并完成人工审核",
 };
 
-const sampleWorkOrder = `工单
+const sampleWorkOrders = [
+  {
+    id: "test-work-order-1",
+    label: "测试工单 1",
+    content: `工单
+
+项目名称：GAJA777
+投放国家：印度
+投放时间：待定
+日报时区：+7
+投放媒体：fb
+投放事件：首充
+投放人群：年龄18-65
+投放链接：https://www.gaja777.game/#/?invite=YBG71118&register=true`,
+  },
+  {
+    id: "test-work-order-2",
+    label: "测试工单 2",
+    content: `工单
 
 项目名称：印度tv8%
 投放国家：印度
@@ -210,7 +237,13 @@ const sampleWorkOrder = `工单
 打款金额：216（广告过审打款）
 服务费：8%
 商务：西伯
-投放链接：https://www.mensparadise.store/TV.html`;
+投放链接：https://www.mensparadise.store/TV.html`,
+  },
+] as const;
+
+type SampleWorkOrderOption = (typeof sampleWorkOrders)[number];
+
+const sampleWorkOrder = sampleWorkOrders[0].content;
 
 const manualAdPerformanceJsonExample = formatManualAdPerformanceJson({
   source_type: "manual",
@@ -268,6 +301,8 @@ function App() {
   const [keyframeVariantCount, setKeyframeVariantCount] = useState<KeyframeVariantCount>(
     DEFAULT_KEYFRAME_VARIANT_COUNT,
   );
+  const [creativeGenerationMode, setCreativeGenerationMode] =
+    useState<CreativeGenerationUiMode>("copy_images");
   const [keyframeRewriteFeedbacks, setKeyframeRewriteFeedbacks] = useState<Record<string, string>>({});
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
@@ -277,7 +312,8 @@ function App() {
   const [selectedCopyModelId, setSelectedCopyModelId] = useState("");
   const [selectedImageModelId, setSelectedImageModelId] = useState("");
 
-  const [rawWorkOrder, setRawWorkOrder] = useState(() => sampleWorkOrder);
+  const [rawWorkOrder, setRawWorkOrder] = useState<string>(() => sampleWorkOrder);
+  const [selectedSampleWorkOrderId, setSelectedSampleWorkOrderId] = useState<string>(sampleWorkOrders[0].id);
   const [deliveryExtractionCache, setDeliveryExtractionCache] =
     useState<DeliveryExtractionCacheEntry | null>(null);
   const [deliveryExtraction, setDeliveryExtraction] = useState<WorkOrderDeliveryExtraction | null>(null);
@@ -328,21 +364,47 @@ function App() {
       null,
     [selectedTopicId, topics],
   );
+  const topicScopedArtifacts = useMemo(
+    () =>
+      filterWorkflowArtifactsForTopic({
+        selectedTopic,
+        drafts,
+        creatives,
+        videos,
+      }),
+    [selectedTopic, drafts, creatives, videos],
+  );
+  const topicDrafts = topicScopedArtifacts.drafts;
+  const topicCreatives = topicScopedArtifacts.creatives;
+  const topicVideos = topicScopedArtifacts.videos;
+  const topicCreativeIds = useMemo(
+    () => new Set(topicCreatives.map((asset) => asset.id)),
+    [topicCreatives],
+  );
+  const topicCreativeGenerationSlots = useMemo(
+    () => creativeGenerationSlots.filter((slot) => !slot.asset || topicCreativeIds.has(slot.asset.id)),
+    [creativeGenerationSlots, topicCreativeIds],
+  );
+  const topicCreativeReviewState = useMemo(
+    () => buildCreativeReviewState(topicCreatives, topicCreativeGenerationSlots),
+    [topicCreatives, topicCreativeGenerationSlots],
+  );
+  const currentTopicCreatives = topicCreativeReviewState.currentCreatives;
   const selectedDraft = useMemo(
-    () => drafts.find((item) => item.id === selectedDraftId) ?? drafts[0] ?? null,
-    [drafts, selectedDraftId],
+    () => topicDrafts.find((item) => item.id === selectedDraftId) ?? topicDrafts[0] ?? null,
+    [topicDrafts, selectedDraftId],
   );
   const approvedDraft = useMemo(
-    () => drafts.find((item) => item.status === "approved") ?? null,
-    [drafts],
+    () => topicDrafts.find((item) => item.status === "approved") ?? null,
+    [topicDrafts],
   );
   const approvedCreatives = useMemo(
-    () => creatives.filter((item) => item.status === "approved"),
-    [creatives],
+    () => currentTopicCreatives.filter((item) => item.status === "approved"),
+    [currentTopicCreatives],
   );
   const approvedVideos = useMemo(
-    () => videos.filter((item) => item.status === "approved"),
-    [videos],
+    () => topicVideos.filter((item) => item.status === "approved"),
+    [topicVideos],
   );
   const selectableCreativeIds = useMemo(
     () =>
@@ -363,6 +425,35 @@ function App() {
   useEffect(() => {
     setDeliveryExtractionCache(loadDeliveryExtractionCache(rawWorkOrder));
   }, [rawWorkOrder]);
+
+  useEffect(() => {
+    setSelectedDraftId((current) =>
+      current && topicDrafts.some((item) => item.id === current)
+        ? current
+        : topicDrafts.find((item) => item.status === "approved")?.id ?? topicDrafts[0]?.id ?? null,
+    );
+  }, [topicDrafts]);
+
+  useEffect(() => {
+    setSelectedCreativeIds((current) => {
+      const approvedIds = new Set(approvedCreatives.map((item) => item.id));
+      const valid = current.filter((id) => approvedIds.has(id));
+      if (valid.length || !approvedCreatives.length) return valid;
+      const firstGroupIds = firstCompleteKeyframeGroupIds(approvedCreatives);
+      return (firstGroupIds.length ? firstGroupIds : approvedCreatives.map((item) => item.id)).slice(
+        0,
+        VIDEO_MAX_REFERENCE_IMAGES,
+      );
+    });
+  }, [approvedCreatives]);
+
+  useEffect(() => {
+    setSelectedVideoId((current) =>
+      current && topicVideos.some((item) => item.id === current)
+        ? current
+        : topicVideos.find((item) => item.status === "approved")?.id ?? topicVideos[0]?.id ?? null,
+    );
+  }, [topicVideos]);
 
   useEffect(() => {
     if (!selectedJob) return;
@@ -838,6 +929,16 @@ function App() {
     await run("campaign-refresh", refresh);
   }
 
+  function handleSelectSampleWorkOrder(sampleId: string) {
+    const sample = sampleWorkOrders.find((item) => item.id === sampleId);
+    if (!sample) return;
+    setSelectedSampleWorkOrderId(sample.id);
+    setRawWorkOrder(sample.content);
+    setDeliveryExtraction(null);
+    setDeliveryConfirmRawContent("");
+    setDeliveryConfirmOpen(false);
+  }
+
   async function handleCreateWorkOrder() {
     const content = rawWorkOrder.trim();
     if (!content) {
@@ -1220,6 +1321,15 @@ function App() {
     }
   }
 
+  async function handleReviewKeyframeGroup(
+    group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>,
+    decision: ReviewDecision,
+  ) {
+    for (const asset of group.assets) {
+      await handleReview("creative_asset", asset.id, decision);
+    }
+  }
+
   function applyOptimisticReview(
     entityType: ReviewEntityType,
     entityId: string,
@@ -1297,7 +1407,7 @@ function App() {
 
   function updateCreativeGenerationSlot(index: number, update: Partial<CreativeGenerationSlot>) {
     setCreativeGenerationSlots((current) => {
-      const fallbackSlots = buildCreativeSlots(creatives, []);
+      const fallbackSlots = buildCreativeReviewState<CreativeGenerationSlot>(topicCreatives, []).visibleSlots;
       const slots = current.length
         ? current
         : fallbackSlots.length
@@ -1315,6 +1425,20 @@ function App() {
           : slot,
       ),
     );
+  }
+
+  function currentStoryboardContextForKeyframes(): {
+    storyboard: Record<string, unknown>[];
+    storyboardText: string;
+  } | null {
+    const storyboardText = videoStoryboardText.trim();
+    if (!storyboardText) return null;
+    return {
+      storyboard: videoStoryboardDirty
+        ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
+        : videoStoryboard,
+      storyboardText: videoStoryboardText,
+    };
   }
 
   async function ensureStoryboardForImageGeneration(
@@ -1386,7 +1510,12 @@ function App() {
       return;
     }
     if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
-    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
+    const generationPlan = imageGenerationPlanForMode(
+      creativeGenerationMode,
+      videoDurationSeconds,
+      videoAspectRatio,
+      keyframeVariantCount,
+    );
     setActiveView("creatives");
     setLoading("creatives");
     clearError("image");
@@ -1396,7 +1525,14 @@ function App() {
 
     const streamedAssets: CreativeAsset[] = [];
     try {
-      const storyboardContext = await ensureStoryboardForImageGeneration(draft);
+      const storyboardContext = isVideoKeyframeMode(creativeGenerationMode)
+        ? currentStoryboardContextForKeyframes()
+        : null;
+      if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
+        setError("Generate or paste a video script before creating keyframes.", "image");
+        markLoadingCreativeSlotsFailed("Waiting for a video script.");
+        return;
+      }
       await api.generateCreativesStream(
         draft.id,
         generationPlan.count,
@@ -1447,8 +1583,8 @@ function App() {
         undefined,
         {
           modelId: selectedImageModelId,
-          storyboard: storyboardContext.storyboard,
-          storyboardText: storyboardContext.storyboardText,
+          storyboard: storyboardContext?.storyboard,
+          storyboardText: storyboardContext?.storyboardText,
           generationMode: generationPlan.generationMode,
           variantCount: generationPlan.variantCount,
           framesPerVariant: generationPlan.framesPerVariant,
@@ -1468,6 +1604,9 @@ function App() {
           ? "3 张图片已按创意脚本生成"
           : `已按创意脚本生成 ${streamedAssets.length} 张图片，剩余候选可单独重试`,
       );
+      if (!generationPlan.isKeyframeVariant) {
+        setNotice(`已通过文案生成 ${streamedAssets.length} 张图片`);
+      }
       if (generationPlan.isKeyframeVariant) {
         const firstGroupIds = firstCompleteKeyframeGroupIds(streamedAssets);
         if (firstGroupIds.length) {
@@ -1504,10 +1643,17 @@ function App() {
       return;
     }
     if (loading?.startsWith("creative-retry-")) return;
-    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
+    const generationPlan = imageGenerationPlanForMode(
+      creativeGenerationMode,
+      videoDurationSeconds,
+      videoAspectRatio,
+      keyframeVariantCount,
+    );
     const previousSlotAssetId =
       creativeGenerationSlots.find((slot) => slot.index === slotIndex)?.asset?.id ??
-      buildCreativeSlots(creatives, []).find((slot) => slot.index === slotIndex)?.asset?.id;
+      buildCreativeReviewState<CreativeGenerationSlot>(topicCreatives, []).visibleSlots.find(
+        (slot) => slot.index === slotIndex,
+      )?.asset?.id;
     setLoading(`creative-retry-${slotIndex}`);
     clearError("image");
     setNotice(null);
@@ -1519,7 +1665,17 @@ function App() {
 
     let retriedAsset: CreativeAsset | null = null;
     try {
-      const storyboardContext = await ensureStoryboardForImageGeneration(draft);
+      const storyboardContext = isVideoKeyframeMode(creativeGenerationMode)
+        ? currentStoryboardContextForKeyframes()
+        : null;
+      if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
+        setError("Generate or paste a video script before creating keyframes.", "image");
+        updateCreativeGenerationSlot(slotIndex, {
+          status: "error",
+          message: "Waiting for a video script.",
+        });
+        return;
+      }
       await api.generateCreativesStream(
         draft.id,
         1,
@@ -1556,8 +1712,8 @@ function App() {
         slotIndex,
         {
           modelId: selectedImageModelId,
-          storyboard: storyboardContext.storyboard,
-          storyboardText: storyboardContext.storyboardText,
+          storyboard: storyboardContext?.storyboard,
+          storyboardText: storyboardContext?.storyboardText,
           generationMode: generationPlan.generationMode,
           variantCount: generationPlan.variantCount,
           framesPerVariant: generationPlan.framesPerVariant,
@@ -1645,7 +1801,7 @@ function App() {
     setLoading((current) => (current === `creative-regenerate-${asset.id}` ? null : current));
   }
 
-  async function handleRegenerateKeyframeGroup(group: KeyframeVariantGroup) {
+  async function handleRegenerateKeyframeGroup(group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) {
     const feedbackKey = String(group.group);
     const feedback = keyframeRewriteFeedbacks[feedbackKey]?.trim();
     if (!feedback) {
@@ -2060,7 +2216,7 @@ function App() {
   const workflowSummary = buildWorkflowSummary({
     job: selectedJob,
     campaign: selectedCampaign,
-    topic: topics.find((item) => item.status === "selected") ?? selectedTopic,
+    topic: selectedTopic,
     draft: approvedDraft,
     creatives: approvedCreatives,
     videos: approvedVideos,
@@ -2156,6 +2312,9 @@ function App() {
           <WorkOrdersView
             rawWorkOrder={rawWorkOrder}
             setRawWorkOrder={setRawWorkOrder}
+            sampleWorkOrders={sampleWorkOrders}
+            selectedSampleWorkOrderId={selectedSampleWorkOrderId}
+            onSelectSampleWorkOrder={handleSelectSampleWorkOrder}
             jobs={jobs}
             selectedJob={selectedJob}
             setSelectedJobId={setSelectedJobId}
@@ -2178,9 +2337,9 @@ function App() {
             campaign={selectedCampaign}
             summary={workflowSummary}
             topics={topics}
-            drafts={drafts}
-            creatives={creatives}
-            videos={videos}
+            drafts={topicDrafts}
+            creatives={currentTopicCreatives}
+            videos={topicVideos}
             finalPayloadDraft={finalPayloadDraft}
             setFinalPayloadDraft={setFinalPayloadDraft}
             finalReviewNotes={finalReviewNotes}
@@ -2218,12 +2377,12 @@ function App() {
 
         {activeView === "copy" && (
           <CopyView
-            drafts={drafts}
+            drafts={topicDrafts}
             selectedDraft={selectedDraft}
             setSelectedDraftId={setSelectedDraftId}
-            selectedTopic={topics.find((item) => item.status === "selected") ?? selectedTopic}
+            selectedTopic={selectedTopic}
             campaign={selectedCampaign}
-            creatives={creatives}
+            creatives={approvedCreatives}
             feedback={copyFeedback}
             setFeedback={setCopyFeedback}
             modelOptions={modelOptions?.text ?? []}
@@ -2239,8 +2398,8 @@ function App() {
 
         {activeView === "creatives" && (
           <CreativesView
-            creatives={creatives}
-            creativeGenerationSlots={creativeGenerationSlots}
+            creatives={topicCreatives}
+            creativeGenerationSlots={topicCreativeGenerationSlots}
             selectedCreativeIds={selectedCreativeIds}
             setSelectedCreativeIds={setSelectedCreativeIds}
             rewriteFeedbacks={creativeRewriteFeedbacks}
@@ -2256,13 +2415,27 @@ function App() {
             modelOptions={modelOptions?.image ?? []}
             selectedModelId={selectedImageModelId}
             setSelectedModelId={setSelectedImageModelId}
+            generationMode={creativeGenerationMode}
+            setGenerationMode={setCreativeGenerationMode}
+            storyboardText={videoStoryboardText}
+            setStoryboardText={(value) => {
+              setVideoStoryboardText(value);
+              setVideoStoryboardDirty(true);
+            }}
+            storyboardFeedback={videoStoryboardFeedback}
+            setStoryboardFeedback={setVideoStoryboardFeedback}
+            videoInstructions={videoInstructions}
+            setVideoInstructions={setVideoInstructions}
             videoAspectRatio={videoAspectRatio}
             videoDurationSeconds={videoDurationSeconds}
+            onGenerateStoryboard={() => void handleGenerateVideoStoryboard()}
+            onRewriteStoryboard={() => void handleRewriteVideoStoryboard()}
             onGenerate={() => void handleGenerateCreatives()}
             onRetrySlot={(index) => void handleRetryCreativeSlot(index)}
             onRegenerate={(asset) => void handleRegenerateCreative(asset)}
             onRegenerateGroup={(group) => void handleRegenerateKeyframeGroup(group)}
             onReview={handleReview}
+            onReviewGroup={(group, decision) => void handleReviewKeyframeGroup(group, decision)}
             onCreateVideo={() => setActiveView("videos")}
             loading={loading}
           />
@@ -2272,7 +2445,7 @@ function App() {
           <VideosView
             campaign={selectedCampaign}
             draft={approvedDraft ?? selectedDraft}
-            videos={videos}
+            videos={topicVideos}
             videoPollWarnings={videoPollWarnings}
             approvedCreatives={approvedCreatives}
             selectedCreativeIds={selectedCreativeIdsForVideo()}
@@ -2450,6 +2623,9 @@ function DashboardView({
 function WorkOrdersView({
   rawWorkOrder,
   setRawWorkOrder,
+  sampleWorkOrders,
+  selectedSampleWorkOrderId,
+  onSelectSampleWorkOrder,
   jobs,
   selectedJob,
   setSelectedJobId,
@@ -2461,6 +2637,9 @@ function WorkOrdersView({
 }: {
   rawWorkOrder: string;
   setRawWorkOrder: (value: string) => void;
+  sampleWorkOrders: readonly SampleWorkOrderOption[];
+  selectedSampleWorkOrderId: string;
+  onSelectSampleWorkOrder: (sampleId: string) => void;
   jobs: AdGenerationJob[];
   selectedJob: AdGenerationJob | null;
   setSelectedJobId: (id: string | null) => void;
@@ -2486,6 +2665,21 @@ function WorkOrdersView({
             {createLoading ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
             <span>{createButtonLabel}</span>
           </button>
+        </div>
+        <div className="work-order-template-row">
+          <label htmlFor="sample-work-order">测试工单</label>
+          <select
+            id="sample-work-order"
+            className="select work-order-template-select"
+            value={selectedSampleWorkOrderId}
+            onChange={(event) => onSelectSampleWorkOrder(event.target.value)}
+          >
+            {sampleWorkOrders.map((sample) => (
+              <option key={sample.id} value={sample.id}>
+                {sample.label}
+              </option>
+            ))}
+          </select>
         </div>
         <textarea
           className="work-order-input"
@@ -3379,7 +3573,7 @@ function CopyView({
                           type="button"
                         >
                           <img src={displayAssetUrl(asset.url)} alt={asset.alt_text || `预览图片 ${index + 1}`} />
-                          <span>{asset.status === "approved" ? "已通过" : `图 ${index + 1}`}</span>
+                          <span>{creativePreviewAssetLabel(asset, index)}</span>
                         </button>
                       ))}
                     </div>
@@ -3455,12 +3649,23 @@ function CreativesView({
   modelOptions,
   selectedModelId,
   setSelectedModelId,
+  generationMode,
+  setGenerationMode,
+  storyboardText,
+  setStoryboardText,
+  storyboardFeedback,
+  setStoryboardFeedback,
+  videoInstructions,
+  setVideoInstructions,
   onGenerate,
   onRetrySlot,
   onRegenerate,
   onRegenerateGroup,
   onReview,
+  onReviewGroup,
   onCreateVideo,
+  onGenerateStoryboard,
+  onRewriteStoryboard,
   videoAspectRatio,
   videoDurationSeconds,
   loading,
@@ -3478,38 +3683,65 @@ function CreativesView({
   modelOptions: ModelOption[];
   selectedModelId: string;
   setSelectedModelId: (value: string) => void;
+  generationMode: CreativeGenerationUiMode;
+  setGenerationMode: (mode: CreativeGenerationUiMode) => void;
+  storyboardText: string;
+  setStoryboardText: (value: string) => void;
+  storyboardFeedback: string;
+  setStoryboardFeedback: (value: string) => void;
+  videoInstructions: string;
+  setVideoInstructions: (value: string) => void;
   videoAspectRatio: string;
   videoDurationSeconds: number;
   onGenerate: () => void;
   onRetrySlot: (index: number) => void;
   onRegenerate: (asset: CreativeAsset) => void;
-  onRegenerateGroup: (group: KeyframeVariantGroup) => void;
+  onRegenerateGroup: (group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) => void;
   onReview: (
     entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
     entityId: string,
     decision: "approved" | "rejected" | "needs_revision",
   ) => void;
+  onReviewGroup: (
+    group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>,
+    decision: "approved" | "rejected" | "needs_revision",
+  ) => void;
   onCreateVideo: () => void;
+  onGenerateStoryboard: () => void;
+  onRewriteStoryboard: () => void;
   loading: string | null;
 }) {
-  const visibleSlots = buildCreativeSlots(creatives, creativeGenerationSlots);
-  const visibleAssetIds = new Set(
-    visibleSlots.map((slot) => slot.asset?.id).filter((id): id is string => Boolean(id)),
+  const generationPlan = imageGenerationPlanForMode(
+    generationMode,
+    videoDurationSeconds,
+    videoAspectRatio,
+    keyframeVariantCount,
   );
-  const historyCreatives = creatives.filter((asset) => !visibleAssetIds.has(asset.id));
+  const selectedKeyframeGroupCount = generationPlan.variantCount ?? keyframeVariantCount;
+  const modeCreatives = creatives.filter((asset) =>
+    isVideoKeyframeMode(generationMode) ? isKeyframeVariantAsset(asset) : !isKeyframeVariantAsset(asset),
+  );
+  const modeGenerationSlots = creativeGenerationSlots.filter((slot) =>
+    slot.asset
+      ? isVideoKeyframeMode(generationMode) === isKeyframeVariantAsset(slot.asset)
+      : true,
+  );
+  const creativeReviewState = buildCreativeReviewState(
+    modeCreatives,
+    modeGenerationSlots,
+    selectedKeyframeGroupCount,
+  );
+  const visibleSlots = creativeReviewState.visibleSlots;
+  const historyCreatives = creativeReviewState.historyCreatives;
   const completedCount = visibleSlots.filter((slot) => slot.status === "done" && slot.asset).length;
   const hasSlotErrors = visibleSlots.some((slot) => slot.status === "error");
   const isGenerating =
-    loading === "creatives" || creativeGenerationSlots.some((slot) => slot.status === "loading");
-  const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
-  const selectedKeyframeGroupCount = generationPlan.variantCount ?? keyframeVariantCount;
+    loading === "creatives" || modeGenerationSlots.some((slot) => slot.status === "loading");
   const keyframeReviewActive =
     generationPlan.isKeyframeVariant &&
-    (creativeGenerationSlots.length > 0 ||
+    (modeGenerationSlots.length > 0 ||
       visibleSlots.some((slot) => (slot.asset ? isKeyframeVariantAsset(slot.asset) : slot.status !== "done")));
-  const keyframeGroups = keyframeReviewActive
-    ? buildKeyframeVariantGroups(visibleSlots, selectedKeyframeGroupCount)
-    : [];
+  const keyframeGroups = keyframeReviewActive ? creativeReviewState.keyframeGroups : [];
   const hasKeyframeGroups = keyframeGroups.length > 0;
   const visibleKeyframeGroupCount = Math.min(
     KEYFRAME_VARIANT_OPTIONS.length,
@@ -3546,7 +3778,27 @@ function CreativesView({
             <h2>图片审核</h2>
             <span className="panel-note">{panelNote}</span>
           </div>
-          <div className="button-row model-action-row">
+          <div className="button-row model-action-row image-console-rail">
+            <div className="generation-mode-switch" role="tablist" aria-label="Image generation mode">
+              <button
+                className={generationMode === "copy_images" ? "active" : ""}
+                type="button"
+                onClick={() => setGenerationMode("copy_images")}
+                disabled={Boolean(loading)}
+              >
+                <Image size={16} />
+                <span>Copy images</span>
+              </button>
+              <button
+                className={generationMode === "video_keyframes" ? "active" : ""}
+                type="button"
+                onClick={() => setGenerationMode("video_keyframes")}
+                disabled={Boolean(loading)}
+              >
+                <Film size={16} />
+                <span>Video keyframes</span>
+              </button>
+            </div>
             <ModelSelect
               id="image-model"
               label="图片模型"
@@ -3580,15 +3832,72 @@ function CreativesView({
               <span>
                 {generationPlan.isKeyframeVariant
                   ? `生成 ${selectedKeyframeGroupCount} 组关键帧`
-                  : "生成 3 张图片"}
+                  : "生成图片"}
               </span>
             </button>
-            <button className="primary-button" onClick={onCreateVideo} disabled={!creatives.some((item) => item.status === "approved")}>
+            <button className="primary-button" onClick={onCreateVideo} disabled={!creativeReviewState.currentCreatives.some((item) => item.status === "approved")}>
               <Film size={16} />
               <span>进入视频</span>
             </button>
           </div>
         </div>
+        {generationMode === "video_keyframes" && (
+          <section className="script-console">
+            <div className="script-console-head">
+              <div>
+                <span className="section-eyebrow">SCRIPT ENGINE</span>
+                <h3>Video creative script</h3>
+              </div>
+              <div className="script-console-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={onGenerateStoryboard}
+                  disabled={Boolean(loading)}
+                >
+                  {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                  <span>Generate script</span>
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={onRewriteStoryboard}
+                  disabled={!storyboardText.trim() || !storyboardFeedback.trim() || Boolean(loading)}
+                >
+                  {loading === "video-storyboard-rewrite" ? (
+                    <Loader2 size={16} className="spin" />
+                  ) : (
+                    <RefreshCw size={16} />
+                  )}
+                  <span>Rewrite script</span>
+                </button>
+              </div>
+            </div>
+            <textarea
+              className="storyboard-input script-console-textarea"
+              value={storyboardText}
+              onChange={(event) => setStoryboardText(event.target.value)}
+              placeholder="Generate or paste a video script before creating keyframes."
+              disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
+            />
+            <div className="script-console-grid">
+              <textarea
+                className="video-instructions script-console-input"
+                value={videoInstructions}
+                onChange={(event) => setVideoInstructions(event.target.value)}
+                placeholder="Style and camera direction"
+                disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
+              />
+              <textarea
+                className="storyboard-feedback-input script-console-input"
+                value={storyboardFeedback}
+                onChange={(event) => setStoryboardFeedback(event.target.value)}
+                placeholder="Rewrite notes"
+                disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
+              />
+            </div>
+          </section>
+        )}
         {visibleSlots.length > 0 && (
           <div className={`creative-progress ${progressDone ? "done" : progressFailed ? "failed" : ""}`}>
             <div className="creative-progress-head">
@@ -3655,6 +3964,9 @@ function CreativesView({
                 groupIds.length > 0 && groupIds.every((id) => selectedCreativeIds.includes(id));
               const groupFeedback = keyframeRewriteFeedbacks[String(group.group)] ?? "";
               const isGroupRegenerating = loading === `creative-regenerate-group-${group.group}`;
+              const groupReviewLoading = group.assets.some(
+                () => loading === "review-creative_asset-approved" || loading === "review-creative_asset-rejected",
+              );
               return (
                 <section
                   className={`keyframe-variant-card ${groupSelected ? "selected" : ""}`}
@@ -3678,6 +3990,36 @@ function CreativesView({
                       <Film size={16} />
                       <span>{groupSelected ? "已选此方案" : "选择此方案"}</span>
                     </button>
+                    <div className="keyframe-variant-actions">
+                      <StatusPill status={group.status} />
+                      {group.approved ? (
+                        <div className="review-complete keyframe-review-complete">
+                          <Check size={16} />
+                          <span>方案已通过</span>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            disabled={!group.complete || Boolean(loading) || groupReviewLoading}
+                            onClick={() => onReviewGroup(group, "approved")}
+                          >
+                            <Check size={16} />
+                            <span>通过方案</span>
+                          </button>
+                          <button
+                            className="secondary-button danger"
+                            type="button"
+                            disabled={!group.complete || Boolean(loading) || groupReviewLoading}
+                            onClick={() => onReviewGroup(group, "rejected")}
+                          >
+                            <X size={16} />
+                            <span>拒绝方案</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div className="asset-grid keyframe-pair-grid">
                     {group.slots.map((slot) => (
@@ -3694,6 +4036,8 @@ function CreativesView({
                         loading={loading}
                         showSelectionControl={false}
                         showRewriteControls={false}
+                        showStatusPill={false}
+                        showReviewControls={false}
                       />
                     ))}
                   </div>
@@ -3779,6 +4123,8 @@ function CreativeSlotCard({
   loading,
   showSelectionControl = true,
   showRewriteControls = true,
+  showStatusPill = true,
+  showReviewControls = true,
 }: {
   slot: CreativeGenerationSlot;
   selectedCreativeIds: string[];
@@ -3795,6 +4141,8 @@ function CreativeSlotCard({
   loading: string | null;
   showSelectionControl?: boolean;
   showRewriteControls?: boolean;
+  showStatusPill?: boolean;
+  showReviewControls?: boolean;
 }) {
   const asset = slot.asset;
   const isLoading = slot.status === "loading";
@@ -3852,7 +4200,7 @@ function CreativeSlotCard({
       <div className="asset-card-body">
         <div className="asset-card-head">
           <strong>{asset.alt_text || imagePromptTitle(asset.prompt)}</strong>
-          <StatusPill status={asset.status} />
+          {showStatusPill && <StatusPill status={asset.status} />}
         </div>
         <div className="creative-version-row">
           <span>候选 {creativeImageIndex(asset, slot.index)}</span>
@@ -3895,7 +4243,7 @@ function CreativeSlotCard({
             </button>
           </div>
         )}
-        {asset.status === "approved" ? (
+        {showReviewControls && (asset.status === "approved" ? (
           <div className="review-complete">
             <Check size={16} />
             <span>图片已通过</span>
@@ -3911,7 +4259,7 @@ function CreativeSlotCard({
               <span>拒绝</span>
             </button>
           </div>
-        )}
+        ))}
         <details className="asset-details">
           <summary>提示词</summary>
           <div className="asset-details-body">
@@ -4062,7 +4410,10 @@ function VideosView({
   const previewVideoGenerating = selectedVideo
     ? loading === `video-generate-${selectedVideo.id}` || isVideoGeneratingStatus(selectedVideo.status)
     : loading === "video";
-  const previewSourceCreatives = approvedCreatives
+  const referenceOptions = videoCreativeReferenceOptions(approvedCreatives);
+  const selectedReferenceOption =
+    referenceOptions.find((option) => option.assetIds.every((id) => selectedCreativeIds.includes(id))) ?? null;
+  const previewSourceCreatives = (selectedReferenceOption?.assets ?? approvedCreatives)
     .filter((asset) => selectedCreativeIds.includes(asset.id) && Boolean(asset.url))
     .slice(0, VIDEO_MAX_REFERENCE_IMAGES);
   const previewEmptyTitle = selectedVideo
@@ -4090,8 +4441,8 @@ function VideosView({
           <strong>{selectedVideo ? `当前任务 ${shortId(selectedVideo.id)}` : "等待创建视频任务"}</strong>
         </div>
         <div className="video-overview-metrics" aria-label="视频生产概览">
-          <span>{approvedCreatives.length} 张可用图片</span>
-          <span>{selectedCreativeIds.length}/{VIDEO_MAX_REFERENCE_IMAGES} 张已选</span>
+          <span>{referenceOptions.length} 个已通过方案</span>
+          <span>{selectedReferenceOption?.label ?? "未选择方案"}</span>
           <span>{workingVideoCount} 个待处理</span>
           <span>{approvedVideoCount} 个已通过</span>
         </div>
@@ -4144,27 +4495,27 @@ function VideosView({
                 <label>参考图片</label>
                 <span className="field-hint">已审核通过的图片</span>
               </div>
-              {approvedCreatives.length ? (
+              {referenceOptions.length ? (
                 <div className="source-asset-list video-source-list">
-                  {approvedCreatives.map((asset) => {
-                    const active = selectedCreativeIds.includes(asset.id);
+                  {referenceOptions.map((option) => {
+                    const active = option.assetIds.every((id) => selectedCreativeIds.includes(id));
                     return (
                       <button
                         className={`list-check ${active ? "active" : ""}`}
-                        key={asset.id}
+                        key={option.key}
                         type="button"
                         disabled={storyboardStreaming}
                         onClick={() => {
                           setSelectedCreativeIds(
                             active
-                              ? selectedCreativeIds.filter((id) => id !== asset.id)
-                              : [...selectedCreativeIds, asset.id].slice(0, VIDEO_MAX_REFERENCE_IMAGES),
+                              ? selectedCreativeIds.filter((id) => !option.assetIds.includes(id))
+                              : option.assetIds.slice(0, VIDEO_MAX_REFERENCE_IMAGES),
                           );
                         }}
                       >
                         <Image size={16} />
-                        <span>{shortId(asset.id)}</span>
-                        <StatusPill status={asset.status} />
+                        <span>{option.label}</span>
+                        <StatusPill status={option.approved ? "approved" : "generated"} />
                       </button>
                     );
                   })}
@@ -6472,21 +6823,25 @@ function formatDuration(seconds: number): string {
 }
 
 function copyPreviewCreatives(creatives: CreativeAsset[], selectedDraft: CopyDraft | null): CreativeAsset[] {
-  const draftId = selectedDraft?.id ?? null;
-  return creatives
-    .filter((asset) => Boolean(asset.url))
+  return adPreviewCreativeOptions(creatives, selectedDraft)
     .slice()
     .sort((left, right) => {
-      const leftDraftRank = draftId && left.draft_id === draftId ? 0 : 1;
-      const rightDraftRank = draftId && right.draft_id === draftId ? 0 : 1;
-      if (leftDraftRank !== rightDraftRank) return leftDraftRank - rightDraftRank;
-
       const leftStatusRank = creativePreviewStatusRank(left.status);
       const rightStatusRank = creativePreviewStatusRank(right.status);
       if (leftStatusRank !== rightStatusRank) return leftStatusRank - rightStatusRank;
 
       return Date.parse(right.created_at) - Date.parse(left.created_at);
     });
+}
+
+function creativePreviewAssetLabel(asset: CreativeAsset, fallbackIndex: number): string {
+  if (isKeyframeVariantAsset(asset)) {
+    const group = creativeKeyframeGroup(asset);
+    const position = creativeKeyframePosition(asset);
+    const role = position === 1 ? "首帧" : position === 2 ? "尾帧" : `图 ${position}`;
+    return group ? `方案 ${group} ${role}` : role;
+  }
+  return `图 ${creativeImageIndex(asset, fallbackIndex + 1)}`;
 }
 
 function creativePreviewStatusRank(status: string): number {

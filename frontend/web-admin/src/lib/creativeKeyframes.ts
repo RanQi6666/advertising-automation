@@ -1,9 +1,11 @@
 export const KEYFRAME_VARIANT_OPTIONS = [1, 2, 3] as const;
 export const DEFAULT_KEYFRAME_VARIANT_COUNT = 1;
 export const KEYFRAME_FRAMES_PER_VARIANT = 2;
+export const COPY_IMAGE_GENERATION_COUNT = 2;
 
 export type KeyframeVariantCount = (typeof KEYFRAME_VARIANT_OPTIONS)[number];
 export type CreativeGenerationMode = "standard" | "video_keyframe_variants";
+export type CreativeGenerationUiMode = "copy_images" | "video_keyframes";
 export type KeyframeSlotStatus = "loading" | "done" | "error";
 
 export type CreativeGenerationPlan = {
@@ -53,6 +55,36 @@ export function creativeGenerationPlan(
   }
   return {
     count: 3,
+    size: "1:1",
+    generationMode: "standard",
+    isKeyframeVariant: false,
+  };
+}
+
+export function isVideoKeyframeMode(mode: CreativeGenerationUiMode): boolean {
+  return mode === "video_keyframes";
+}
+
+export function imageGenerationPlanForMode(
+  mode: CreativeGenerationUiMode,
+  durationSeconds: number,
+  aspectRatio: string,
+  keyframeVariantCount: KeyframeVariantCount = DEFAULT_KEYFRAME_VARIANT_COUNT,
+): CreativeGenerationPlan {
+  if (isVideoKeyframeMode(mode)) {
+    return {
+      count: keyframeVariantCount * KEYFRAME_FRAMES_PER_VARIANT,
+      size: aspectRatio || "9:16",
+      generationMode: "video_keyframe_variants",
+      isKeyframeVariant: true,
+      variantCount: keyframeVariantCount,
+      framesPerVariant: KEYFRAME_FRAMES_PER_VARIANT,
+      videoDurationSeconds: durationSeconds,
+    };
+  }
+
+  return {
+    count: COPY_IMAGE_GENERATION_COUNT,
     size: "1:1",
     generationMode: "standard",
     isKeyframeVariant: false,

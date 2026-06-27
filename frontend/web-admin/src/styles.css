@@ -1716,6 +1716,25 @@ input:focus-visible {
   color: #94a3b8;
 }
 
+.work-order-template-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 260px);
+  gap: 10px;
+  align-items: center;
+  width: calc(100% - 28px);
+  margin: 14px 14px 0;
+}
+
+.work-order-template-row label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.work-order-template-select {
+  width: 100%;
+}
+
 .work-order-input,
 .feedback-input,
 .publish-input {
@@ -4202,6 +4221,17 @@ input:focus-visible {
   font-weight: 760;
 }
 
+.keyframe-variant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.keyframe-review-complete {
+  min-height: 36px;
+}
+
 .keyframe-rewrite-box {
   background: #ffffff;
 }
@@ -5725,6 +5755,171 @@ input:focus-visible {
 .video-storyboard-editor .storyboard-input {
   min-height: 280px;
   background: #fbfdfc;
+}
+
+.image-console-rail {
+  align-items: stretch;
+  gap: 10px;
+}
+
+.generation-mode-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(132px, 1fr));
+  gap: 4px;
+  align-self: stretch;
+  min-width: min(100%, 284px);
+  padding: 4px;
+  border: 1px solid rgb(57 213 255 / 0.24);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, #101417, #1f2930),
+    #101417;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.04),
+    0 14px 34px rgb(16 20 23 / 0.18);
+}
+
+.generation-mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9fb2bf;
+  font-weight: 780;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.generation-mode-switch button:hover:not(:disabled) {
+  color: #f6f8fb;
+  background: rgb(255 255 255 / 0.06);
+}
+
+.generation-mode-switch button.active {
+  color: #f6f8fb;
+  background:
+    linear-gradient(135deg, rgb(57 213 255 / 0.22), rgb(255 79 216 / 0.14)),
+    #182028;
+  box-shadow:
+    0 0 18px rgb(57 213 255 / 0.22),
+    inset 0 0 0 1px rgb(246 248 251 / 0.08);
+}
+
+.generation-mode-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.script-console {
+  position: relative;
+  display: grid;
+  gap: 14px;
+  margin: 18px 0;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid rgb(57 213 255 / 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgb(57 213 255 / 0.08), rgb(255 79 216 / 0.06)),
+    #101417;
+  color: #f6f8fb;
+  box-shadow: 0 20px 44px rgb(10 15 18 / 0.28);
+}
+
+.script-console::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, #39d5ff, #ff4fd8, #f7b955);
+  opacity: 0.82;
+}
+
+.script-console-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.script-console-head h3 {
+  margin: 2px 0 0;
+  color: #f6f8fb;
+  font-size: 18px;
+}
+
+.script-console .section-eyebrow {
+  color: #39d5ff;
+}
+
+.script-console-actions,
+.script-console-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.script-console-textarea,
+.script-console-input {
+  color: #f6f8fb;
+  border-color: rgb(57 213 255 / 0.2);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.04), rgb(255 255 255 / 0.01)),
+    #0c1115;
+}
+
+.script-console-textarea {
+  min-height: 220px;
+}
+
+.script-console-input {
+  flex: 1 1 260px;
+  min-height: 96px;
+}
+
+.script-console-textarea::placeholder,
+.script-console-input::placeholder {
+  color: #7d909c;
+}
+
+.script-console-textarea:focus,
+.script-console-input:focus {
+  border-color: rgb(57 213 255 / 0.68);
+  box-shadow:
+    0 0 0 3px rgb(57 213 255 / 0.12),
+    0 0 24px rgb(255 79 216 / 0.1);
+}
+
+@media (max-width: 780px) {
+  .image-console-rail,
+  .script-console-head,
+  .script-console-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .generation-mode-switch {
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generation-mode-switch button {
+    transition: none;
+  }
+
+  .generation-mode-switch button.active {
+    box-shadow: inset 0 0 0 1px rgb(246 248 251 / 0.08);
+  }
 }
 
 .video-ad-preview-shell {
