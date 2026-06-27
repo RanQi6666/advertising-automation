@@ -17,7 +17,7 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
     "surface_style": [
         "dark premium mobile game lobby",
         "glossy rectangular game cards",
-        "metallic 3D title text",
+        "metallic abstract G mark styling",
         "cinematic neon rim light",
         "high contrast card carousel",
     ],
@@ -26,13 +26,14 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
         "ice energy hero card",
         "flame fortress adventure card",
         "glossy jewel and fruit matching card",
-        "abstract 777 neon brand numeral card",
+        "abstract neon app-badge card",
     ],
     "composition_cues": [
-        "GAJA777 identity visible in the first frame",
+        "abstract G mark visible in the first frame",
+        "no visible brand-number text",
         "phone-screen vertical lobby composition",
         "multiple premium cards angled in depth",
-        "clear orange Register or Play Now CTA in final frame",
+        "clear orange Start or Play Now CTA in final frame",
     ],
     "negative_style_cues": [
         "childlike puzzle blocks",
@@ -47,10 +48,10 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
     "video_recipe": {
         "duration_seconds": 12,
         "beats": [
-            "0-2s: dark neon GAJA777 lobby hook with premium cards",
+            "0-2s: dark neon app-lobby hook with abstract G mark and premium cards",
             "2-7s: fast carousel through original fantasy and jewel game cards",
             "7-10s: coherent app lobby reveal matching landing page style",
-            "10-12s: Register / Play Now end card",
+            "10-12s: Start / Play Now low-text end card",
         ],
     },
 }

@@ -24,6 +24,11 @@ from backend.app.schemas.ai import (
     VideoStoryboardCandidate,
     VideoStoryboardScene,
 )
+from backend.app.services.creative_safety_prompts import (
+    creative_safety_prompt_block,
+    sanitize_creative_safety_payload,
+    sanitize_creative_safety_text,
+)
 
 
 class OpenAILLMProvider:
@@ -324,11 +329,13 @@ class OpenAILLMProvider:
                 "first-frame hook image and one last-frame resolution image for the same "
                 "12-second video idea. Make each pair visually coherent while keeping the "
                 "three groups distinct enough for an operator to choose between. "
+                + creative_safety_prompt_block()
+                + "\n\n"
                 + _creative_strategy_system_instruction()
                 + "\n\n"
                 + language_requirements_prompt()
             ),
-            user=json.dumps(
+            user=_creative_payload_json(
                 {
                     "copy": draft.body,
                     "headline": draft.headline,
@@ -341,8 +348,7 @@ class OpenAILLMProvider:
                     "storyboard_context": _compact_image_storyboard_context(
                         storyboard_context
                     ),
-                },
-                ensure_ascii=False,
+                }
             ),
         )
         return [_image_brief_from_data(item) for item in data.get("briefs", [])[:count]]
@@ -376,11 +382,13 @@ class OpenAILLMProvider:
                 "language. visual, motion, notes, and rationale may use Simplified Chinese "
                 "for operator review, but any visible text requested in visual must use "
                 "the target audience language. "
+                + creative_safety_prompt_block()
+                + "\n\n"
                 + _creative_strategy_system_instruction()
                 + "\n\n"
                 + language_requirements_prompt()
             ),
-            user=json.dumps(
+            user=_creative_payload_json(
                 {
                     "campaign": {
                         "name": campaign.name,
@@ -397,8 +405,7 @@ class OpenAILLMProvider:
                     "context": context,
                     "instructions": instructions,
                     "target_language": target_language,
-                },
-                ensure_ascii=False,
+                }
             ),
         )
         return _video_storyboard_from_data(
@@ -428,7 +435,7 @@ class OpenAILLMProvider:
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": _creative_payload_json(
                         {
                             "campaign": {
                                 "name": campaign.name,
@@ -445,8 +452,7 @@ class OpenAILLMProvider:
                             "context": context,
                             "instructions": instructions,
                             "target_language": target_language,
-                        },
-                        ensure_ascii=False,
+                        }
                     ),
                 },
             ],
@@ -493,11 +499,13 @@ class OpenAILLMProvider:
                 "and must use the target audience language. visual, motion, notes, and "
                 "rationale may use Simplified Chinese for operator review, but any visible "
                 "text requested in visual must use the target audience language. "
+                + creative_safety_prompt_block()
+                + "\n\n"
                 + _creative_strategy_system_instruction()
                 + "\n\n"
                 + language_requirements_prompt()
             ),
-            user=json.dumps(
+            user=_creative_payload_json(
                 {
                     "campaign": {
                         "name": campaign.name,
@@ -516,8 +524,7 @@ class OpenAILLMProvider:
                     "current_storyboard_text": _truncate(current_storyboard_text, 6000),
                     "revision_feedback": feedback,
                     "target_language": target_language,
-                },
-                ensure_ascii=False,
+                }
             ),
         )
         return _video_storyboard_from_data(
@@ -549,7 +556,7 @@ class OpenAILLMProvider:
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": _creative_payload_json(
                         {
                             "campaign": {
                                 "name": campaign.name,
@@ -570,8 +577,7 @@ class OpenAILLMProvider:
                             "current_storyboard_text": _truncate(current_storyboard_text, 6000),
                             "revision_feedback": feedback,
                             "target_language": target_language,
-                        },
-                        ensure_ascii=False,
+                        }
                     ),
                 },
             ],
@@ -609,6 +615,10 @@ def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
     if not normalized["summary"]:
         normalized["summary"] = "大模型已完成分析，但没有返回明确摘要，请优先查看下方原因和建议。"
     return normalized
+
+
+def _creative_payload_json(payload: dict[str, Any]) -> str:
+    return json.dumps(sanitize_creative_safety_payload(payload), ensure_ascii=False)
 
 
 def _ad_performance_analysis_system_prompt() -> str:
@@ -820,6 +830,8 @@ def _video_storyboard_text_system_prompt(revision: bool) -> str:
         "voiceover are user-facing and must use the target audience language. Operator-facing "
         "labels, visual direction, motion notes, and review notes may use Simplified Chinese, "
         "but any visible text requested in the video must use the target audience language. "
+        + creative_safety_prompt_block()
+        + "\n\n"
         + _creative_strategy_system_instruction()
         + "\n\n"
         + language_requirements_prompt()
@@ -837,9 +849,10 @@ def _creative_strategy_system_instruction() -> str:
         "composition_cues, original_game_card_archetypes, and video_recipe while avoiding "
         "negative_style_cues. For a 12-second first/last-frame workflow, make the "
         "first-frame hook and last-frame resolution explicit. For mini_game_pool, lead "
-        "with a gameplay-led mini-game challenge and finish on a GAJA777 game hub end "
-        "card. For gaja_brand, use a dark premium GAJA777 neon game lobby with glossy "
-        "cards from the first frame and finish on a Register or Play Now CTA. Keep all "
+        "with a gameplay-led mini-game challenge and finish on a low-text abstract G game "
+        "hub end card. For gaja_brand, use a dark premium neon game lobby with glossy "
+        "cards, abstract G mark branding, and no visible brand-number text. Finish on a "
+        "Start or Play Now CTA. Keep all "
         "claims about navigation, variety, simple start, and app experience. Avoid "
         "outcome promises, value-return implications, fake platform UI, or fake "
         "browser/app screenshots."
@@ -1123,9 +1136,11 @@ def _copy_candidate_from_data(data: dict[str, Any]) -> CopyDraftCandidate:
 def _image_brief_from_data(data: dict[str, Any]) -> ImageBrief:
     normalized = {
         "image_index": data.get("image_index"),
-        "title": _coerce_text(data.get("title")),
-        "short_text": _coerce_text(data.get("short_text")),
-        "visual_direction": _coerce_text(data.get("visual_direction")),
+        "title": sanitize_creative_safety_text(_coerce_text(data.get("title"))),
+        "short_text": sanitize_creative_safety_text(_coerce_text(data.get("short_text"))),
+        "visual_direction": sanitize_creative_safety_text(
+            _coerce_text(data.get("visual_direction"))
+        ),
         "size": _coerce_text(data.get("size") or "1:1"),
     }
     return ImageBrief.model_validate(normalized)
@@ -1170,14 +1185,21 @@ def _video_scene_from_data(
         "scene_index": _coerce_int(data.get("scene_index"), fallback_index),
         "start_second": _coerce_optional_int(data.get("start_second")),
         "end_second": _coerce_optional_int(data.get("end_second")),
-        "visual": _coerce_text(data.get("visual")),
-        "subtitle": _coerce_optional_text(data.get("subtitle")),
-        "motion": _coerce_optional_text(data.get("motion")),
-        "voiceover": _coerce_optional_text(data.get("voiceover")),
+        "visual": sanitize_creative_safety_text(_coerce_text(data.get("visual"))),
+        "subtitle": _safe_optional_creative_text(data.get("subtitle")),
+        "motion": _safe_optional_creative_text(data.get("motion")),
+        "voiceover": _safe_optional_creative_text(data.get("voiceover")),
         "source_asset_ids": source_asset_ids,
-        "notes": _coerce_optional_text(data.get("notes")),
+        "notes": _safe_optional_creative_text(data.get("notes")),
     }
     return VideoStoryboardScene.model_validate(normalized)
+
+
+def _safe_optional_creative_text(value: Any) -> str | None:
+    text = _coerce_optional_text(value)
+    if text is None:
+        return None
+    return sanitize_creative_safety_text(text)
 
 
 def _compact_storyboard_for_revision(storyboard: list[dict]) -> list[dict[str, Any]]:

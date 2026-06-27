@@ -126,7 +126,9 @@ async def test_topic_service_adds_game_creative_strategy_to_signals() -> None:
 
     assert signals["creative_strategy"]["template_id"] == "mini_game_pool"
     assert signals["creative_strategy"]["duration_seconds"] == 12
-    assert signals["creative_strategy"]["brand"]["display_name"] == "GAJA777"
+    assert signals["creative_strategy"]["brand"]["display_name"] == "G app"
+    assert "abstract G" in str(signals["creative_strategy"])
+    assert "no visible brand-number text" in str(signals["creative_strategy"])
     serialized = json.dumps(signals, ensure_ascii=False)
     assert "raw_content" not in serialized
     assert mini_game_brief not in serialized

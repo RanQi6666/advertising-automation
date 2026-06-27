@@ -188,6 +188,19 @@ _COMPILED_POLICIES = {
     for category, patterns in _POLICIES.items()
 }
 
+_SAFETY_POLICY_LINE_PREFIXES = (
+    "Brand safety hard bans:",
+    "Brand safety visual guidance:",
+    "Creative safety hard rules:",
+    "Visible text hard ban:",
+    "Visual prop hard ban:",
+    "Use a low-text or no-text visual style.",
+    "CTA text should stay limited",
+    "- Do not create or preserve",
+    "- For visual assets, do not show",
+    "- Rewrite risky operator input",
+)
+
 _URL_FIELD_NAMES = {
     "url",
     "link",
@@ -252,7 +265,7 @@ def _walk_text(value: Any, path: str = "$") -> Iterator[tuple[str, str]]:
         return
 
     if isinstance(value, str):
-        text = value.strip()
+        text = _strip_safety_policy_lines(value).strip()
         if text:
             yield path, text
         return
@@ -272,3 +285,13 @@ def _is_ignored_path(path: str) -> bool:
     return normalized == "$.review.brand_safety" or normalized.startswith(
         "$.review.brand_safety."
     )
+
+
+def _strip_safety_policy_lines(value: str) -> str:
+    lines = []
+    for line in value.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(prefix) for prefix in _SAFETY_POLICY_LINE_PREFIXES):
+            continue
+        lines.append(line)
+    return "\n".join(lines)

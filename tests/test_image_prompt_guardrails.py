@@ -11,7 +11,48 @@ from backend.app.integrations.llm.mock_provider import (
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
 from backend.app.schemas.ai import ImageBrief
 from backend.app.services.brand_safety_policy import scan_brand_safety
+from backend.app.services.creative_safety_prompts import (
+    contains_creative_safety_risk,
+    creative_safety_prompt_block,
+)
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
+
+BANNED_VISIBLE_TEXT = (
+    "777",
+    "Luck",
+    "\u8d62\u94b1",
+    "\u63d0\u73b0",
+    "\u91d1\u5e01\u96e8",
+    "\u8d4c\u573a\u684c\u9762",
+)
+
+
+def test_creative_safety_prompt_blocks_banned_visible_words() -> None:
+    block = creative_safety_prompt_block()
+
+    for banned in BANNED_VISIBLE_TEXT:
+        assert banned in block
+    assert "abstract G mark" in block
+    assert "no visible brand-number text" in block
+    assert "casino tables" in block
+    assert "withdrawal UI" in block
+
+
+def test_creative_safety_risk_detector_catches_text_and_visual_props() -> None:
+    risky_values = (
+        "GAJA777",
+        "Luck badge",
+        "\u8d62\u94b1 headline",
+        "\u63d0\u73b0 button",
+        "\u91d1\u5e01\u96e8 animation",
+        "\u8d4c\u573a\u684c\u9762 background",
+        "casino table",
+        "cash rain",
+        "withdrawal UI",
+    )
+
+    for value in risky_values:
+        assert contains_creative_safety_risk(value)
 
 
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
@@ -40,12 +81,9 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert "二维码" in prompt
     assert "水印" in prompt
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
-    assert "cash" not in prompt
-    assert "bank cards" not in prompt
-    assert "discount stickers" not in prompt
-    assert "coupons" not in prompt
-    assert "casinos" not in prompt
-    assert "pills" not in prompt
+    assert "Creative safety hard rules" in prompt
+    assert "Visible text hard ban" in prompt
+    assert "no visible brand-number text" in prompt
 
 
 @pytest.mark.asyncio
@@ -92,6 +130,50 @@ async def test_openai_image_brief_prompt_forbids_platform_branding(
     assert "like/comment/share buttons" in system
     assert "QR codes" in system
     assert "watermarks" in system
+
+
+@pytest.mark.asyncio
+async def test_openai_image_prompt_includes_creative_safety_hard_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Safe app lobby",
+                    "short_text": "Start",
+                    "visual_direction": "Low-text neon app lobby with abstract G mark.",
+                    "size": "9:16",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a safe game lobby ad.",
+        headline="Start",
+        version=1,
+        metadata_json={},
+    )
+
+    await provider.generate_image_briefs(draft=draft, count=1, size="9:16")
+
+    system = captured["system"]
+    assert isinstance(system, str)
+    assert "Creative safety hard rules" in system
+    assert "Visible text hard ban" in system
+    assert "no visible brand-number text" in system
+    for banned in BANNED_VISIBLE_TEXT:
+        assert banned in system
 
 
 @pytest.mark.asyncio
@@ -155,9 +237,14 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
     assert "mandatory ad-direction context" in system
     assert "first-frame hook" in system
     assert "last-frame" in system
-    assert "GAJA777 game hub" in system
+    assert "abstract G game hub" in system
+    assert "no visible brand-number text" in system
     assert payload["draft_metadata"]["creative_strategy"]["template_id"] == "mini_game_pool"
     assert payload["storyboard_context"]["creative_strategy"]["template_id"] == "mini_game_pool"
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "GAJA777" not in payload_text
+    assert "777" not in payload_text
+    assert "Register" not in payload_text
 
 
 @pytest.mark.asyncio
@@ -218,6 +305,12 @@ async def test_openai_image_brief_payload_preserves_landing_visual_reference(
     payload = captured["payload"]
     assert isinstance(payload, dict)
     strategy = payload["draft_metadata"]["creative_strategy"]
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "GAJA777" not in payload_text
+    assert "777" not in payload_text
+    assert "Register" not in payload_text
+    assert "abstract G mark" in payload_text
+    assert "Start" in payload_text
     assert strategy["landing_visual_reference"]["surface_style"] == [
         "dark premium mobile game lobby"
     ]
@@ -287,7 +380,8 @@ async def test_mock_image_briefs_include_game_strategy_direction() -> None:
     )
 
     assert "mini-game challenge" in briefs[0].visual_direction
-    assert "GAJA777 game hub" in briefs[1].visual_direction
+    assert "abstract G game hub" in briefs[1].visual_direction
+    assert "no visible brand-number text" in briefs[1].visual_direction
 
 
 @pytest.mark.asyncio
@@ -323,12 +417,55 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
         },
     )
 
-    assert "dark neon GAJA777 lobby" in briefs[0].visual_direction
+    assert "dark neon app lobby" in briefs[0].visual_direction
+    assert "abstract G mark" in briefs[0].visual_direction
+    assert "no visible brand-number text" in briefs[0].visual_direction
     assert "premium game cards" in briefs[0].visual_direction
-    assert "GAJA777 premium game lobby" in briefs[1].visual_direction
+    assert "premium neon game lobby" in briefs[1].visual_direction
+    assert briefs[0].short_text == "Start"
     brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
     for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "money", "recharge"):
         assert risky_term not in brief_text
+
+
+@pytest.mark.asyncio
+async def test_mock_image_briefs_use_low_text_gaja_direction() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a safe game lobby ad.",
+        headline="Start",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(
+        draft=draft,
+        count=2,
+        size="9:16",
+        storyboard_context={
+            "keyframe_plan": {
+                "mode": "video_keyframe_variants",
+                "frames_per_variant": 2,
+                "video_duration_seconds": 12,
+            },
+            "creative_strategy": creative_strategy,
+        },
+    )
+
+    combined = " ".join(brief.visual_direction for brief in briefs)
+    assert "abstract G mark" in combined
+    assert "no visible brand-number text" in combined
+    for banned in BANNED_VISIBLE_TEXT:
+        assert banned not in combined
 
 
 @pytest.mark.asyncio

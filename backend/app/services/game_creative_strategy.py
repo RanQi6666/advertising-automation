@@ -63,10 +63,10 @@ def _gaja_brand_strategy() -> dict[str, Any]:
     video_recipe = {
         "duration_seconds": 12,
         "beats": [
-            "0-2s: dark neon GAJA777 lobby hook with premium cards",
+            "0-2s: dark neon app-lobby hook with abstract G mark and premium cards",
             "2-7s: fast carousel through original fantasy and jewel game cards",
             "7-10s: coherent app lobby reveal matching landing page style",
-            "10-12s: Register / Play Now end card",
+            "10-12s: Start / Play Now low-text end card",
         ],
     }
     return {
@@ -75,7 +75,7 @@ def _gaja_brand_strategy() -> dict[str, Any]:
         "duration_seconds": 12,
         "aspect_ratio": "9:16",
         "brand": {
-            "display_name": "GAJA777",
+            "display_name": "G app",
             "landing_domain": GAJA_DOMAIN,
             "palette": [
                 "near-black navy",
@@ -85,46 +85,49 @@ def _gaja_brand_strategy() -> dict[str, Any]:
                 "metallic gold highlight",
             ],
             "real_page_signals": [
-                "GAJA777 wordmark",
+                "abstract G mark",
+                "no visible brand-number text",
                 "dark premium mobile game lobby",
                 "glossy rectangular game cards",
-                "orange Register button",
+                "orange Start button",
             ],
         },
         "meta_restricted_game_ad_safe_mode": True,
         "first_frame": {
             "role": "premium game-lobby hook poster",
             "visual_must_include": [
-                "large GAJA777 wordmark",
+                "large abstract G mark",
+                "no visible brand-number text",
                 "dark premium mobile game lobby",
                 "premium game cards angled in depth",
                 "metallic 3D title styling",
                 "cinematic neon rim light",
             ],
             "composition": (
-                "Make GAJA777 readable in the first second. Use a mature, high-contrast "
-                "game lobby poster with glossy cards and cinematic depth."
+                "Use a mature, high-contrast premium neon game lobby poster with glossy "
+                "cards, cinematic depth, and only an abstract G mark for brand presence."
             ),
         },
         "last_frame": {
             "role": "conversion end card",
             "visual_must_include": [
-                "GAJA777 premium game lobby",
-                "Register / Play Now CTA",
+                "premium neon game lobby",
+                "abstract G mark",
+                "Start / Play Now CTA",
                 "orange CTA button matching the landing page",
                 "clean phone registration cue when appropriate",
             ],
-            "cta_must_include": ["Register", "Play Now"],
+            "cta_must_include": ["Start", "Play Now"],
             "composition": (
-                "End on a clear registration card connected to the GAJA777 landing page "
-                "and premium game lobby style."
+                "End on a clear low-text action card connected to the premium game lobby "
+                "style without showing brand-number text."
             ),
         },
         "motion_direction": [
             "Start with a strong dark neon poster frame.",
             "Move through glossy fantasy and jewel game cards with energy transitions.",
-            "Reveal the coherent GAJA777 lobby before the CTA.",
-            "Hold the final Register or Play Now end card long enough to read.",
+            "Reveal the coherent premium neon game lobby before the CTA.",
+            "Hold the final Start or Play Now end card long enough to read.",
         ],
         "negative_style_cues": [
             "childlike puzzle blocks",
@@ -138,6 +141,8 @@ def _gaja_brand_strategy() -> dict[str, Any]:
         ],
         "compliance_guardrails": [
             "Use original game-card visuals inspired by the landing page style.",
+            "Use low-text or no-text branding with an abstract G mark.",
+            "Do not show visible brand-number text.",
             "Keep copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",
             "Keep sensitive metadata on neutral labels only.",
@@ -167,14 +172,14 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
         "duration_seconds": 12,
         "aspect_ratio": "9:16",
         "brand": {
-            "display_name": "GAJA777",
+            "display_name": "G app",
             "landing_domain": GAJA_DOMAIN,
             "palette": ["bright teal", "coral", "clean purple", "orange CTA"],
             "real_page_signals": [
                 "casual game category tabs",
                 "puzzle, runner, bubble, tile, and reaction game tiles",
-                "GAJA777 casual game hub end card",
-                "orange Register button",
+                "abstract G mark game hub end card",
+                "orange Start button",
             ],
         },
         "game_pool_examples": examples,
@@ -184,7 +189,8 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
             "visual_must_include": [
                 "one oversized casual mini-game challenge tile",
                 "puzzle, runner, bubble, tile, or quick-tap challenge style",
-                "light GAJA777 corner logo",
+                "light abstract G corner icon",
+                "no visible brand-number text",
                 "short challenge hook such as Can you pass this level?",
             ],
             "composition": (
@@ -195,24 +201,26 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
         "last_frame": {
             "role": "GAJA game hub end card",
             "visual_must_include": [
-                "GAJA777 casual game hub with multiple mini-game tiles",
+                "abstract G game hub with multiple mini-game tiles",
                 "casual category tabs",
-                "Register / Play Now CTA",
+                "Start / Play Now CTA",
                 "orange CTA button matching the landing page",
             ],
-            "cta_must_include": ["Register", "Play Now", "More Games"],
+            "cta_must_include": ["Start", "Play Now", "More Games"],
             "composition": (
-                "Convert the mini-game hook into a broad GAJA777 game collection. "
-                "Make the final click target the GAJA game hub."
+                "Convert the mini-game hook into a broad low-text game collection. "
+                "Make the final click target the abstract G game hub."
             ),
         },
         "motion_direction": [
             "Open on a single simple game challenge.",
             "Use quick progress, level path, tap, or tile-swipe motion.",
-            "Expand into a grid of casual games and finish on the GAJA777 Register CTA.",
+            "Expand into a grid of casual games and finish on the abstract G Start CTA.",
         ],
         "compliance_guardrails": [
             "Use Meta-safe casual-game visuals only.",
+            "Use low-text or no-text branding with an abstract G mark.",
+            "Do not show visible brand-number text.",
             "Use only puzzle, runner, bubble, tile, quick-tap, and category-tile visuals.",
             "Keep all copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",

@@ -16,6 +16,10 @@ from backend.app.schemas.ai import (
     VideoStoryboardScene,
 )
 from backend.app.services.brand_safety_policy import scan_brand_safety
+from backend.app.services.creative_safety_prompts import (
+    contains_creative_safety_risk,
+    sanitize_creative_safety_text,
+)
 
 
 class MockLLMProvider:
@@ -455,7 +459,9 @@ class MockLLMProvider:
                 ImageBrief(
                     image_index=index + 1,
                     title=("Revised image" if feedback else snippets[index]),
-                    short_text=(draft.headline or snippets[index])[:80],
+                    short_text=sanitize_creative_safety_text(
+                        (draft.headline or snippets[index])[:80]
+                    ),
                     visual_direction=(
                         "Clean standalone performance-ad layout with readable text, product focus, "
                         "and enough negative space for mobile feed placements. "
@@ -481,6 +487,9 @@ class MockLLMProvider:
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         product = campaign.product_name or campaign.name
+        safe_product = (
+            "the app lobby" if contains_creative_safety_risk(product) else product
+        )
         target_language = build_target_language_context(campaign=campaign, context=context)
         creative_strategy = _mock_creative_strategy(
             campaign.metadata_json,
@@ -503,12 +512,12 @@ class MockLLMProvider:
                 visual = _mock_strategy_scene_visual(
                     creative_strategy,
                     role="first_frame",
-                    fallback=f"Open with the strongest product benefit for {product}.",
+                    fallback=f"Open with the strongest product benefit for {safe_product}.",
                 )
                 subtitle = (
-                    f"{product}: तुरंत देखें"
+                    f"{safe_product}: तुरंत देखें"
                     if target_language["country_code"] == "IN"
-                    else f"{product}: watch instantly"
+                    else f"{safe_product}: watch instantly"
                 )
             elif index == scene_count - 1:
                 visual = _mock_strategy_scene_visual(
@@ -516,7 +525,7 @@ class MockLLMProvider:
                     role="last_frame",
                     fallback="End on a clear call to action and keep the final frame readable.",
                 )
-                subtitle = "Register" if creative_strategy else (
+                subtitle = "Start" if creative_strategy else (
                     "अभी डाउनलोड करें"
                     if target_language["country_code"] == "IN"
                     else "Download Now"
@@ -534,17 +543,17 @@ class MockLLMProvider:
                     scene_index=index + 1,
                     start_second=start_second,
                     end_second=end_second,
-                    visual=(
+                    visual=sanitize_creative_safety_text(
                         f"{visual} Use image asset {asset.id}."
                         if asset
                         else f"{visual} This scene will guide a future generated image."
                     ),
-                    subtitle=subtitle,
+                    subtitle=sanitize_creative_safety_text(subtitle),
                     motion="Slow zoom, quick text reveal, and clean vertical-safe framing.",
                     voiceover=(
-                        draft.primary_text[:120]
+                        sanitize_creative_safety_text(draft.primary_text[:120])
                         if draft and draft.primary_text
-                        else f"Discover {product} in a simple, fast experience."
+                        else f"Discover {safe_product} in a simple, fast experience."
                     ),
                     source_asset_ids=[asset.id] if asset else [],
                     notes=instructions or "Mock storyboard for reserved video generation.",
@@ -955,22 +964,22 @@ def _mock_strategy_image_hint(
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
-                " Follow creative_strategy mini_game_pool: last-frame GAJA777 game hub "
-                "end card with Register / Play Now CTA."
+                " Follow creative_strategy mini_game_pool: last-frame abstract G game hub "
+                "end card with Start / Play Now CTA and no visible brand-number text."
             )
         return (
             " Follow creative_strategy mini_game_pool: first-frame mini-game challenge "
-            "with light GAJA777 corner logo."
+            "with light abstract G corner icon and no visible brand-number text."
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
-                " Follow creative_strategy gaja_brand: last-frame GAJA777 premium game "
-                "lobby with Register / Play Now CTA and orange button."
+                " Follow creative_strategy gaja_brand: last-frame premium neon game "
+                "lobby with abstract G mark, Start / Play Now CTA, and orange button."
             )
         return (
-            " Follow creative_strategy gaja_brand: first-frame dark neon GAJA777 lobby "
-            "with metallic title styling and premium game cards."
+            " Follow creative_strategy gaja_brand: first-frame dark neon app lobby "
+            "with abstract G mark, no visible brand-number text, and premium game cards."
         )
     return f" Follow creative_strategy {template_id}."
 
@@ -1029,17 +1038,23 @@ def _mock_strategy_scene_visual(
     template_id = creative_strategy.get("template_id")
     if template_id == "mini_game_pool":
         if role == "last_frame":
-            return "End on the GAJA777 game hub with multiple mini-game cards and Register CTA."
+            return (
+                "End on an abstract G game hub with multiple mini-game cards, Start CTA, "
+                "and no visible brand-number text."
+            )
         return (
-            "Open with a playable mini-game challenge, light GAJA777 logo, "
-            "and fast curiosity hook."
+            "Open with a playable mini-game challenge, light abstract G icon, "
+            "fast curiosity hook, and no visible brand-number text."
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
-            return "End on the GAJA777 premium game lobby with Register CTA and orange button."
+            return (
+                "End on a premium neon game lobby with abstract G mark, Start CTA, "
+                "orange button, and no visible brand-number text."
+            )
         return (
-            "Open with a dark neon GAJA777 lobby, metallic title styling, "
-            "premium game cards, and cinematic depth."
+            "Open with a dark neon app lobby, abstract G mark, metallic title styling, "
+            "premium game cards, cinematic depth, and no visible brand-number text."
         )
     return fallback
 

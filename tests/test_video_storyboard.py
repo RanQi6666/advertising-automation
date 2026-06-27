@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -11,7 +12,10 @@ from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.integrations.llm.mock_provider import MockLLMProvider
-from backend.app.integrations.llm.openai_provider import _video_storyboard_text_system_prompt
+from backend.app.integrations.llm.openai_provider import (
+    OpenAILLMProvider,
+    _video_storyboard_text_system_prompt,
+)
 from backend.app.schemas.video import (
     VideoGenerateRequest,
     VideoStoryboardGenerateRequest,
@@ -19,10 +23,12 @@ from backend.app.schemas.video import (
 )
 from backend.app.services import video_service
 from backend.app.services.brand_safety_policy import scan_brand_safety
+from backend.app.services.creative_safety_prompts import creative_safety_prompt_block
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     VideoService,
+    _prompt_with_creative_strategy,
     _redact_provider_request_payload,
     _resolve_video_source_image_url,
     _storyboard_to_prompt,
@@ -123,8 +129,99 @@ async def test_mock_provider_uses_game_strategy_for_video_storyboard() -> None:
     )
 
     assert "mini-game challenge" in storyboard.scenes[0].visual
-    assert "GAJA777 game hub" in storyboard.scenes[-1].visual
-    assert storyboard.scenes[-1].subtitle in {"Register", "Play Now"}
+    assert "abstract G game hub" in storyboard.scenes[-1].visual
+    assert "no visible brand-number text" in storyboard.scenes[-1].visual
+    assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
+
+
+@pytest.mark.asyncio
+async def test_openai_video_storyboard_payload_sanitizes_creative_prompt_terms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "landing_page": {
+                "extracted_data": {
+                    "visual_reference": {
+                        "source": "reference_image",
+                        "status": "analyzed",
+                        "palette": ["near-black navy background"],
+                        "surface_style": ["dark premium mobile game lobby"],
+                        "video_recipe": {
+                            "duration_seconds": 12,
+                            "beats": [
+                                "0-2s: dark neon GAJA777 lobby hook with premium cards",
+                                "10-12s: Register / Play Now end card",
+                            ],
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 4,
+                    "visual": "Open with abstract G mark.",
+                    "subtitle": "Start",
+                    "motion": "Slow push.",
+                    "voiceover": "Start exploring.",
+                    "source_asset_ids": [],
+                    "notes": "Safe scene.",
+                }
+            ],
+            "rationale": "Safe low-text direction.",
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA777 campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="GAJA777 ad copy.",
+        primary_text="Explore GAJA777 lobby and Register.",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions="Use the GAJA777 end card but keep it safe.",
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "GAJA777" not in payload_text
+    assert "777" not in payload_text
+    assert "Register" not in payload_text
+    assert "abstract G mark" in payload_text
+    assert "Start" in payload_text
 
 
 @pytest.mark.asyncio
@@ -395,12 +492,49 @@ def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() ->
 
     assert "Brand safety visual guidance" in prompt
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
-    assert "cash" not in prompt
-    assert "bank cards" not in prompt
-    assert "discount stickers" not in prompt
-    assert "coupons" not in prompt
-    assert "casinos" not in prompt
-    assert "pills" not in prompt
+    assert "Creative safety hard rules" in prompt
+    assert "Visible text hard ban" in prompt
+    assert "no visible brand-number text" in prompt
+
+
+def test_video_storyboard_prompt_includes_creative_text_and_prop_bans() -> None:
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 4,
+                "visual": "Open with a clean neon app lobby.",
+                "subtitle": "Start",
+            }
+        ]
+    )
+
+    assert "Creative safety hard rules" in prompt
+    assert "Visible text hard ban" in prompt
+    assert "no visible brand-number text" in prompt
+    assert "casino tables" in prompt
+    assert "withdrawal UI" in prompt
+    for banned in (
+        "777",
+        "Luck",
+        "\u8d62\u94b1",
+        "\u63d0\u73b0",
+        "\u91d1\u5e01\u96e8",
+        "\u8d4c\u573a\u684c\u9762",
+    ):
+        assert banned in prompt
+
+
+def test_video_prompt_with_existing_safety_block_preserves_prompt_text() -> None:
+    prompt = f"Open on a low-text app lobby with abstract G mark.\n{creative_safety_prompt_block()}"
+
+    result = _prompt_with_creative_strategy(prompt, None)
+
+    assert result is not None
+    assert "Open on a low-text app lobby with abstract G mark." in result
+    assert creative_safety_prompt_block() in result
+    assert "low-text premium neon app lobby with abstract G mark" not in result
 
 
 def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
@@ -436,7 +570,9 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "12-second first/last-frame workflow" in prompt
     assert "first-frame hook" in prompt
     assert "last-frame" in prompt
-    assert "GAJA777 game hub" in prompt
+    assert "abstract G game hub" in prompt
+    assert "Subtitle: Start" in prompt
+    assert "Subtitle: Register" not in prompt
 
 
 def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
@@ -481,7 +617,8 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert "Landing visual reference" in prompt
     assert "dark premium mobile game lobby" in prompt
     assert "near-black navy background" in prompt
-    assert "0-2s: dark neon GAJA777 lobby hook with premium cards" in prompt
+    assert "0-2s: dark neon abstract G mark lobby hook with premium cards" in prompt
+    assert "10-12s: Start / Play Now end card" in prompt
     assert "Avoid style cues: childlike puzzle blocks" in prompt
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
@@ -522,11 +659,12 @@ def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> N
         creative_strategy=creative_strategy,
     )
 
-    assert "casino" not in prompt.lower()
-    assert "slot" not in prompt.lower()
-    assert "cash" not in prompt.lower()
-    assert "treatment" not in prompt.lower()
-    assert "styling" in prompt
+    strategy_section = prompt.split("creative_strategy:", 1)[1].lower()
+    assert "casino" not in strategy_section
+    assert "slot" not in strategy_section
+    assert "cash" not in strategy_section
+    assert "treatment" not in strategy_section
+    assert "styling" in strategy_section
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
@@ -676,12 +814,80 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
         instructions=None,
     )
 
-    assert "dark neon GAJA777 lobby" in storyboard.scenes[0].visual
+    assert "dark neon app lobby" in storyboard.scenes[0].visual
+    assert "abstract G mark" in storyboard.scenes[0].visual
+    assert "no visible brand-number text" in storyboard.scenes[0].visual
     assert "title treatment" not in storyboard.scenes[0].visual
     assert "title styling" in storyboard.scenes[0].visual
     assert "premium game cards" in storyboard.scenes[0].visual
-    assert "GAJA777 premium game lobby" in storyboard.scenes[-1].visual
-    assert storyboard.scenes[-1].subtitle in {"Register", "Play Now"}
+    assert "premium neon game lobby" in storyboard.scenes[-1].visual
+    assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_gaja_video_avoids_banned_text_and_props() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA777 campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a safe game-lobby video.",
+        primary_text="Explore the app lobby.",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions=None,
+    )
+
+    combined = " ".join(
+        " ".join(
+            item
+            for item in (
+                scene.visual,
+                scene.subtitle or "",
+                scene.voiceover or "",
+                scene.notes or "",
+            )
+            if item
+        )
+        for scene in storyboard.scenes
+    )
+    assert "abstract G mark" in combined
+    assert "no visible brand-number text" in combined
+    for banned in (
+        "777",
+        "Luck",
+        "\u8d62\u94b1",
+        "\u63d0\u73b0",
+        "\u91d1\u5e01\u96e8",
+        "\u8d4c\u573a\u684c\u9762",
+        "casino",
+        "cash",
+        "coin",
+        "withdraw",
+    ):
+        assert banned.lower() not in combined.lower()
 
 
 @pytest.mark.asyncio

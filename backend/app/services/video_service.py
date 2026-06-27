@@ -29,6 +29,10 @@ from backend.app.services.creative_asset_urls import (
     repair_creative_asset_urls,
     resolve_creative_image_url,
 )
+from backend.app.services.creative_safety_prompts import (
+    creative_safety_prompt_block,
+    sanitize_creative_safety_text,
+)
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.landing_visual_reference import merge_landing_visual_reference
@@ -596,6 +600,7 @@ def _storyboard_to_prompt(
     lines = [
         "Create a short ad video using this approved storyboard:",
         BRAND_SAFETY_VISUAL_BAN,
+        creative_safety_prompt_block(),
     ]
     strategy_block = _creative_strategy_prompt_block(creative_strategy)
     if strategy_block:
@@ -607,10 +612,10 @@ def _storyboard_to_prompt(
                 for part in [
                     f"Scene {scene.get('scene_index')}",
                     f"{scene.get('start_second', '-')}-{scene.get('end_second', '-')}s",
-                    f"Visual: {scene.get('visual')}",
-                    f"Subtitle: {scene.get('subtitle')}",
-                    f"Motion: {scene.get('motion')}",
-                    f"Voiceover: {scene.get('voiceover')}",
+                    f"Visual: {_creative_safe_prompt_value(scene.get('visual'))}",
+                    f"Subtitle: {_creative_safe_prompt_value(scene.get('subtitle'))}",
+                    f"Motion: {_creative_safe_prompt_value(scene.get('motion'))}",
+                    f"Voiceover: {_creative_safe_prompt_value(scene.get('voiceover'))}",
                 ]
                 if part and not part.endswith("None")
             )
@@ -624,10 +629,24 @@ def _prompt_with_creative_strategy(
 ) -> str | None:
     if not prompt:
         return None
+    stripped_prompt = prompt.strip()
     strategy_block = _creative_strategy_prompt_block(creative_strategy)
-    if not strategy_block or "creative_strategy:" in prompt:
-        return prompt
-    return f"{prompt.strip()}\n\n{strategy_block}"
+    safety_block = creative_safety_prompt_block()
+    has_safety_block = safety_block in stripped_prompt
+    safe_prompt = (
+        stripped_prompt
+        if has_safety_block
+        else sanitize_creative_safety_text(stripped_prompt)
+    )
+    if strategy_block and "creative_strategy:" not in stripped_prompt:
+        parts = [safe_prompt]
+        if not has_safety_block:
+            parts.append(safety_block)
+        parts.append(strategy_block)
+        return "\n\n".join(parts)
+    if has_safety_block:
+        return safe_prompt
+    return f"{safe_prompt}\n\n{safety_block}"
 
 
 def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
@@ -649,13 +668,13 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     ]
     if template_id == "mini_game_pool":
         lines.append(
-            "Mini-game-pool rule: open with gameplay-led curiosity and end on the GAJA777 "
-            "game hub with Register or Play Now CTA."
+            "Mini-game-pool rule: open with gameplay-led curiosity and end on a low-text "
+            "abstract G game hub with Start or Play Now CTA."
         )
     elif template_id == "gaja_brand":
         lines.append(
-            "GAJA brand rule: make GAJA777 visible from the first frame and end on a "
-            "Register or Play Now CTA."
+            "GAJA brand rule: use an abstract G mark from the first frame, avoid visible "
+            "brand-number text, and end on a Start or Play Now CTA."
         )
     reference_block = _landing_visual_reference_summary(landing_visual_reference)
     if reference_block:
@@ -717,11 +736,18 @@ def _landing_visual_reference_summary(value: Any) -> str:
             parts.append(
                 f"{label}: {', '.join(safe_items)}"
             )
+    video_recipe = value.get("video_recipe")
+    if isinstance(video_recipe, dict):
+        beats = video_recipe.get("beats")
+        if isinstance(beats, list) and beats:
+            safe_beats = _brand_safe_prompt_list(beats[:4])
+            if safe_beats:
+                parts.append(f"video beats: {'; '.join(safe_beats)}")
     return " | ".join(parts) if len(parts) > 1 else ""
 
 
 def _brand_safe_prompt_text(value: str) -> str:
-    text = str(value).strip()
+    text = sanitize_creative_safety_text(str(value).strip())
     replacements = {
         "title treatment": "title styling",
         "Title treatment": "Title styling",
@@ -739,6 +765,12 @@ def _brand_safe_prompt_text(value: str) -> str:
     ):
         return ""
     return text
+
+
+def _creative_safe_prompt_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return sanitize_creative_safety_text(str(value))
 
 
 def _brand_safe_prompt_list(values: list[Any]) -> list[str]:

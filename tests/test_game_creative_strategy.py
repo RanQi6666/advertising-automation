@@ -12,6 +12,15 @@ from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.material_generation_service import MaterialGenerationService
 
+PROMPT_FACING_GAJA_BANNED_TEXT = (
+    "777",
+    "Luck",
+    "\u8d62\u94b1",
+    "\u63d0\u73b0",
+    "\u91d1\u5e01\u96e8",
+    "\u8d4c\u573a\u684c\u9762",
+)
+
 
 def test_gaja_landing_url_uses_brand_template() -> None:
     strategy = build_game_creative_strategy(
@@ -27,12 +36,13 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert strategy is not None
     assert strategy["template_id"] == "gaja_brand"
     assert strategy["duration_seconds"] == 12
-    assert "GAJA777" in strategy["brand"]["display_name"]
+    assert strategy["brand"]["display_name"] == "G app"
     assert "dark premium mobile game lobby" in " ".join(
         strategy["first_frame"]["visual_must_include"]
     )
     assert "premium game cards" in " ".join(strategy["first_frame"]["visual_must_include"])
-    assert "Register" in " ".join(strategy["last_frame"]["cta_must_include"])
+    assert "Start" in " ".join(strategy["last_frame"]["cta_must_include"])
+    assert "Play Now" in " ".join(strategy["last_frame"]["cta_must_include"])
     assert strategy["meta_restricted_game_ad_safe_mode"] is True
     assert "childlike puzzle blocks" in " ".join(strategy["negative_style_cues"])
     assert "restricted_review_props" in strategy["negative_style_cues"]
@@ -88,10 +98,10 @@ def test_mini_game_pool_brief_overrides_gaja_brand_template() -> None:
     assert strategy["template_id"] == "mini_game_pool"
     assert "Color Match" in strategy["game_pool_examples"]
     assert "Bubble Pop" in strategy["game_pool_examples"]
-    assert "light GAJA777 corner logo" in " ".join(
+    assert "light abstract G corner icon" in " ".join(
         strategy["first_frame"]["visual_must_include"]
     )
-    assert "GAJA777 casual game hub" in " ".join(strategy["last_frame"]["visual_must_include"])
+    assert "abstract G game hub" in " ".join(strategy["last_frame"]["visual_must_include"])
 
 
 def test_mini_game_pool_detects_real_chinese_terms() -> None:
@@ -151,6 +161,27 @@ def test_default_gaja_brand_strategy_metadata_passes_brand_safety_scan() -> None
         "passed"
     )
     assert "treatment" not in str(strategy).lower()
+
+
+def test_default_gaja_brand_strategy_uses_low_text_safe_branding() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "brief": "Brand ad for GAJA777.",
+        }
+    )
+
+    assert strategy is not None
+    prompt_facing_strategy = {
+        key: value for key, value in strategy.items() if key not in {"brand"}
+    }
+    prompt_text = str(prompt_facing_strategy)
+    for banned in PROMPT_FACING_GAJA_BANNED_TEXT:
+        assert banned not in prompt_text
+    assert "abstract G mark" in prompt_text
+    assert "no visible brand-number text" in prompt_text
+    assert "premium neon game lobby" in prompt_text
 
 
 def test_gaja_strategy_rejects_lookalike_domain() -> None:
