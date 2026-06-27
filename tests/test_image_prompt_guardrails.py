@@ -329,3 +329,51 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
     brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
     for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "money", "recharge"):
         assert risky_term not in brief_text
+
+
+@pytest.mark.asyncio
+async def test_mock_image_briefs_filter_risky_visual_reference_strings() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "landing_page": {
+                "extracted_data": {
+                    "visual_reference": {
+                        "source": "manual_reference",
+                        "status": "provided",
+                        "surface_style": [
+                            "brushed metal panels",
+                            "casino floor lighting",
+                            "slot machine reflections",
+                        ],
+                        "palette": [
+                            "near-black navy background",
+                            "cash gold gradient",
+                            "money green highlights",
+                        ],
+                    }
+                }
+            },
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="GAJA777 ad copy.",
+        headline="Register",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(draft=draft, count=1, size="9:16")
+
+    visual_direction = briefs[0].visual_direction.lower()
+    assert "brushed metal panels" in visual_direction
+    assert "near-black navy background" in visual_direction
+    assert "casino floor lighting" not in visual_direction
+    assert "slot machine reflections" not in visual_direction
+    assert "cash gold gradient" not in visual_direction
+    assert "money green highlights" not in visual_direction

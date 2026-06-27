@@ -15,6 +15,7 @@ from backend.app.schemas.ai import (
     VideoStoryboardCandidate,
     VideoStoryboardScene,
 )
+from backend.app.services.brand_safety_policy import scan_brand_safety
 
 
 class MockLLMProvider:
@@ -980,16 +981,31 @@ def _mock_visual_reference_hint(creative_strategy: dict[str, Any] | None) -> str
     reference = creative_strategy.get("landing_visual_reference")
     if not isinstance(reference, dict):
         return ""
-    surface_style = reference.get("surface_style")
-    palette = reference.get("palette")
+    surface_style = _mock_safe_visual_reference_values(reference.get("surface_style"))
+    palette = _mock_safe_visual_reference_values(reference.get("palette"))
     parts: list[str] = []
-    if isinstance(surface_style, list) and surface_style:
-        parts.append(
-            f" Match landing visual style: {', '.join(str(item) for item in surface_style[:3])}."
-        )
-    if isinstance(palette, list) and palette:
-        parts.append(f" Use palette: {', '.join(str(item) for item in palette[:3])}.")
+    if surface_style:
+        parts.append(f" Match landing visual style: {', '.join(surface_style)}.")
+    if palette:
+        parts.append(f" Use palette: {', '.join(palette)}.")
     return "".join(parts)
+
+
+def _mock_safe_visual_reference_values(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    safe_values: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        if scan_brand_safety({"value": text})["status"] != "passed":
+            continue
+        safe_values.append(text)
+        if len(safe_values) == 3:
+            break
+    return safe_values
 
 
 def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> str:
