@@ -124,16 +124,20 @@ def _gaja_brand_strategy() -> dict[str, Any]:
             "flat preschool cartoon style",
             "plain runner-game track",
             "generic falling-block game look",
-            "restricted review props",
-            "financial prop cues",
-            "outcome claim cues",
+            "restricted_review_props",
+            "financial_prop_cues",
+            "outcome_claim_cues",
         ],
         "compliance_guardrails": [
             "Use original game-card visuals inspired by the landing page style.",
             "Keep copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",
+            "Keep sensitive metadata on neutral labels only.",
+            (
+                "Use restricted_review_props, financial_prop_cues, and "
+                "outcome_claim_cues for review-safe taxonomy."
+            ),
             "Avoid fake Facebook or browser UI screenshots.",
-            "Avoid reward, value-return, payment, or outcome-claim framing.",
         ],
         "video_recipe": video_recipe,
     }

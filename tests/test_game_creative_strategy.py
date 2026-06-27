@@ -35,6 +35,9 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert "Register" in " ".join(strategy["last_frame"]["cta_must_include"])
     assert strategy["meta_restricted_game_ad_safe_mode"] is True
     assert "childlike puzzle blocks" in " ".join(strategy["negative_style_cues"])
+    assert "restricted_review_props" in strategy["negative_style_cues"]
+    assert "financial_prop_cues" in strategy["negative_style_cues"]
+    assert "outcome_claim_cues" in strategy["negative_style_cues"]
     assert "0-2s" in " ".join(strategy["video_recipe"]["beats"])
 
 
@@ -150,6 +153,21 @@ def test_gaja_strategy_avoids_meta_gambling_review_triggers() -> None:
         "chip",
         "cash",
         "prize",
+        "winning",
+    ):
+        assert risky_term not in strategy_text
+    for risky_term in (
+        "reward",
+        "value-return",
+        "payment",
+        "casino",
+        "slot",
+        "cash",
+        "coin",
+        "jackpot",
+        "money",
+        "recharge",
+        "deposit",
         "winning",
     ):
         assert risky_term not in strategy_text
