@@ -20,7 +20,7 @@ def test_gaja_landing_url_uses_brand_template() -> None:
             "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
             "event_name": "first deposit",
             "country": "India",
-            "brief": "Promote first deposit registration.",
+            "brief": "Promote registration.",
         }
     )
 
@@ -28,10 +28,34 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert strategy["template_id"] == "gaja_brand"
     assert strategy["duration_seconds"] == 12
     assert "GAJA777" in strategy["brand"]["display_name"]
-    assert "casual game hub" in " ".join(strategy["first_frame"]["visual_must_include"])
+    assert "dark premium mobile game lobby" in " ".join(
+        strategy["first_frame"]["visual_must_include"]
+    )
+    assert "premium game cards" in " ".join(strategy["first_frame"]["visual_must_include"])
     assert "Register" in " ".join(strategy["last_frame"]["cta_must_include"])
     assert strategy["meta_restricted_game_ad_safe_mode"] is True
-    assert "Meta-safe casual-game visuals" in " ".join(strategy["compliance_guardrails"])
+    assert "childlike puzzle blocks" in " ".join(strategy["negative_style_cues"])
+    assert "0-2s" in " ".join(strategy["video_recipe"]["beats"])
+
+
+def test_gaja_strategy_uses_landing_visual_reference() -> None:
+    visual_reference = {
+        "source": "reference_image",
+        "status": "analyzed",
+        "palette": ["near-black navy background"],
+        "surface_style": ["dark premium mobile game lobby"],
+    }
+
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "landing_page": {"extracted_data": {"visual_reference": visual_reference}},
+        }
+    )
+
+    assert strategy is not None
+    assert strategy["landing_visual_reference"] == visual_reference
 
 
 def test_mini_game_pool_brief_overrides_gaja_brand_template() -> None:
@@ -130,7 +154,8 @@ def test_gaja_strategy_avoids_meta_gambling_review_triggers() -> None:
     ):
         assert risky_term not in strategy_text
     assert "meta_restricted_game_ad_safe_mode" in strategy_text
-    assert "casual game hub" in strategy_text
+    assert "dark premium mobile game lobby" in strategy_text
+    assert "casual game hub" not in strategy_text
 
 
 async def _session_factory(tmp_path):

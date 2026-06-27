@@ -2,6 +2,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlparse
 
+from backend.app.services.landing_visual_reference import (
+    extract_landing_visual_reference,
+)
+
 GAJA_DOMAIN = "gaja777.game"
 GAJA_TEMPLATE_ID = "gaja_brand"
 MINI_GAME_POOL_TEMPLATE_ID = "mini_game_pool"
@@ -28,8 +32,13 @@ def build_game_creative_strategy(context: Mapping[str, Any]) -> dict[str, Any] |
     if not _has_gaja_signal(haystack, landing_url, product_name):
         return None
     if _has_mini_game_signal(haystack):
-        return _mini_game_pool_strategy()
-    return _gaja_brand_strategy()
+        strategy = _mini_game_pool_strategy()
+    else:
+        strategy = _gaja_brand_strategy()
+    visual_reference = extract_landing_visual_reference(context.get("landing_page"))
+    if visual_reference:
+        strategy = {**strategy, "landing_visual_reference": visual_reference}
+    return strategy
 
 
 def merge_creative_strategy(
@@ -43,64 +52,90 @@ def merge_creative_strategy(
 
 
 def _gaja_brand_strategy() -> dict[str, Any]:
+    video_recipe = {
+        "duration_seconds": 12,
+        "beats": [
+            "0-2s: dark neon GAJA777 lobby hook with premium cards",
+            "2-7s: fast carousel through original fantasy and jewel game cards",
+            "7-10s: coherent app lobby reveal matching landing page style",
+            "10-12s: Register / Play Now end card",
+        ],
+    }
     return {
         "template_id": GAJA_TEMPLATE_ID,
-        "template_name": "GAJA brand game platform ad",
+        "template_name": "GAJA premium neon game lobby ad",
         "duration_seconds": 12,
         "aspect_ratio": "9:16",
         "brand": {
             "display_name": "GAJA777",
             "landing_domain": GAJA_DOMAIN,
-            "palette": ["deep indigo", "teal", "clean purple", "orange CTA"],
+            "palette": [
+                "near-black navy",
+                "electric cyan",
+                "magenta violet glow",
+                "orange CTA",
+                "metallic gold highlight",
+            ],
             "real_page_signals": [
                 "GAJA777 wordmark",
+                "dark premium mobile game lobby",
+                "glossy rectangular game cards",
                 "orange Register button",
-                "casual game collection tiles",
-                "clean mobile game hub layout",
             ],
         },
         "meta_restricted_game_ad_safe_mode": True,
         "first_frame": {
-            "role": "ad hook poster",
+            "role": "premium game-lobby hook poster",
             "visual_must_include": [
                 "large GAJA777 wordmark",
-                "abstract casual game hub background",
-                "original puzzle, runner, bubble, or arcade-style tiles",
-                "clean app-like category tiles",
-                "short hook text about game variety or easy start",
+                "dark premium mobile game lobby",
+                "premium game cards angled in depth",
+                "metallic 3D title treatment",
+                "cinematic neon rim light",
             ],
             "composition": (
-                "Make the platform identity obvious in the first second. "
-                "Use a clean casual game hub poster composition, not a regulated-game scene."
+                "Make GAJA777 readable in the first second. Use a mature, high-contrast "
+                "game lobby poster with glossy cards and cinematic depth."
             ),
         },
         "last_frame": {
             "role": "conversion end card",
             "visual_must_include": [
-                "GAJA777 casual game hub",
+                "GAJA777 premium game lobby",
                 "Register / Play Now CTA",
                 "orange CTA button matching the landing page",
-                "India +91 account cue when appropriate",
+                "clean phone registration cue when appropriate",
             ],
             "cta_must_include": ["Register", "Play Now"],
             "composition": (
-                "End on a clear registration card that feels connected to the real "
-                "GAJA777 landing page and game lobby."
+                "End on a clear registration card connected to the GAJA777 landing page "
+                "and premium game lobby style."
             ),
         },
         "motion_direction": [
-            "Start with a strong poster frame.",
-            "Animate clean card transitions and subtle logo glow toward the CTA.",
-            "Reveal the casual game hub and Register button in the final seconds.",
+            "Start with a strong dark neon poster frame.",
+            "Move through glossy fantasy and jewel game cards with energy transitions.",
+            "Reveal the coherent GAJA777 lobby before the CTA.",
+            "Hold the final Register or Play Now end card long enough to read.",
+        ],
+        "negative_style_cues": [
+            "childlike puzzle blocks",
+            "bubble-pop toys",
+            "flat preschool cartoon style",
+            "plain runner-game track",
+            "generic falling-block game look",
+            "restricted review props",
+            "financial prop cues",
+            "outcome claim cues",
         ],
         "compliance_guardrails": [
-            "Use Meta-safe casual-game visuals only.",
-            "Use only puzzle, runner, bubble, tile, quick-tap, and category-tile visuals.",
-            "Keep all copy about navigation, variety, simple start, and app experience.",
+            "Use original game-card visuals inspired by the landing page style.",
+            "Keep copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",
             "Avoid fake Facebook or browser UI screenshots.",
-            "Use gameplay variety and simple navigation instead of claim-heavy wording.",
+            "Avoid reward, value-return, payment, or outcome-claim framing.",
         ],
+        "video_recipe": video_recipe,
     }
 
 
