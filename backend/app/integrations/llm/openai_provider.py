@@ -831,13 +831,18 @@ def _creative_strategy_system_instruction() -> str:
         "If draft_metadata.creative_strategy, campaign.metadata.creative_strategy, or "
         "context.creative_strategy is provided, treat creative_strategy as mandatory "
         "ad-direction context. Honor its template_id, duration_seconds, first_frame, "
-        "last_frame, motion_direction, and compliance_guardrails. For a 12-second "
-        "first/last-frame workflow, make the first-frame hook and last-frame resolution "
-        "explicit. For mini_game_pool, lead with a gameplay-led mini-game challenge and "
-        "finish on a GAJA777 game hub end card. For gaja_brand, make GAJA777 visible from "
-        "the first frame and finish on a Register or Play Now CTA. Keep all claims about "
-        "navigation, variety, simple start, and app experience. Avoid outcome promises, "
-        "value-return implications, fake platform UI, or fake browser/app screenshots."
+        "last_frame, motion_direction, compliance_guardrails, negative_style_cues, "
+        "video_recipe, and landing_visual_reference. If landing visual reference is "
+        "present, treat it as mandatory art direction: follow its palette, surface_style, "
+        "composition_cues, original_game_card_archetypes, and video_recipe while avoiding "
+        "negative_style_cues. For a 12-second first/last-frame workflow, make the "
+        "first-frame hook and last-frame resolution explicit. For mini_game_pool, lead "
+        "with a gameplay-led mini-game challenge and finish on a GAJA777 game hub end "
+        "card. For gaja_brand, use a dark premium GAJA777 neon game lobby with glossy "
+        "cards from the first frame and finish on a Register or Play Now CTA. Keep all "
+        "claims about navigation, variety, simple start, and app experience. Avoid "
+        "outcome promises, value-return implications, fake platform UI, or fake "
+        "browser/app screenshots."
     )
 
 
@@ -1309,6 +1314,9 @@ def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "last_frame",
         "motion_direction",
         "compliance_guardrails",
+        "landing_visual_reference",
+        "negative_style_cues",
+        "video_recipe",
     ):
         item = value.get(key)
         if item not in (None, "", []):

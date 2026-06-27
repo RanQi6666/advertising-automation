@@ -449,6 +449,7 @@ class MockLLMProvider:
                 index + 1,
                 storyboard_context,
             )
+            visual_reference_hint = _mock_visual_reference_hint(creative_strategy)
             briefs.append(
                 ImageBrief(
                     image_index=index + 1,
@@ -459,6 +460,7 @@ class MockLLMProvider:
                         "and enough negative space for mobile feed placements. "
                         f"Use landing page context: {landing_hint or 'not available'}."
                         f"{strategy_hint}"
+                        f"{visual_reference_hint}"
                         f"{storyboard_hint}"
                         f"{source_hint}{revision_hint}"
                     ),
@@ -962,14 +964,32 @@ def _mock_strategy_image_hint(
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
-                " Follow creative_strategy gaja_brand: last-frame GAJA777 register "
-                "end card with orange CTA."
+                " Follow creative_strategy gaja_brand: last-frame GAJA777 premium game "
+                "lobby with Register / Play Now CTA and orange button."
             )
         return (
-            " Follow creative_strategy gaja_brand: first-frame GAJA777 logo, Ganesha "
-            "gold hero, and welcome-bonus platform identity."
+            " Follow creative_strategy gaja_brand: first-frame dark neon GAJA777 lobby "
+            "with metallic title treatment and premium game cards."
         )
     return f" Follow creative_strategy {template_id}."
+
+
+def _mock_visual_reference_hint(creative_strategy: dict[str, Any] | None) -> str:
+    if not isinstance(creative_strategy, dict):
+        return ""
+    reference = creative_strategy.get("landing_visual_reference")
+    if not isinstance(reference, dict):
+        return ""
+    surface_style = reference.get("surface_style")
+    palette = reference.get("palette")
+    parts: list[str] = []
+    if isinstance(surface_style, list) and surface_style:
+        parts.append(
+            f" Match landing visual style: {', '.join(str(item) for item in surface_style[:3])}."
+        )
+    if isinstance(palette, list) and palette:
+        parts.append(f" Use palette: {', '.join(str(item) for item in palette[:3])}.")
+    return "".join(parts)
 
 
 def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> str:
@@ -977,7 +997,7 @@ def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> st
         storyboard_context.get("keyframe_plan") if isinstance(storyboard_context, dict) else None
     )
     if not isinstance(keyframe_plan, dict):
-        return "first_frame"
+        return "first_frame" if image_index % 2 == 1 else "last_frame"
     frames_per_variant = _int_or(keyframe_plan.get("frames_per_variant"), 2)
     position = ((image_index - 1) % max(1, frames_per_variant)) + 1
     return "first_frame" if position == 1 else "last_frame"

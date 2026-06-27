@@ -158,6 +158,72 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_brief_payload_preserves_landing_visual_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Premium lobby",
+                    "short_text": "Register",
+                    "visual_direction": "Dark neon GAJA777 lobby with premium game cards.",
+                    "size": "9:16",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "landing_page": {
+                "extracted_data": {
+                    "visual_reference": {
+                        "source": "reference_image",
+                        "status": "analyzed",
+                        "palette": ["near-black navy background"],
+                        "surface_style": ["dark premium mobile game lobby"],
+                        "video_recipe": {
+                            "duration_seconds": 12,
+                            "beats": ["0-2s: dark neon GAJA777 lobby hook with premium cards"],
+                        },
+                    }
+                }
+            },
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="GAJA777 ad copy.",
+        headline="Register",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_image_briefs(draft=draft, count=1, size="9:16")
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    strategy = payload["draft_metadata"]["creative_strategy"]
+    assert strategy["landing_visual_reference"]["surface_style"] == [
+        "dark premium mobile game lobby"
+    ]
+    assert "negative_style_cues" in strategy
+    assert "video_recipe" in strategy
+    assert "landing visual reference" in captured["system"]
+
+
+@pytest.mark.asyncio
 async def test_mock_image_briefs_are_platform_neutral() -> None:
     provider = MockLLMProvider()
     draft = CopyDraft(
@@ -214,3 +280,32 @@ async def test_mock_image_briefs_include_game_strategy_direction() -> None:
 
     assert "mini-game challenge" in briefs[0].visual_direction
     assert "GAJA777 game hub" in briefs[1].visual_direction
+
+
+@pytest.mark.asyncio
+async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="GAJA777 ad copy.",
+        headline="Register",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(draft=draft, count=2, size="9:16")
+
+    assert "dark neon GAJA777 lobby" in briefs[0].visual_direction
+    assert "premium game cards" in briefs[0].visual_direction
+    assert "GAJA777 premium game lobby" in briefs[1].visual_direction
+    brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
+    for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "money", "recharge"):
+        assert risky_term not in brief_text
