@@ -27,6 +27,16 @@ import {
   brandSafetyReportFromPayload,
   brandSafetySummaryLabel,
 } from "./lib/brandSafety";
+import {
+  DEFAULT_KEYFRAME_VARIANT_COUNT,
+  KEYFRAME_FRAMES_PER_VARIANT,
+  KEYFRAME_VARIANT_OPTIONS,
+  buildKeyframePlanProgress,
+  creativeGenerationPlan,
+  keyframeGroupSlotIndices,
+  normalizeKeyframeVariantCount,
+  type KeyframeVariantCount,
+} from "./lib/creativeKeyframes";
 import { displayAssetUrl } from "./lib/assetUrls";
 import type {
   AdPerformanceAnalysisStreamEvent,
@@ -135,9 +145,7 @@ type AdGenerationIntegrationParams = {
 const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
 const CREATIVE_GENERATION_LIMIT = 3;
-const KEYFRAME_VARIANT_COUNT = 3;
-const KEYFRAME_FRAMES_PER_VARIANT = 2;
-const KEYFRAME_TOTAL_IMAGES = KEYFRAME_VARIANT_COUNT * KEYFRAME_FRAMES_PER_VARIANT;
+const KEYFRAME_MAX_TOTAL_IMAGES = KEYFRAME_VARIANT_OPTIONS.length * KEYFRAME_FRAMES_PER_VARIANT;
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -257,6 +265,10 @@ function App() {
   const [creativeGenerationSlots, setCreativeGenerationSlots] = useState<CreativeGenerationSlot[]>([]);
   const [selectedCreativeIds, setSelectedCreativeIds] = useState<string[]>([]);
   const [creativeRewriteFeedbacks, setCreativeRewriteFeedbacks] = useState<Record<string, string>>({});
+  const [keyframeVariantCount, setKeyframeVariantCount] = useState<KeyframeVariantCount>(
+    DEFAULT_KEYFRAME_VARIANT_COUNT,
+  );
+  const [keyframeRewriteFeedbacks, setKeyframeRewriteFeedbacks] = useState<Record<string, string>>({});
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [videoPollWarnings, setVideoPollWarnings] = useState<Record<string, VideoPollWarning>>({});
@@ -648,6 +660,7 @@ function App() {
     setCreativeGenerationSlots([]);
     setSelectedCreativeIds([]);
     setCreativeRewriteFeedbacks({});
+    setKeyframeRewriteFeedbacks({});
     setVideos([]);
     setVideoPollWarnings({});
     setSelectedVideoId(null);
@@ -1373,12 +1386,13 @@ function App() {
       return;
     }
     if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
-    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio);
+    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
     setActiveView("creatives");
     setLoading("creatives");
     clearError("image");
     setNotice(null);
     setCreativeGenerationSlots(initialCreativeSlots(generationPlan.count));
+    setKeyframeRewriteFeedbacks({});
 
     const streamedAssets: CreativeAsset[] = [];
     try {
@@ -1461,8 +1475,8 @@ function App() {
         }
         setNotice(
           streamedAssets.length === generationPlan.count
-            ? "3 组首尾帧方案已按创意脚本生成"
-            : `已生成 ${streamedAssets.length} 张关键帧，剩余候选可单独重试`,
+            ? `${generationPlan.variantCount ?? DEFAULT_KEYFRAME_VARIANT_COUNT} 组关键帧方案已按创意脚本生成`
+            : `已生成 ${streamedAssets.length} 张关键帧，剩余方案可继续重试`,
         );
       }
       void saveWorkflowStage("image_review");
@@ -1490,7 +1504,10 @@ function App() {
       return;
     }
     if (loading?.startsWith("creative-retry-")) return;
-    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio);
+    const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
+    const previousSlotAssetId =
+      creativeGenerationSlots.find((slot) => slot.index === slotIndex)?.asset?.id ??
+      buildCreativeSlots(creatives, []).find((slot) => slot.index === slotIndex)?.asset?.id;
     setLoading(`creative-retry-${slotIndex}`);
     clearError("image");
     setNotice(null);
@@ -1511,9 +1528,17 @@ function App() {
           if (event.type === "asset") {
             retriedAsset = event.asset;
             setCreatives((current) => prependOrReplaceById(current, event.asset));
-            setSelectedCreativeIds((current) =>
-              current.includes(event.asset.id) ? current : [...current, event.asset.id],
-            );
+            setSelectedCreativeIds((current) => {
+              if (generationPlan.isKeyframeVariant) {
+                const kept = previousSlotAssetId
+                  ? current.filter((id) => id !== previousSlotAssetId)
+                  : current;
+                return previousSlotAssetId && current.includes(previousSlotAssetId)
+                  ? [...kept, event.asset.id]
+                  : kept;
+              }
+              return current.includes(event.asset.id) ? current : [...current, event.asset.id];
+            });
             updateCreativeGenerationSlot(slotIndex, {
               status: "done",
               asset: event.asset,
@@ -1618,6 +1643,88 @@ function App() {
       });
     }
     setLoading((current) => (current === `creative-regenerate-${asset.id}` ? null : current));
+  }
+
+  async function handleRegenerateKeyframeGroup(group: KeyframeVariantGroup) {
+    const feedbackKey = String(group.group);
+    const feedback = keyframeRewriteFeedbacks[feedbackKey]?.trim();
+    if (!feedback) {
+      setError(`请先填写方案 ${group.group} 的改写要求。`, "image");
+      return;
+    }
+    const slotsWithAssets = group.slots.filter(
+      (slot): slot is CreativeGenerationSlot & { asset: CreativeAsset } => Boolean(slot.asset),
+    );
+    if (!group.complete || slotsWithAssets.length < KEYFRAME_FRAMES_PER_VARIANT) {
+      setError(`方案 ${group.group} 需要首帧和尾帧都生成后才能按意见重生。`, "image");
+      return;
+    }
+
+    const loadingKey = `creative-regenerate-group-${group.group}`;
+    const oldAssetIds = slotsWithAssets.map((slot) => slot.asset.id);
+    setLoading(loadingKey);
+    clearError("image");
+    setNotice(null);
+    for (const slot of slotsWithAssets) {
+      updateCreativeGenerationSlot(slot.index, {
+        status: "loading",
+        asset: slot.asset,
+        message: undefined,
+      });
+    }
+
+    try {
+      const regeneratedSlots = await Promise.all(
+        slotsWithAssets.map(async (slot) => ({
+          slotIndex: slot.index,
+          asset: await api.regenerateCreative(
+            slot.asset.id,
+            feedback,
+            slot.asset.size,
+            selectedImageModelId,
+          ),
+        })),
+      );
+      setCreatives((current) =>
+        regeneratedSlots.reduce((next, item) => prependOrReplaceById(next, item.asset), current),
+      );
+      setSelectedCreativeIds((current) => {
+        const kept = current.filter((id) => !oldAssetIds.includes(id));
+        const wasGroupSelected = oldAssetIds.every((id) => current.includes(id));
+        if (!wasGroupSelected) return kept;
+        const regeneratedIds = regeneratedSlots.map((item) => item.asset.id);
+        return [...kept, ...regeneratedIds.filter((id) => !kept.includes(id))];
+      });
+      for (const item of regeneratedSlots) {
+        updateCreativeGenerationSlot(item.slotIndex, {
+          status: "done",
+          asset: item.asset,
+          message: undefined,
+        });
+      }
+      setKeyframeRewriteFeedbacks((current) => {
+        const next = { ...current };
+        delete next[feedbackKey];
+        return next;
+      });
+      setNotice(`方案 ${group.group} 已按意见重生`);
+      clearError("image");
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message = apiErrorMessage(caught, `方案 ${group.group} 重生失败`);
+      if (caught instanceof ApiError && [401, 403].includes(caught.status)) {
+        setCaughtError("image", caught, `方案 ${group.group} 重生失败`);
+      }
+      for (const slot of slotsWithAssets) {
+        updateCreativeGenerationSlot(slot.index, {
+          status: "error",
+          asset: slot.asset,
+          message,
+        });
+      }
+    } finally {
+      setLoading((current) => (current === loadingKey ? null : current));
+    }
   }
 
   async function handleGenerateVideoStoryboard() {
@@ -2140,13 +2247,21 @@ function App() {
             setRewriteFeedback={(assetId, value) =>
               setCreativeRewriteFeedbacks((current) => ({ ...current, [assetId]: value }))
             }
+            keyframeVariantCount={keyframeVariantCount}
+            setKeyframeVariantCount={setKeyframeVariantCount}
+            keyframeRewriteFeedbacks={keyframeRewriteFeedbacks}
+            setKeyframeRewriteFeedback={(group, value) =>
+              setKeyframeRewriteFeedbacks((current) => ({ ...current, [String(group)]: value }))
+            }
             modelOptions={modelOptions?.image ?? []}
             selectedModelId={selectedImageModelId}
             setSelectedModelId={setSelectedImageModelId}
+            videoAspectRatio={videoAspectRatio}
             videoDurationSeconds={videoDurationSeconds}
             onGenerate={() => void handleGenerateCreatives()}
             onRetrySlot={(index) => void handleRetryCreativeSlot(index)}
             onRegenerate={(asset) => void handleRegenerateCreative(asset)}
+            onRegenerateGroup={(group) => void handleRegenerateKeyframeGroup(group)}
             onReview={handleReview}
             onCreateVideo={() => setActiveView("videos")}
             loading={loading}
@@ -3333,14 +3448,20 @@ function CreativesView({
   setSelectedCreativeIds,
   rewriteFeedbacks,
   setRewriteFeedback,
+  keyframeVariantCount,
+  setKeyframeVariantCount,
+  keyframeRewriteFeedbacks,
+  setKeyframeRewriteFeedback,
   modelOptions,
   selectedModelId,
   setSelectedModelId,
   onGenerate,
   onRetrySlot,
   onRegenerate,
+  onRegenerateGroup,
   onReview,
   onCreateVideo,
+  videoAspectRatio,
   videoDurationSeconds,
   loading,
 }: {
@@ -3350,13 +3471,19 @@ function CreativesView({
   setSelectedCreativeIds: (ids: string[]) => void;
   rewriteFeedbacks: Record<string, string>;
   setRewriteFeedback: (assetId: string, value: string) => void;
+  keyframeVariantCount: KeyframeVariantCount;
+  setKeyframeVariantCount: (value: KeyframeVariantCount) => void;
+  keyframeRewriteFeedbacks: Record<string, string>;
+  setKeyframeRewriteFeedback: (group: number, value: string) => void;
   modelOptions: ModelOption[];
   selectedModelId: string;
   setSelectedModelId: (value: string) => void;
+  videoAspectRatio: string;
   videoDurationSeconds: number;
   onGenerate: () => void;
   onRetrySlot: (index: number) => void;
   onRegenerate: (asset: CreativeAsset) => void;
+  onRegenerateGroup: (group: KeyframeVariantGroup) => void;
   onReview: (
     entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
     entityId: string,
@@ -3374,15 +3501,40 @@ function CreativesView({
   const hasSlotErrors = visibleSlots.some((slot) => slot.status === "error");
   const isGenerating =
     loading === "creatives" || creativeGenerationSlots.some((slot) => slot.status === "loading");
-  const generationPlan = creativeGenerationPlan(videoDurationSeconds, "9:16");
-  const keyframeGroups = buildKeyframeVariantGroups(visibleSlots);
+  const generationPlan = creativeGenerationPlan(videoDurationSeconds, videoAspectRatio, keyframeVariantCount);
+  const selectedKeyframeGroupCount = generationPlan.variantCount ?? keyframeVariantCount;
+  const keyframeReviewActive =
+    generationPlan.isKeyframeVariant &&
+    (creativeGenerationSlots.length > 0 ||
+      visibleSlots.some((slot) => (slot.asset ? isKeyframeVariantAsset(slot.asset) : slot.status !== "done")));
+  const keyframeGroups = keyframeReviewActive
+    ? buildKeyframeVariantGroups(visibleSlots, selectedKeyframeGroupCount)
+    : [];
   const hasKeyframeGroups = keyframeGroups.length > 0;
-  const slotLimit = visibleSlots.length || generationPlan.count;
+  const visibleKeyframeGroupCount = Math.min(
+    KEYFRAME_VARIANT_OPTIONS.length,
+    Math.max(selectedKeyframeGroupCount, ...keyframeGroups.map((group) => group.group)),
+  ) as KeyframeVariantCount;
+  const keyframeProgressItems =
+    keyframeReviewActive && visibleSlots.length
+      ? buildKeyframePlanProgress(visibleSlots, visibleKeyframeGroupCount)
+      : [];
+  const keyframeDoneCount = keyframeProgressItems.filter((item) => item.status === "done").length;
+  const keyframeHasErrors = keyframeProgressItems.some((item) => item.status === "error");
+  const slotLimit = keyframeReviewActive
+    ? keyframeProgressItems.length || selectedKeyframeGroupCount
+    : visibleSlots.length || generationPlan.count;
+  const progressDone = keyframeReviewActive
+    ? keyframeProgressItems.length > 0 && keyframeDoneCount === keyframeProgressItems.length
+    : completedCount === slotLimit;
+  const progressFailed = keyframeReviewActive ? keyframeHasErrors : hasSlotErrors;
   const panelNote = visibleSlots.length
-    ? isGenerating
-      ? `${completedCount}/${slotLimit} 张已生成`
-      : hasKeyframeGroups
-        ? `${keyframeGroups.length} 组首尾帧方案`
+    ? keyframeReviewActive
+      ? isGenerating
+        ? `${keyframeDoneCount}/${slotLimit} 个方案已完成`
+        : `${hasKeyframeGroups ? keyframeGroups.length : slotLimit} 个关键帧方案`
+      : isGenerating
+        ? `${completedCount}/${slotLimit} 张已生成`
         : `${completedCount} 张当前候选`
     : "还没有生成图片";
 
@@ -3403,9 +3555,33 @@ function CreativesView({
               onChange={setSelectedModelId}
               disabled={Boolean(loading)}
             />
+            {generationPlan.isKeyframeVariant && (
+              <label className="model-select-control keyframe-count-control" htmlFor="keyframe-variant-count">
+                <span>关键帧组数</span>
+                <select
+                  id="keyframe-variant-count"
+                  className="select model-select keyframe-count-select"
+                  value={keyframeVariantCount}
+                  onChange={(event) =>
+                    setKeyframeVariantCount(normalizeKeyframeVariantCount(event.target.value))
+                  }
+                  disabled={Boolean(loading)}
+                >
+                  {KEYFRAME_VARIANT_OPTIONS.map((count) => (
+                    <option key={count} value={count}>
+                      {count} 组
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button className="secondary-button" onClick={onGenerate} disabled={isGenerating}>
               {isGenerating ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-              <span>{generationPlan.isKeyframeVariant ? "生成 3 组关键帧" : "生成 3 张图片"}</span>
+              <span>
+                {generationPlan.isKeyframeVariant
+                  ? `生成 ${selectedKeyframeGroupCount} 组关键帧`
+                  : "生成 3 张图片"}
+              </span>
             </button>
             <button className="primary-button" onClick={onCreateVideo} disabled={!creatives.some((item) => item.status === "approved")}>
               <Film size={16} />
@@ -3414,30 +3590,59 @@ function CreativesView({
           </div>
         </div>
         {visibleSlots.length > 0 && (
-          <div className={`creative-progress ${completedCount === slotLimit ? "done" : hasSlotErrors ? "failed" : ""}`}>
+          <div className={`creative-progress ${progressDone ? "done" : progressFailed ? "failed" : ""}`}>
             <div className="creative-progress-head">
               <div className="creative-progress-icon">
                 {isGenerating ? <Loader2 size={18} className="spin" /> : <Image size={18} />}
               </div>
               <div>
-                <strong>{isGenerating ? "正在逐张生成图片" : "当前图片候选"}</strong>
-                <span>完成的图片可立即审核、选择或继续改写。</span>
+                <strong>
+                  {keyframeReviewActive
+                    ? isGenerating
+                      ? "正在生成关键帧方案"
+                      : "当前关键帧方案"
+                    : isGenerating
+                      ? "正在逐张生成图片"
+                      : "当前图片候选"}
+                </strong>
+                <span>
+                  {keyframeReviewActive
+                    ? "按方案选择、审核或重生首尾帧。"
+                    : "完成的图片可立即审核、选择或继续改写。"}
+                </span>
               </div>
               <StatusPill status={isGenerating ? "generating" : "generated"} />
             </div>
-            <div className="creative-progress-steps">
-              {visibleSlots.map((slot) => (
-                <div className={`creative-progress-step ${slot.status}`} key={`creative-step-${slot.index}`}>
-                  <span>{slot.index}</span>
-                  <strong>
-                    {slot.status === "done"
-                      ? "已完成"
-                      : slot.status === "error"
-                        ? "需重试"
-                        : "生成中"}
-                  </strong>
-                </div>
-              ))}
+            <div className={`creative-progress-steps ${keyframeReviewActive ? "keyframe-progress-steps" : ""}`}>
+              {keyframeReviewActive
+                ? keyframeProgressItems.map((item) => (
+                    <div
+                      className={`creative-progress-step ${progressStepClass(item.status)}`}
+                      key={`keyframe-step-${item.group}`}
+                    >
+                      <span>{item.group}</span>
+                      <strong>{item.label}</strong>
+                      <em>
+                        {item.status === "done" ? "已完成" : item.status === "error" ? "需重试" : "生成中"} ·{" "}
+                        {item.doneCount}/{item.total} 张
+                      </em>
+                    </div>
+                  ))
+                : visibleSlots.map((slot) => (
+                    <div
+                      className={`creative-progress-step ${progressStepClass(slot.status)}`}
+                      key={`creative-step-${slot.index}`}
+                    >
+                      <span>{slot.index}</span>
+                      <strong>
+                        {slot.status === "done"
+                          ? "已完成"
+                          : slot.status === "error"
+                            ? "需重试"
+                            : "生成中"}
+                      </strong>
+                    </div>
+                  ))}
             </div>
           </div>
         )}
@@ -3448,6 +3653,8 @@ function CreativesView({
               const groupIds = group.assets.map((asset) => asset.id);
               const groupSelected =
                 groupIds.length > 0 && groupIds.every((id) => selectedCreativeIds.includes(id));
+              const groupFeedback = keyframeRewriteFeedbacks[String(group.group)] ?? "";
+              const isGroupRegenerating = loading === `creative-regenerate-group-${group.group}`;
               return (
                 <section
                   className={`keyframe-variant-card ${groupSelected ? "selected" : ""}`}
@@ -3465,11 +3672,11 @@ function CreativesView({
                     <button
                       className={groupSelected ? "primary-button" : "secondary-button"}
                       type="button"
-                      disabled={!group.complete}
+                      disabled={!group.complete || Boolean(loading)}
                       onClick={() => setSelectedCreativeIds(groupIds)}
                     >
                       <Film size={16} />
-                      <span>{groupSelected ? "已选此组" : "选择此组"}</span>
+                      <span>{groupSelected ? "已选此方案" : "选择此方案"}</span>
                     </button>
                   </div>
                   <div className="asset-grid keyframe-pair-grid">
@@ -3485,8 +3692,28 @@ function CreativesView({
                         onRegenerate={onRegenerate}
                         onReview={onReview}
                         loading={loading}
+                        showSelectionControl={false}
+                        showRewriteControls={false}
                       />
                     ))}
+                  </div>
+                  <div className="creative-rewrite-box keyframe-rewrite-box">
+                    <label htmlFor={`keyframe-feedback-${group.group}`}>方案改写要求</label>
+                    <textarea
+                      id={`keyframe-feedback-${group.group}`}
+                      value={groupFeedback}
+                      onChange={(event) => setKeyframeRewriteFeedback(group.group, event.target.value)}
+                      placeholder="例如：增强动感和金属质感，减少画面文字，首尾帧保持同一套视觉。"
+                      disabled={Boolean(loading)}
+                    />
+                    <button
+                      className="secondary-button"
+                      onClick={() => onRegenerateGroup(group)}
+                      disabled={!groupFeedback.trim() || !group.complete || Boolean(loading)}
+                    >
+                      {isGroupRegenerating ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+                      <span>按意见重生此方案</span>
+                    </button>
                   </div>
                 </section>
               );
@@ -3550,6 +3777,8 @@ function CreativeSlotCard({
   onRegenerate,
   onReview,
   loading,
+  showSelectionControl = true,
+  showRewriteControls = true,
 }: {
   slot: CreativeGenerationSlot;
   selectedCreativeIds: string[];
@@ -3564,6 +3793,8 @@ function CreativeSlotCard({
     decision: "approved" | "rejected" | "needs_revision",
   ) => void;
   loading: string | null;
+  showSelectionControl?: boolean;
+  showRewriteControls?: boolean;
 }) {
   const asset = slot.asset;
   const isLoading = slot.status === "loading";
@@ -3628,38 +3859,42 @@ function CreativeSlotCard({
           <span>版本 {asset.version}</span>
         </div>
         {slot.status === "error" && <p className="creative-error-text">{slot.message}</p>}
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={(event) => {
-              setSelectedCreativeIds(
-                event.target.checked
-                  ? [...selectedCreativeIds.filter((id) => id !== asset.id), asset.id]
-                  : selectedCreativeIds.filter((id) => id !== asset.id),
-              );
-            }}
-          />
-          <span>用于视频</span>
-        </label>
-        <div className="creative-rewrite-box">
-          <label htmlFor={`creative-feedback-${asset.id}`}>改写要求</label>
-          <textarea
-            id={`creative-feedback-${asset.id}`}
-            value={feedback}
-            onChange={(event) => setRewriteFeedback(asset.id, event.target.value)}
-            placeholder="例如：主体更大，减少文字，背景换成家庭客厅，不要蓝色调。"
-            disabled={Boolean(loading)}
-          />
-          <button
-            className="secondary-button"
-            onClick={() => onRegenerate(asset)}
-            disabled={!feedback.trim() || Boolean(loading)}
-          >
-            {isRegenerating ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
-            <span>按意见重生</span>
-          </button>
-        </div>
+        {showSelectionControl && (
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={(event) => {
+                setSelectedCreativeIds(
+                  event.target.checked
+                    ? [...selectedCreativeIds.filter((id) => id !== asset.id), asset.id]
+                    : selectedCreativeIds.filter((id) => id !== asset.id),
+                );
+              }}
+            />
+            <span>用于视频</span>
+          </label>
+        )}
+        {showRewriteControls && (
+          <div className="creative-rewrite-box">
+            <label htmlFor={`creative-feedback-${asset.id}`}>改写要求</label>
+            <textarea
+              id={`creative-feedback-${asset.id}`}
+              value={feedback}
+              onChange={(event) => setRewriteFeedback(asset.id, event.target.value)}
+              placeholder="例如：主体更大，减少文字，背景换成家庭客厅，不要蓝色调。"
+              disabled={Boolean(loading)}
+            />
+            <button
+              className="secondary-button"
+              onClick={() => onRegenerate(asset)}
+              disabled={!feedback.trim() || Boolean(loading)}
+            >
+              {isRegenerating ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+              <span>按意见重生</span>
+            </button>
+          </div>
+        )}
         {asset.status === "approved" ? (
           <div className="review-complete">
             <Check size={16} />
@@ -4442,6 +4677,12 @@ function ModelSelect({
 
 function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status}`}>{statusLabel(status)}</span>;
+}
+
+function progressStepClass(status: string): string {
+  if (status === "done") return "done";
+  if (status === "error") return "failed";
+  return "active";
 }
 
 function KeyValueTable({
@@ -5841,7 +6082,7 @@ function buildCreativeSlots(
   const fallbackAssets: CreativeAsset[] = [];
   for (const asset of sorted) {
     const index = creativeImageIndex(asset, 0);
-    if (index >= 1 && index <= KEYFRAME_TOTAL_IMAGES && !assetsByIndex.has(index)) {
+    if (index >= 1 && index <= KEYFRAME_MAX_TOTAL_IMAGES && !assetsByIndex.has(index)) {
       assetsByIndex.set(index, asset);
     } else {
       fallbackAssets.push(asset);
@@ -5851,7 +6092,7 @@ function buildCreativeSlots(
   const usedIds = new Set<string>();
   const slots: CreativeGenerationSlot[] = [];
 
-  for (let index = 1; index <= KEYFRAME_TOTAL_IMAGES; index += 1) {
+  for (let index = 1; index <= KEYFRAME_MAX_TOTAL_IMAGES; index += 1) {
     const indexedAsset = assetsByIndex.get(index);
     const fallbackAsset = fallbackAssets.find((asset) => !usedIds.has(asset.id));
     const asset = indexedAsset ?? fallbackAsset;
@@ -5878,16 +6119,6 @@ function syncCreativeSlotsWithAssets(
   });
 }
 
-type CreativeGenerationPlan = {
-  count: number;
-  size: string;
-  generationMode: "standard" | "video_keyframe_variants";
-  isKeyframeVariant: boolean;
-  variantCount?: number;
-  framesPerVariant?: number;
-  videoDurationSeconds?: number;
-};
-
 type KeyframeVariantGroup = {
   group: number;
   slots: CreativeGenerationSlot[];
@@ -5895,34 +6126,23 @@ type KeyframeVariantGroup = {
   complete: boolean;
 };
 
-function creativeGenerationPlan(
-  durationSeconds: number,
-  aspectRatio: string,
-): CreativeGenerationPlan {
-  if (durationSeconds === 12) {
-    return {
-      count: KEYFRAME_TOTAL_IMAGES,
-      size: aspectRatio || "9:16",
-      generationMode: "video_keyframe_variants",
-      isKeyframeVariant: true,
-      variantCount: KEYFRAME_VARIANT_COUNT,
-      framesPerVariant: KEYFRAME_FRAMES_PER_VARIANT,
-      videoDurationSeconds: durationSeconds,
-    };
-  }
-  return {
-    count: CREATIVE_GENERATION_LIMIT,
-    size: "1:1",
-    generationMode: "standard",
-    isKeyframeVariant: false,
-  };
-}
-
-function buildKeyframeVariantGroups(slots: CreativeGenerationSlot[]): KeyframeVariantGroup[] {
+function buildKeyframeVariantGroups(
+  slots: CreativeGenerationSlot[],
+  expectedGroupCount?: KeyframeVariantCount,
+): KeyframeVariantGroup[] {
   const groups = new Map<number, CreativeGenerationSlot[]>();
+  const expectedGroups = expectedGroupCount
+    ? new Set<number>(KEYFRAME_VARIANT_OPTIONS.slice(0, expectedGroupCount))
+    : null;
   for (const slot of slots) {
-    if (!slot.asset || !isKeyframeVariantAsset(slot.asset)) continue;
-    const group = creativeKeyframeGroup(slot.asset);
+    let group = 0;
+    if (slot.asset) {
+      if (!isKeyframeVariantAsset(slot.asset)) continue;
+      group = creativeKeyframeGroup(slot.asset);
+    } else if (expectedGroups) {
+      const groupFromIndex = Math.ceil(slot.index / KEYFRAME_FRAMES_PER_VARIANT);
+      group = expectedGroups.has(groupFromIndex) ? groupFromIndex : 0;
+    }
     if (!group) continue;
     groups.set(group, [...(groups.get(group) ?? []), slot]);
   }

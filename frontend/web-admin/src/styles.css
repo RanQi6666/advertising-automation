@@ -347,6 +347,14 @@ input:focus-visible {
   max-width: 240px;
 }
 
+.keyframe-count-control {
+  min-width: 118px;
+}
+
+.select.keyframe-count-select {
+  max-width: 140px;
+}
+
 .icon-button,
 .primary-button,
 .secondary-button {
@@ -3963,6 +3971,10 @@ input:focus-visible {
   gap: 8px;
 }
 
+.creative-progress-steps.keyframe-progress-steps {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
 .creative-progress-step {
   display: flex;
   min-width: 0;
@@ -3995,6 +4007,15 @@ input:focus-visible {
   font-size: 12px;
   line-height: 1.25;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creative-progress-step em {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 850;
   white-space: nowrap;
 }
 
@@ -4179,6 +4200,14 @@ input:focus-visible {
   color: var(--muted);
   font-size: 12px;
   font-weight: 760;
+}
+
+.keyframe-rewrite-box {
+  background: #ffffff;
+}
+
+.keyframe-rewrite-box .secondary-button {
+  justify-self: start;
 }
 
 .keyframe-pair-grid {
