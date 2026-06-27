@@ -18,9 +18,9 @@ CREATIVE_VISUAL_PROP_BAN = (
 )
 
 CREATIVE_LOW_TEXT_DIRECTION = (
-    "Use a low-text or no-text visual style. Express brand presence through an abstract "
-    "G mark, icon badge, neon app-lobby shapes, and game-card silhouettes; use no visible "
-    "brand-number text."
+    "Use a low-text or no-text visual style. Express brand presence through a metallic "
+    "GAJA logo or GAJA wordmark, premium neon app-lobby shapes, and "
+    "game-card silhouettes; use no visible numeric suffix and no visible brand-number text."
 )
 
 CREATIVE_SAFE_CTA = (
@@ -28,8 +28,8 @@ CREATIVE_SAFE_CTA = (
 )
 
 CREATIVE_SAFETY_FALLBACK = (
-    "low-text premium neon app lobby with abstract G mark, glossy game-card silhouettes, "
-    "and no visible brand-number text"
+    "low-text premium neon app lobby with metallic GAJA logo, glossy game-card "
+    "silhouettes, no visible numeric suffix, and no visible brand-number text"
 )
 
 CREATIVE_SAFETY_PAYLOAD_PRESERVE_KEYS = frozenset(
@@ -74,8 +74,10 @@ CREATIVE_SAFETY_RISK_TERMS = (
 )
 
 _REPLACEMENTS = (
-    (r"\bGAJA\s*777\b", "abstract G mark"),
-    (r"\b777\b", "abstract G mark"),
+    (r"https?://[^\s\"']*gaja\s*777\.game[^\s\"']*", "GAJA landing page"),
+    (r"\bgaja\s*777\.game\b", "GAJA landing page"),
+    (r"\bGAJA\s*777\b", "GAJA"),
+    (r"\b777\b", "GAJA logo"),
     (r"\bLuck\b", "playful app label"),
     (r"\bcasino\s*tables?\b", "premium app-lobby surface"),
     (r"\bcard[-\s]*tables?\b", "premium app-lobby surface"),

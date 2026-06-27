@@ -964,22 +964,26 @@ def _mock_strategy_image_hint(
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
-                " Follow creative_strategy mini_game_pool: last-frame abstract G game hub "
-                "end card with Start / Play Now CTA and no visible brand-number text."
+                " Follow creative_strategy mini_game_pool: last-frame metallic GAJA game "
+                "hub end card with Start / Play Now CTA, no visible numeric suffix, and "
+                "no visible brand-number text."
             )
         return (
             " Follow creative_strategy mini_game_pool: first-frame mini-game challenge "
-            "with light abstract G corner icon and no visible brand-number text."
+            "with small metallic GAJA corner logo, no visible numeric suffix, and no "
+            "visible brand-number text."
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
                 " Follow creative_strategy gaja_brand: last-frame premium neon game "
-                "lobby with abstract G mark, Start / Play Now CTA, and orange button."
+                "lobby with metallic GAJA logo, Start / Play Now CTA, orange button, "
+                "and no visible numeric suffix."
             )
         return (
             " Follow creative_strategy gaja_brand: first-frame dark neon app lobby "
-            "with abstract G mark, no visible brand-number text, and premium game cards."
+            "with metallic GAJA wordmark, no visible numeric suffix, no visible "
+            "brand-number text, and premium game cards."
         )
     return f" Follow creative_strategy {template_id}."
 
@@ -1039,22 +1043,23 @@ def _mock_strategy_scene_visual(
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
-                "End on an abstract G game hub with multiple mini-game cards, Start CTA, "
-                "and no visible brand-number text."
+                "End on a metallic GAJA game hub with multiple mini-game cards, Start CTA, "
+                "no visible numeric suffix, and no visible brand-number text."
             )
         return (
-            "Open with a playable mini-game challenge, light abstract G icon, "
-            "fast curiosity hook, and no visible brand-number text."
+            "Open with a playable mini-game challenge, small metallic GAJA corner logo, "
+            "fast curiosity hook, no visible numeric suffix, and no visible brand-number text."
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
-                "End on a premium neon game lobby with abstract G mark, Start CTA, "
-                "orange button, and no visible brand-number text."
+                "End on a premium neon game lobby with metallic GAJA logo, Start CTA, "
+                "orange button, no visible numeric suffix, and no visible brand-number text."
             )
         return (
-            "Open with a dark neon app lobby, abstract G mark, metallic title styling, "
-            "premium game cards, cinematic depth, and no visible brand-number text."
+            "Open with a dark neon app lobby, metallic GAJA wordmark, metallic title styling, "
+            "premium game cards, cinematic depth, no visible numeric suffix, and no visible "
+            "brand-number text."
         )
     return fallback
 

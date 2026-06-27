@@ -15,12 +15,16 @@ def test_gaja_domain_returns_premium_visual_fallback() -> None:
     assert reference["status"] == "fallback"
     assert "near-black navy background" in reference["palette"]
     assert "dark premium mobile game lobby" in reference["surface_style"]
+    assert "metallic GAJA logo styling" in reference["surface_style"]
     assert "mythic fire warrior card" in reference["original_game_card_archetypes"]
+    assert "metallic GAJA logo visible in the first frame" in reference["composition_cues"]
     assert "restricted_review_props" in reference["negative_style_cues"]
     assert "financial_prop_cues" in reference["negative_style_cues"]
     assert "outcome_claim_cues" in reference["negative_style_cues"]
     assert reference["video_recipe"]["duration_seconds"] == 12
     assert reference["video_recipe"]["beats"][0].startswith("0-2s")
+    assert "GAJA lobby hook" in reference["video_recipe"]["beats"][0]
+    assert "777" not in str(reference)
 
 
 def test_lookalike_host_does_not_match_gaja_domain() -> None:

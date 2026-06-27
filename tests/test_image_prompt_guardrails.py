@@ -14,6 +14,7 @@ from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import (
     contains_creative_safety_risk,
     creative_safety_prompt_block,
+    sanitize_creative_safety_text,
 )
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
 
@@ -32,7 +33,7 @@ def test_creative_safety_prompt_blocks_banned_visible_words() -> None:
 
     for banned in BANNED_VISIBLE_TEXT:
         assert banned in block
-    assert "abstract G mark" in block
+    assert "metallic GAJA logo" in block
     assert "no visible brand-number text" in block
     assert "casino tables" in block
     assert "withdrawal UI" in block
@@ -53,6 +54,18 @@ def test_creative_safety_risk_detector_catches_text_and_visual_props() -> None:
 
     for value in risky_values:
         assert contains_creative_safety_risk(value)
+
+
+def test_creative_safety_sanitizer_preserves_gaja_brand_without_numbers() -> None:
+    sanitized = sanitize_creative_safety_text(
+        "Dark neon GAJA777 lobby with metallic GAJA777 logo and premium cards."
+    )
+
+    assert "GAJA" in sanitized
+    assert "GAJA777" not in sanitized
+    assert "777" not in sanitized
+    assert "metallic" in sanitized
+    assert "premium cards" in sanitized
 
 
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
@@ -237,7 +250,7 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
     assert "mandatory ad-direction context" in system
     assert "first-frame hook" in system
     assert "last-frame" in system
-    assert "abstract G game hub" in system
+    assert "metallic GAJA game hub" in system
     assert "no visible brand-number text" in system
     assert payload["draft_metadata"]["creative_strategy"]["template_id"] == "mini_game_pool"
     assert payload["storyboard_context"]["creative_strategy"]["template_id"] == "mini_game_pool"
@@ -309,7 +322,7 @@ async def test_openai_image_brief_payload_preserves_landing_visual_reference(
     assert "GAJA777" not in payload_text
     assert "777" not in payload_text
     assert "Register" not in payload_text
-    assert "abstract G mark" in payload_text
+    assert "metallic GAJA logo" in payload_text
     assert "Start" in payload_text
     assert strategy["landing_visual_reference"]["surface_style"] == [
         "dark premium mobile game lobby"
@@ -380,7 +393,7 @@ async def test_mock_image_briefs_include_game_strategy_direction() -> None:
     )
 
     assert "mini-game challenge" in briefs[0].visual_direction
-    assert "abstract G game hub" in briefs[1].visual_direction
+    assert "metallic GAJA game hub" in briefs[1].visual_direction
     assert "no visible brand-number text" in briefs[1].visual_direction
 
 
@@ -418,8 +431,9 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
     )
 
     assert "dark neon app lobby" in briefs[0].visual_direction
-    assert "abstract G mark" in briefs[0].visual_direction
+    assert "metallic GAJA wordmark" in briefs[0].visual_direction
     assert "no visible brand-number text" in briefs[0].visual_direction
+    assert "no visible numeric suffix" in briefs[0].visual_direction
     assert "premium game cards" in briefs[0].visual_direction
     assert "premium neon game lobby" in briefs[1].visual_direction
     assert briefs[0].short_text == "Start"
@@ -462,7 +476,7 @@ async def test_mock_image_briefs_use_low_text_gaja_direction() -> None:
     )
 
     combined = " ".join(brief.visual_direction for brief in briefs)
-    assert "abstract G mark" in combined
+    assert "metallic GAJA" in combined
     assert "no visible brand-number text" in combined
     for banned in BANNED_VISIBLE_TEXT:
         assert banned not in combined

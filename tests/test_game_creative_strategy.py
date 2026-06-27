@@ -36,8 +36,12 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert strategy is not None
     assert strategy["template_id"] == "gaja_brand"
     assert strategy["duration_seconds"] == 12
-    assert strategy["brand"]["display_name"] == "G app"
+    assert strategy["brand"]["display_name"] == "GAJA"
+    assert "GAJA wordmark" in " ".join(strategy["brand"]["real_page_signals"])
     assert "dark premium mobile game lobby" in " ".join(
+        strategy["first_frame"]["visual_must_include"]
+    )
+    assert "metallic GAJA wordmark" in " ".join(
         strategy["first_frame"]["visual_must_include"]
     )
     assert "premium game cards" in " ".join(strategy["first_frame"]["visual_must_include"])
@@ -98,10 +102,13 @@ def test_mini_game_pool_brief_overrides_gaja_brand_template() -> None:
     assert strategy["template_id"] == "mini_game_pool"
     assert "Color Match" in strategy["game_pool_examples"]
     assert "Bubble Pop" in strategy["game_pool_examples"]
-    assert "light abstract G corner icon" in " ".join(
+    assert "small metallic GAJA corner logo" in " ".join(
         strategy["first_frame"]["visual_must_include"]
     )
-    assert "abstract G game hub" in " ".join(strategy["last_frame"]["visual_must_include"])
+    assert "metallic GAJA game hub" in " ".join(
+        strategy["last_frame"]["visual_must_include"]
+    )
+    assert strategy["brand"]["display_name"] == "GAJA"
 
 
 def test_mini_game_pool_detects_real_chinese_terms() -> None:
@@ -179,9 +186,31 @@ def test_default_gaja_brand_strategy_uses_low_text_safe_branding() -> None:
     prompt_text = str(prompt_facing_strategy)
     for banned in PROMPT_FACING_GAJA_BANNED_TEXT:
         assert banned not in prompt_text
-    assert "abstract G mark" in prompt_text
+    assert "GAJA wordmark" in prompt_text
+    assert "metallic GAJA logo" in prompt_text
     assert "no visible brand-number text" in prompt_text
     assert "premium neon game lobby" in prompt_text
+
+
+def test_gaja_brand_strategy_keeps_gaja_visible_without_numeric_suffix() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "brief": "Brand ad for GAJA777.",
+        }
+    )
+
+    assert strategy is not None
+    prompt_facing_strategy = {
+        key: value for key, value in strategy.items() if key not in {"brand"}
+    }
+    prompt_text = str(prompt_facing_strategy)
+    assert "GAJA" in prompt_text
+    assert "GAJA777" not in prompt_text
+    assert "777" not in prompt_text
+    assert "metallic GAJA wordmark" in prompt_text
+    assert "no visible numeric suffix" in prompt_text
 
 
 def test_gaja_strategy_rejects_lookalike_domain() -> None:

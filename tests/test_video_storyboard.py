@@ -129,7 +129,7 @@ async def test_mock_provider_uses_game_strategy_for_video_storyboard() -> None:
     )
 
     assert "mini-game challenge" in storyboard.scenes[0].visual
-    assert "abstract G game hub" in storyboard.scenes[-1].visual
+    assert "metallic GAJA game hub" in storyboard.scenes[-1].visual
     assert "no visible brand-number text" in storyboard.scenes[-1].visual
     assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
 
@@ -220,7 +220,7 @@ async def test_openai_video_storyboard_payload_sanitizes_creative_prompt_terms(
     assert "GAJA777" not in payload_text
     assert "777" not in payload_text
     assert "Register" not in payload_text
-    assert "abstract G mark" in payload_text
+    assert "metallic GAJA logo" in payload_text
     assert "Start" in payload_text
 
 
@@ -570,7 +570,7 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "12-second first/last-frame workflow" in prompt
     assert "first-frame hook" in prompt
     assert "last-frame" in prompt
-    assert "abstract G game hub" in prompt
+    assert "metallic GAJA game hub" in prompt
     assert "Subtitle: Start" in prompt
     assert "Subtitle: Register" not in prompt
 
@@ -617,7 +617,7 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert "Landing visual reference" in prompt
     assert "dark premium mobile game lobby" in prompt
     assert "near-black navy background" in prompt
-    assert "0-2s: dark neon abstract G mark lobby hook with premium cards" in prompt
+    assert "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and premium cards" in prompt
     assert "10-12s: Start / Play Now end card" in prompt
     assert "Avoid style cues: childlike puzzle blocks" in prompt
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
@@ -815,8 +815,9 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
     )
 
     assert "dark neon app lobby" in storyboard.scenes[0].visual
-    assert "abstract G mark" in storyboard.scenes[0].visual
+    assert "metallic GAJA wordmark" in storyboard.scenes[0].visual
     assert "no visible brand-number text" in storyboard.scenes[0].visual
+    assert "no visible numeric suffix" in storyboard.scenes[0].visual
     assert "title treatment" not in storyboard.scenes[0].visual
     assert "title styling" in storyboard.scenes[0].visual
     assert "premium game cards" in storyboard.scenes[0].visual
@@ -873,7 +874,7 @@ async def test_mock_provider_gaja_video_avoids_banned_text_and_props() -> None:
         )
         for scene in storyboard.scenes
     )
-    assert "abstract G mark" in combined
+    assert "metallic GAJA" in combined
     assert "no visible brand-number text" in combined
     for banned in (
         "777",

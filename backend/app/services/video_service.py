@@ -669,12 +669,13 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     if template_id == "mini_game_pool":
         lines.append(
             "Mini-game-pool rule: open with gameplay-led curiosity and end on a low-text "
-            "abstract G game hub with Start or Play Now CTA."
+            "metallic GAJA game hub with no numeric suffix and a Start or Play Now CTA."
         )
     elif template_id == "gaja_brand":
         lines.append(
-            "GAJA brand rule: use an abstract G mark from the first frame, avoid visible "
-            "brand-number text, and end on a Start or Play Now CTA."
+            "GAJA brand rule: use a metallic GAJA logo or GAJA wordmark from the first "
+            "frame, avoid visible numeric suffix or visible brand-number text, and end "
+            "on a Start or Play Now CTA."
         )
     reference_block = _landing_visual_reference_summary(landing_visual_reference)
     if reference_block:

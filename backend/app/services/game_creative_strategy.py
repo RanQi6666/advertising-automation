@@ -63,9 +63,9 @@ def _gaja_brand_strategy() -> dict[str, Any]:
     video_recipe = {
         "duration_seconds": 12,
         "beats": [
-            "0-2s: dark neon app-lobby hook with abstract G mark and premium cards",
-            "2-7s: fast carousel through original fantasy and jewel game cards",
-            "7-10s: coherent app lobby reveal matching landing page style",
+            "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and premium cards",
+            "2-7s: fast carousel through original fantasy hero and jewel game cards",
+            "7-10s: coherent glossy app lobby reveal matching landing page style",
             "10-12s: Start / Play Now low-text end card",
         ],
     }
@@ -75,7 +75,7 @@ def _gaja_brand_strategy() -> dict[str, Any]:
         "duration_seconds": 12,
         "aspect_ratio": "9:16",
         "brand": {
-            "display_name": "G app",
+            "display_name": "GAJA",
             "landing_domain": GAJA_DOMAIN,
             "palette": [
                 "near-black navy",
@@ -85,10 +85,14 @@ def _gaja_brand_strategy() -> dict[str, Any]:
                 "metallic gold highlight",
             ],
             "real_page_signals": [
-                "abstract G mark",
+                "metallic GAJA wordmark",
+                "metallic GAJA logo",
+                "premium neon GAJA brand emblem",
+                "no visible numeric suffix",
                 "no visible brand-number text",
                 "dark premium mobile game lobby",
                 "glossy rectangular game cards",
+                "glossy black reflective floor",
                 "orange Start button",
             ],
         },
@@ -96,37 +100,44 @@ def _gaja_brand_strategy() -> dict[str, Any]:
         "first_frame": {
             "role": "premium game-lobby hook poster",
             "visual_must_include": [
-                "large abstract G mark",
+                "large metallic GAJA logo",
+                "metallic GAJA wordmark",
+                "premium neon GAJA brand emblem",
+                "no visible numeric suffix",
                 "no visible brand-number text",
                 "dark premium mobile game lobby",
                 "premium game cards angled in depth",
-                "metallic 3D title styling",
+                "fantasy hero and jewel card gallery",
+                "glossy black reflective floor",
+                "metallic 3D brand styling",
                 "cinematic neon rim light",
             ],
             "composition": (
                 "Use a mature, high-contrast premium neon game lobby poster with glossy "
-                "cards, cinematic depth, and only an abstract G mark for brand presence."
+                "cards, cinematic depth, reflective black floor, and a metallic GAJA logo "
+                "without any numeric suffix."
             ),
         },
         "last_frame": {
             "role": "conversion end card",
             "visual_must_include": [
                 "premium neon game lobby",
-                "abstract G mark",
+                "metallic GAJA logo",
+                "GAJA wordmark without numeric suffix",
                 "Start / Play Now CTA",
                 "orange CTA button matching the landing page",
-                "clean phone registration cue when appropriate",
+                "clean phone start cue when appropriate",
             ],
             "cta_must_include": ["Start", "Play Now"],
             "composition": (
                 "End on a clear low-text action card connected to the premium game lobby "
-                "style without showing brand-number text."
+                "style with metallic GAJA branding and no visible numeric suffix."
             ),
         },
         "motion_direction": [
             "Start with a strong dark neon poster frame.",
             "Move through glossy fantasy and jewel game cards with energy transitions.",
-            "Reveal the coherent premium neon game lobby before the CTA.",
+            "Reveal the coherent premium neon GAJA lobby before the CTA.",
             "Hold the final Start or Play Now end card long enough to read.",
         ],
         "negative_style_cues": [
@@ -141,8 +152,8 @@ def _gaja_brand_strategy() -> dict[str, Any]:
         ],
         "compliance_guardrails": [
             "Use original game-card visuals inspired by the landing page style.",
-            "Use low-text or no-text branding with an abstract G mark.",
-            "Do not show visible brand-number text.",
+            "Use low-text metallic GAJA branding without a numeric suffix.",
+            "Do not show visible numeric suffix or visible brand-number text.",
             "Keep copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",
             "Keep sensitive metadata on neutral labels only.",
@@ -172,13 +183,15 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
         "duration_seconds": 12,
         "aspect_ratio": "9:16",
         "brand": {
-            "display_name": "G app",
+            "display_name": "GAJA",
             "landing_domain": GAJA_DOMAIN,
             "palette": ["bright teal", "coral", "clean purple", "orange CTA"],
             "real_page_signals": [
                 "casual game category tabs",
                 "puzzle, runner, bubble, tile, and reaction game tiles",
-                "abstract G mark game hub end card",
+                "metallic GAJA game hub end card",
+                "no visible numeric suffix",
+                "no visible brand-number text",
                 "orange Start button",
             ],
         },
@@ -189,7 +202,8 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
             "visual_must_include": [
                 "one oversized casual mini-game challenge tile",
                 "puzzle, runner, bubble, tile, or quick-tap challenge style",
-                "light abstract G corner icon",
+                "small metallic GAJA corner logo without numeric suffix",
+                "no visible numeric suffix",
                 "no visible brand-number text",
                 "short challenge hook such as Can you pass this level?",
             ],
@@ -201,7 +215,8 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
         "last_frame": {
             "role": "GAJA game hub end card",
             "visual_must_include": [
-                "abstract G game hub with multiple mini-game tiles",
+                "metallic GAJA game hub with multiple mini-game tiles",
+                "GAJA wordmark without numeric suffix",
                 "casual category tabs",
                 "Start / Play Now CTA",
                 "orange CTA button matching the landing page",
@@ -209,18 +224,18 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
             "cta_must_include": ["Start", "Play Now", "More Games"],
             "composition": (
                 "Convert the mini-game hook into a broad low-text game collection. "
-                "Make the final click target the abstract G game hub."
+                "Make the final click target the metallic GAJA game hub."
             ),
         },
         "motion_direction": [
             "Open on a single simple game challenge.",
             "Use quick progress, level path, tap, or tile-swipe motion.",
-            "Expand into a grid of casual games and finish on the abstract G Start CTA.",
+            "Expand into a grid of casual games and finish on the metallic GAJA Start CTA.",
         ],
         "compliance_guardrails": [
             "Use Meta-safe casual-game visuals only.",
-            "Use low-text or no-text branding with an abstract G mark.",
-            "Do not show visible brand-number text.",
+            "Use low-text metallic GAJA branding without a numeric suffix.",
+            "Do not show visible numeric suffix or visible brand-number text.",
             "Use only puzzle, runner, bubble, tile, quick-tap, and category-tile visuals.",
             "Keep all copy about navigation, variety, simple start, and app experience.",
             "Keep visuals broad-review friendly and non-regulated.",
