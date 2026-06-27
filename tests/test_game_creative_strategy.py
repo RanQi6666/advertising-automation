@@ -55,6 +55,127 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert "0-2s" in " ".join(strategy["video_recipe"]["beats"])
 
 
+def test_gaja_india_work_order_uses_country_epic_style_pack() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "\u5370\u5ea6",
+            "event_name": "\u9996\u5145",
+            "media": "fb",
+            "audience": "\u5e74\u9f8418-65",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    assert strategy is not None
+    style_pack = strategy["country_style_pack"]
+    assert style_pack["country_code"] == "IN"
+    assert style_pack["country_label"] == "India"
+    style_text = " ".join(style_pack["style_cues"])
+    assert "original Indian epic guardian" in style_text
+    assert "mandala light geometry" in style_text
+    assert "palace archways" in style_text
+    assert "monsoon storm clouds" in style_text
+    assert "gold cinematic rim light" in style_text
+
+    prompt_facing_text = str(
+        {
+            "country_style_pack": strategy["country_style_pack"],
+            "visual_concepts": strategy["visual_concepts"],
+            "text_layout_rules": strategy["text_layout_rules"],
+            "first_three_seconds": strategy["first_three_seconds"],
+        }
+    ).lower()
+    for banned in (
+        "ganesha",
+        "prayer",
+        "777",
+        "recharge",
+        "deposit",
+        "casino",
+        "cash",
+        "coin",
+        "slot",
+        "jackpot",
+    ):
+        assert banned not in prompt_facing_text
+    assert " om " not in f" {prompt_facing_text} "
+
+
+def test_gaja_country_visual_concepts_provide_three_distinct_variants() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "India",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    assert strategy is not None
+    concepts = strategy["visual_concepts"]
+    assert [concept["variant_index"] for concept in concepts] == [1, 2, 3]
+    assert {concept["concept_id"] for concept in concepts} == {
+        "india_epic_guardian",
+        "india_royal_portal",
+        "india_mythic_neon_lobby",
+    }
+    assert len({concept["first_frame_visual"] for concept in concepts}) == 3
+    assert len({concept["last_frame_visual"] for concept in concepts}) == 3
+    for concept in concepts:
+        concept_text = str(concept)
+        assert "GAJA" in concept_text
+        assert "777" not in concept_text
+
+
+def test_gaja_text_layout_rules_allow_longer_safe_copy_without_overflow() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "India",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    assert strategy is not None
+    layout = strategy["text_layout_rules"]
+    assert layout["max_visible_text_layers"] == 3
+    assert layout["safe_area_width_pct"] <= 86
+    assert layout["top_bottom_margin_pct"] >= 10
+    assert layout["auto_fit"] is True
+    assert layout["line_limits"]["brand"] == 1
+    assert layout["line_limits"]["headline"] <= 2
+    assert layout["max_chars"]["headline"] >= 28
+    assert layout["max_chars"]["subheadline"] >= 36
+    assert layout["allowed_visible_text"] == [
+        "GAJA",
+        "Enter an Epic Game World",
+        "Start Your Quest Now",
+    ]
+    assert "visible text hard ban" in layout["banned_visible_text_policy"]
+    assert "brand-number text" in layout["banned_visible_text_policy"]
+    assert "no overflow outside the image or video frame" in layout["layout_instruction"]
+
+
+def test_gaja_country_style_pack_changes_with_work_order_country() -> None:
+    strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "\u7f8e\u56fd",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    assert strategy is not None
+    style_pack = strategy["country_style_pack"]
+    assert style_pack["country_code"] == "US"
+    style_text = " ".join(style_pack["style_cues"]).lower()
+    assert "cinematic urban skyline" in style_text
+    assert "neon tech arena" in style_text
+    assert "space-grade game portal" in style_text
+    for india_only in ("mandala", "indian", "palace archways"):
+        assert india_only not in style_text
+
+
 def test_plain_gaja_url_uses_domain_fallback_landing_visual_reference() -> None:
     strategy = build_game_creative_strategy(
         {

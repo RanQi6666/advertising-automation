@@ -660,6 +660,10 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     landing_visual_reference = creative_strategy.get("landing_visual_reference")
     negative_style_cues = creative_strategy.get("negative_style_cues")
     video_recipe = creative_strategy.get("video_recipe")
+    country_style_pack = creative_strategy.get("country_style_pack")
+    visual_concepts = creative_strategy.get("visual_concepts")
+    text_layout_rules = creative_strategy.get("text_layout_rules")
+    first_three_seconds = creative_strategy.get("first_three_seconds")
     lines = [
         f"creative_strategy: {template_id}",
         "Use this as a 12-second first/last-frame workflow.",
@@ -677,6 +681,18 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
             "frame, avoid visible numeric suffix or visible brand-number text, and end "
             "on a Start or Play Now CTA."
         )
+    country_block = _country_style_pack_summary(country_style_pack)
+    if country_block:
+        lines.append(country_block)
+    concepts_block = _visual_concepts_summary(visual_concepts)
+    if concepts_block:
+        lines.append(concepts_block)
+    layout_block = _text_layout_rules_summary(text_layout_rules)
+    if layout_block:
+        lines.append(layout_block)
+    first_three_block = _first_three_seconds_summary(first_three_seconds)
+    if first_three_block:
+        lines.append(first_three_block)
     reference_block = _landing_visual_reference_summary(landing_visual_reference)
     if reference_block:
         lines.append(reference_block)
@@ -697,6 +713,101 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
             f"Compliance guardrails: {'; '.join(_brand_safe_prompt_list(guardrails[:4]))}"
         )
     return "\n".join(lines)
+
+
+def _country_style_pack_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    code = _brand_safe_prompt_text(str(value.get("country_code") or ""))
+    label = _brand_safe_prompt_text(str(value.get("country_label") or ""))
+    family = _brand_safe_prompt_text(str(value.get("style_family") or ""))
+    style_cues = value.get("style_cues")
+    guardrails = value.get("cultural_safety_guardrails")
+    parts = [f"Country style pack: {code} {label}".strip()]
+    if family:
+        parts.append(f"style family: {family}")
+    if isinstance(style_cues, list) and style_cues:
+        safe_cues = _brand_safe_prompt_list(style_cues[:5])
+        if safe_cues:
+            parts.append(f"style cues: {', '.join(safe_cues)}")
+    if isinstance(guardrails, list) and guardrails:
+        safe_guardrails = _brand_safe_prompt_list(guardrails[:3])
+        if safe_guardrails:
+            parts.append(f"cultural guardrails: {'; '.join(safe_guardrails)}")
+    return " | ".join(part for part in parts if part.strip())
+
+
+def _visual_concepts_summary(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    concept_parts: list[str] = []
+    for concept in value[:3]:
+        if not isinstance(concept, dict):
+            continue
+        concept_id = _brand_safe_prompt_text(str(concept.get("concept_id") or ""))
+        name = _brand_safe_prompt_text(str(concept.get("name") or ""))
+        theme = _brand_safe_prompt_text(str(concept.get("visual_theme") or ""))
+        first = _brand_safe_prompt_text(str(concept.get("first_frame_visual") or ""))
+        last = _brand_safe_prompt_text(str(concept.get("last_frame_visual") or ""))
+        motion = _brand_safe_prompt_text(str(concept.get("motion_hint") or ""))
+        pieces = [
+            f"{concept.get('variant_index')}: {concept_id}",
+            name,
+            f"theme {theme}" if theme else "",
+            f"first {first}" if first else "",
+            f"last {last}" if last else "",
+            f"motion {motion}" if motion else "",
+        ]
+        concept_text = "; ".join(piece for piece in pieces if str(piece).strip())
+        if concept_text:
+            concept_parts.append(concept_text)
+    if not concept_parts:
+        return ""
+    return f"Variant visual concepts: {' || '.join(concept_parts)}"
+
+
+def _text_layout_rules_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    safe_area_width = value.get("safe_area_width_pct")
+    top_bottom_margin = value.get("top_bottom_margin_pct")
+    max_layers = value.get("max_visible_text_layers")
+    allowed_visible_text = value.get("allowed_visible_text")
+    allowed_text = _brand_safe_prompt_list(
+        allowed_visible_text if isinstance(allowed_visible_text, list) else []
+    )
+    instruction = _brand_safe_prompt_text(str(value.get("layout_instruction") or ""))
+    parts = [
+        f"max {max_layers} visible text layers" if max_layers else "",
+        f"safe area width {safe_area_width}%" if safe_area_width else "",
+        f"{top_bottom_margin}% top/bottom margins" if top_bottom_margin else "",
+        "auto-fit text" if value.get("auto_fit") is True else "",
+        "no overflow outside the image or video frame",
+    ]
+    if allowed_text:
+        parts.append(f"allowed text examples: {', '.join(allowed_text[:3])}")
+    if instruction:
+        parts.append(instruction)
+    return f"Text layout rules: {'; '.join(part for part in parts if part)}"
+
+
+def _first_three_seconds_summary(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    beats: list[str] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        time_range = _brand_safe_prompt_text(str(item.get("time_range") or ""))
+        beat = _brand_safe_prompt_text(str(item.get("beat") or ""))
+        visible_text = _brand_safe_prompt_text(str(item.get("visible_text") or ""))
+        if not time_range or not beat:
+            continue
+        suffix = f" visible text {visible_text}" if visible_text else ""
+        beats.append(f"{time_range}: {beat}{suffix}")
+    if not beats:
+        return ""
+    return f"First 3 seconds hook: {'; '.join(beats)}"
 
 
 def _strategy_frame_summary(value: Any) -> str:

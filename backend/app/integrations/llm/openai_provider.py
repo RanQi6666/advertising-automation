@@ -844,7 +844,17 @@ def _creative_strategy_system_instruction() -> str:
         "context.creative_strategy is provided, treat creative_strategy as mandatory "
         "ad-direction context. Honor its template_id, duration_seconds, first_frame, "
         "last_frame, motion_direction, compliance_guardrails, negative_style_cues, "
-        "video_recipe, and landing_visual_reference. If landing visual reference is "
+        "video_recipe, landing_visual_reference, country_style_pack, visual_concepts, "
+        "text_layout_rules, and first_three_seconds. If country_style_pack is present, "
+        "treat it as mandatory country-specific art direction without adding unsafe "
+        "symbols, regulated props, or real-world sensitive claims. If visual_concepts "
+        "is present, use those concepts as distinct variants; for "
+        "video_keyframe_variants, map keyframe group 1/2/3 to visual_concepts 1/2/3, "
+        "using each group's first-frame and last-frame descriptions consistently. If "
+        "text_layout_rules is present, keep visible text inside the safe area, auto-fit "
+        "text, respect max line counts, and allow no overflow outside the image or "
+        "video frame. If first_three_seconds is present, make the opening hook follow "
+        "that 0-3s sequence. If landing visual reference is "
         "present, treat it as mandatory art direction: follow its palette, surface_style, "
         "composition_cues, original_game_card_archetypes, and video_recipe while avoiding "
         "negative_style_cues. For a 12-second first/last-frame workflow, make the "
@@ -1339,6 +1349,10 @@ def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "landing_visual_reference",
         "negative_style_cues",
         "video_recipe",
+        "country_style_pack",
+        "visual_concepts",
+        "text_layout_rules",
+        "first_three_seconds",
     ):
         item = value.get(key)
         if item not in (None, "", []):

@@ -439,6 +439,7 @@ class MockLLMProvider:
         storyboard_hint = _mock_storyboard_hint(storyboard_context)
         creative_strategy = _mock_creative_strategy(draft.metadata_json, storyboard_context)
         for index in range(count):
+            snippet = snippets[index % len(snippets)]
             revision_hint = (
                 f" Apply operator revision request: {feedback.strip()[:280]}."
                 if feedback and feedback.strip()
@@ -458,9 +459,9 @@ class MockLLMProvider:
             briefs.append(
                 ImageBrief(
                     image_index=index + 1,
-                    title=("Revised image" if feedback else snippets[index]),
+                    title=("Revised image" if feedback else snippet),
                     short_text=sanitize_creative_safety_text(
-                        (draft.headline or snippets[index])[:80]
+                        (draft.headline or snippet)[:80]
                     ),
                     visual_direction=(
                         "Clean standalone performance-ad layout with readable text, product focus, "
@@ -961,29 +962,36 @@ def _mock_strategy_image_hint(
         return ""
     template_id = creative_strategy.get("template_id")
     role = _mock_keyframe_role(image_index, storyboard_context)
+    concept_hint = _mock_strategy_concept_hint(
+        creative_strategy,
+        image_index,
+        storyboard_context,
+        role,
+    )
+    text_layout_hint = _mock_text_layout_hint(creative_strategy)
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
                 " Follow creative_strategy mini_game_pool: last-frame metallic GAJA game "
                 "hub end card with Start / Play Now CTA, no visible numeric suffix, and "
-                "no visible brand-number text."
+                f"no visible brand-number text.{concept_hint}{text_layout_hint}"
             )
         return (
             " Follow creative_strategy mini_game_pool: first-frame mini-game challenge "
             "with small metallic GAJA corner logo, no visible numeric suffix, and no "
-            "visible brand-number text."
+            f"visible brand-number text.{concept_hint}{text_layout_hint}"
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
                 " Follow creative_strategy gaja_brand: last-frame premium neon game "
                 "lobby with metallic GAJA logo, Start / Play Now CTA, orange button, "
-                "and no visible numeric suffix."
+                f"and no visible numeric suffix.{concept_hint}{text_layout_hint}"
             )
         return (
             " Follow creative_strategy gaja_brand: first-frame dark neon app lobby "
             "with metallic GAJA wordmark, no visible numeric suffix, no visible "
-            "brand-number text, and premium game cards."
+            f"brand-number text, and premium game cards.{concept_hint}{text_layout_hint}"
         )
     return f" Follow creative_strategy {template_id}."
 
@@ -1032,6 +1040,92 @@ def _mock_keyframe_role(image_index: int, storyboard_context: dict | None) -> st
     return "first_frame" if position == 1 else "last_frame"
 
 
+def _mock_keyframe_group(image_index: int, storyboard_context: dict | None) -> int:
+    keyframe_plan = (
+        storyboard_context.get("keyframe_plan") if isinstance(storyboard_context, dict) else None
+    )
+    if not isinstance(keyframe_plan, dict):
+        return 1
+    frames_per_variant = max(1, _int_or(keyframe_plan.get("frames_per_variant"), 2))
+    return ((image_index - 1) // frames_per_variant) + 1
+
+
+def _mock_strategy_concept(
+    creative_strategy: dict[str, Any] | None,
+    image_index: int,
+    storyboard_context: dict | None,
+) -> dict[str, Any] | None:
+    if not isinstance(creative_strategy, dict):
+        return None
+    concepts = creative_strategy.get("visual_concepts")
+    if not isinstance(concepts, list) or not concepts:
+        return None
+    group = _mock_keyframe_group(image_index, storyboard_context)
+    concept = concepts[min(max(group, 1), len(concepts)) - 1]
+    return concept if isinstance(concept, dict) else None
+
+
+def _mock_first_strategy_concept(
+    creative_strategy: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(creative_strategy, dict):
+        return None
+    concepts = creative_strategy.get("visual_concepts")
+    if not isinstance(concepts, list) or not concepts:
+        return None
+    concept = concepts[0]
+    return concept if isinstance(concept, dict) else None
+
+
+def _mock_strategy_concept_hint(
+    creative_strategy: dict[str, Any] | None,
+    image_index: int,
+    storyboard_context: dict | None,
+    role: str,
+) -> str:
+    concept = _mock_strategy_concept(creative_strategy, image_index, storyboard_context)
+    if not concept:
+        return ""
+    concept_id = _mock_safe_strategy_text(concept.get("concept_id"))
+    name = _mock_safe_strategy_text(concept.get("name"))
+    theme = _mock_safe_strategy_text(concept.get("visual_theme"))
+    role_visual_key = "last_frame_visual" if role == "last_frame" else "first_frame_visual"
+    role_visual = _mock_safe_strategy_text(concept.get(role_visual_key))
+    pieces = [
+        f"variant concept {concept_id}" if concept_id else "",
+        f"({name})" if name else "",
+        f"theme: {theme}" if theme else "",
+        f"{role.replace('_', '-')}: {role_visual}" if role_visual else "",
+    ]
+    concept_text = "; ".join(piece for piece in pieces if piece)
+    return f" Use {concept_text}." if concept_text else ""
+
+
+def _mock_text_layout_hint(creative_strategy: dict[str, Any] | None) -> str:
+    if not isinstance(creative_strategy, dict):
+        return ""
+    layout = creative_strategy.get("text_layout_rules")
+    if not isinstance(layout, dict):
+        return ""
+    instruction = _mock_safe_strategy_text(layout.get("layout_instruction"))
+    if instruction:
+        return f" Text layout: {instruction}"
+    return " Text layout: keep all visible text inside the safe area with no overflow."
+
+
+def _mock_safe_strategy_text(value: Any) -> str:
+    text = sanitize_creative_safety_text(str(value or "").strip())
+    if not text:
+        return ""
+    normalized_text = text.replace("-", " ").replace("_", " ")
+    if (
+        scan_brand_safety({"value": text})["status"] != "passed"
+        or scan_brand_safety({"value": normalized_text})["status"] != "passed"
+    ):
+        return ""
+    return text
+
+
 def _mock_strategy_scene_visual(
     creative_strategy: dict[str, Any] | None,
     role: str,
@@ -1040,26 +1134,36 @@ def _mock_strategy_scene_visual(
     if not isinstance(creative_strategy, dict):
         return fallback
     template_id = creative_strategy.get("template_id")
+    concept = _mock_first_strategy_concept(creative_strategy)
+    concept_visual = _mock_safe_strategy_text(
+        concept.get("last_frame_visual" if role == "last_frame" else "first_frame_visual")
+        if concept
+        else ""
+    )
+    layout_hint = _mock_text_layout_hint(creative_strategy).strip()
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
                 "End on a metallic GAJA game hub with multiple mini-game cards, Start CTA, "
-                "no visible numeric suffix, and no visible brand-number text."
+                "no visible numeric suffix, and no visible brand-number text. "
+                f"{concept_visual} {layout_hint}".strip()
             )
         return (
             "Open with a playable mini-game challenge, small metallic GAJA corner logo, "
-            "fast curiosity hook, no visible numeric suffix, and no visible brand-number text."
+            "fast curiosity hook, no visible numeric suffix, and no visible brand-number text. "
+            f"{concept_visual} {layout_hint}".strip()
         )
     if template_id == "gaja_brand":
         if role == "last_frame":
             return (
                 "End on a premium neon game lobby with metallic GAJA logo, Start CTA, "
-                "orange button, no visible numeric suffix, and no visible brand-number text."
+                "orange button, no visible numeric suffix, and no visible brand-number text. "
+                f"{concept_visual} {layout_hint}".strip()
             )
         return (
             "Open with a dark neon app lobby, metallic GAJA wordmark, metallic title styling, "
             "premium game cards, cinematic depth, no visible numeric suffix, and no visible "
-            "brand-number text."
+            f"brand-number text. {concept_visual} {layout_hint}".strip()
         )
     return fallback
 

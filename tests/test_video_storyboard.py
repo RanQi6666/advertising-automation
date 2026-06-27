@@ -575,6 +575,53 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "Subtitle: Register" not in prompt
 
 
+def test_video_storyboard_prompt_includes_country_concepts_and_text_layout_rules() -> None:
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "\u5370\u5ea6",
+            "event_name": "\u9996\u5145",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 3,
+                "visual": "Open with a strong epic GAJA hook.",
+                "subtitle": "Start",
+            },
+            {
+                "scene_index": 2,
+                "start_second": 3,
+                "end_second": 12,
+                "visual": "Move through the game world.",
+                "subtitle": "Play Now",
+            },
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "Country style pack: IN India" in prompt
+    assert "original Indian epic guardian" in prompt
+    assert "Variant visual concepts:" in prompt
+    assert "india_epic_guardian" in prompt
+    assert "india_royal_portal" in prompt
+    assert "india_mythic_neon_lobby" in prompt
+    assert "Text layout rules:" in prompt
+    assert "safe area width 86%" in prompt
+    assert "auto-fit text" in prompt
+    assert "no overflow outside the image or video frame" in prompt
+    assert "First 3 seconds hook:" in prompt
+    assert "0-1s" in prompt
+    assert "1-2s" in prompt
+    assert "2-3s" in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
 def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     creative_strategy = build_game_creative_strategy(
         {
@@ -823,6 +870,54 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
     assert "premium game cards" in storyboard.scenes[0].visual
     assert "premium neon game lobby" in storyboard.scenes[-1].visual
     assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_uses_country_epic_gaja_storyboard() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "\u5370\u5ea6",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a safe epic GAJA game-world video.",
+        primary_text="Explore GAJA game worlds.",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions=None,
+    )
+
+    assert "original Indian epic guardian" in storyboard.scenes[0].visual
+    assert "mandala light geometry" in storyboard.scenes[0].visual
+    assert "metallic GAJA" in storyboard.scenes[0].visual
+    assert "no visible brand-number text" in storyboard.scenes[0].visual
+    assert "no overflow outside the image or video frame" in storyboard.scenes[0].visual
+    assert "premium neon game lobby" in storyboard.scenes[-1].visual
+    combined = " ".join(scene.visual for scene in storyboard.scenes)
+    for banned in ("777", "Luck", "casino", "slot", "jackpot", "cash", "coin", "recharge"):
+        assert banned.lower() not in combined.lower()
 
 
 @pytest.mark.asyncio

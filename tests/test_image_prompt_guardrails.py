@@ -261,6 +261,83 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_brief_prompt_carries_country_concepts_and_layout_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Epic GAJA hook",
+                    "short_text": "Start",
+                    "visual_direction": "Epic CG GAJA scene with safe text layout.",
+                    "size": "9:16",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "\u5370\u5ea6",
+            "event_name": "\u9996\u5145",
+            "media": "fb",
+            "audience": "\u5e74\u9f8418-65",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Safe GAJA ad copy.",
+        headline="Start",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_image_briefs(
+        draft=draft,
+        count=6,
+        size="9:16",
+        storyboard_context={
+            "keyframe_plan": {
+                "mode": "video_keyframe_variants",
+                "variant_count": 3,
+                "frames_per_variant": 2,
+                "video_duration_seconds": 12,
+            },
+            "creative_strategy": creative_strategy,
+        },
+    )
+
+    system = captured["system"]
+    payload = captured["payload"]
+    assert isinstance(system, str)
+    assert isinstance(payload, dict)
+    assert "country_style_pack" in system
+    assert "visual_concepts" in system
+    assert "text_layout_rules" in system
+    assert "first_three_seconds" in system
+    assert "safe area" in system
+    assert "auto-fit" in system
+    assert "no overflow" in system
+    assert "map keyframe group 1/2/3 to visual_concepts 1/2/3" in system
+    strategy = payload["storyboard_context"]["creative_strategy"]
+    assert strategy["country_style_pack"]["country_code"] == "IN"
+    assert len(strategy["visual_concepts"]) == 3
+    assert strategy["text_layout_rules"]["auto_fit"] is True
+    assert strategy["first_three_seconds"][0]["time_range"] == "0-1s"
+
+
+@pytest.mark.asyncio
 async def test_openai_image_brief_payload_preserves_landing_visual_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -440,6 +517,56 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
     brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
     for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "money", "recharge"):
         assert risky_term not in brief_text
+
+
+@pytest.mark.asyncio
+async def test_mock_image_briefs_map_keyframe_groups_to_country_visual_concepts() -> None:
+    provider = MockLLMProvider()
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "country": "India",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a safe epic GAJA game-world ad.",
+        headline="Start",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(
+        draft=draft,
+        count=6,
+        size="9:16",
+        storyboard_context={
+            "keyframe_plan": {
+                "mode": "video_keyframe_variants",
+                "variant_count": 3,
+                "frames_per_variant": 2,
+                "video_duration_seconds": 12,
+            },
+            "creative_strategy": creative_strategy,
+        },
+    )
+
+    directions = [brief.visual_direction for brief in briefs]
+    assert all("india_epic_guardian" in directions[index] for index in (0, 1))
+    assert all("india_royal_portal" in directions[index] for index in (2, 3))
+    assert all("india_mythic_neon_lobby" in directions[index] for index in (4, 5))
+    assert "first-frame" in directions[0]
+    assert "last-frame" in directions[1]
+    combined = " ".join(directions)
+    assert "original Indian epic guardian" in combined
+    assert "metallic GAJA" in combined
+    for banned in BANNED_VISIBLE_TEXT:
+        assert banned not in combined
+    for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "recharge"):
+        assert risky_term not in combined.lower()
 
 
 @pytest.mark.asyncio
