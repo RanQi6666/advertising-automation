@@ -10,6 +10,7 @@ from backend.app.core.errors import AppError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.schemas.landing_page import LandingPageAnalyzeRequest
+from backend.app.services.landing_visual_reference import build_landing_visual_reference
 from backend.app.services.utils import get_required
 
 
@@ -101,6 +102,14 @@ class LandingPageService:
                 "links": parser.links[:50],
                 "text_excerpt": text_content[:3000],
             }
+            visual_reference = build_landing_visual_reference(
+                url=str(response.url),
+                metadata=metadata,
+                title=parser.title,
+                text_excerpt=text_content[:3000],
+            )
+            if visual_reference:
+                extracted_data["visual_reference"] = visual_reference
             return LandingPageSnapshot(
                 campaign_id=campaign.id,
                 work_order_id=campaign.work_order_id,

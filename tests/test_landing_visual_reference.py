@@ -4,7 +4,6 @@ from backend.app.services.landing_visual_reference import (
     merge_landing_visual_reference,
 )
 
-
 GAJA_URL = "https://www.gaja777.game/#/?invite=YBG71118&register=true"
 
 
