@@ -519,6 +519,46 @@ class MockLLMProvider:
             context,
             *[asset.metadata_json for asset in assets],
         )
+        if (
+            isinstance(creative_strategy, dict)
+            and creative_strategy.get("schema_version") == "creative_strategy.v2"
+        ):
+            scene_count = 2 if duration_seconds <= 6 else 3 if duration_seconds <= 12 else 4
+            step = max(1, duration_seconds // scene_count)
+            scenes = []
+            for index in range(scene_count):
+                start = index * step
+                end = (
+                    duration_seconds
+                    if index == scene_count - 1
+                    else min(duration_seconds, (index + 1) * step)
+                )
+                scenes.append(
+                    VideoStoryboardScene(
+                        scene_index=index + 1,
+                        start_second=start,
+                        end_second=end,
+                        visual=_mock_v2_strategy_scene_visual(
+                            creative_strategy, index, scene_count, safe_product
+                        ),
+                        subtitle=(
+                            "Shop Now"
+                            if creative_strategy.get("vertical") == "ecommerce"
+                            and index == scene_count - 1
+                            else "Try Now"
+                        ),
+                        motion="Fast readable motion.",
+                        voiceover=None,
+                        source_asset_ids=[assets[index % len(assets)].id] if assets else [],
+                        notes="Duration-adaptive v2 strategy scene.",
+                    )
+                )
+            return VideoStoryboardCandidate(
+                duration_seconds=duration_seconds,
+                aspect_ratio=aspect_ratio,
+                scenes=scenes,
+                rationale="Mock storyboard follows creative_strategy.v2 and requested duration_seconds.",
+            )
         asset_count = max(1, len(assets))
         scene_count = min(max(asset_count, 3), 5)
         segment = max(1, duration_seconds // scene_count)
@@ -1207,6 +1247,25 @@ def _mock_strategy_scene_visual(
             f"brand-number text. {concept_visual} {layout_hint}".strip()
         )
     return fallback
+
+
+def _mock_v2_strategy_scene_visual(
+    creative_strategy: dict[str, Any],
+    index: int,
+    scene_count: int,
+    product: str,
+) -> str:
+    vertical = str(creative_strategy.get("vertical") or "unknown")
+    if vertical == "game":
+        beats = ["challenge hook", "failure moment", "correct move", "reward payoff"]
+    elif vertical == "ecommerce":
+        beats = ["pain point scene", "product appears", "benefit demonstration", "clear CTA"]
+    else:
+        beats = ["practical scenario", "product benefit", "clear next step"]
+    beat = beats[min(index, len(beats) - 1)]
+    if index == scene_count - 1:
+        beat = "clear CTA"
+    return f"{product}: {beat} following creative_strategy.v2."
 
 
 def _mock_storyboard_hint(storyboard_context: dict | None) -> str:

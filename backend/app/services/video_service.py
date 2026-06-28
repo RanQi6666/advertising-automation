@@ -652,6 +652,12 @@ def _prompt_with_creative_strategy(
 def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
     if not isinstance(creative_strategy, dict):
         return ""
+    if creative_strategy.get("schema_version") == "creative_strategy.v2":
+        return _creative_strategy_v2_prompt_block(creative_strategy)
+    return _legacy_creative_strategy_prompt_block(creative_strategy)
+
+
+def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
     template_id = creative_strategy.get("template_id") or "unknown"
     first_frame = creative_strategy.get("first_frame")
     last_frame = creative_strategy.get("last_frame")
@@ -712,6 +718,68 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
         lines.append(
             f"Compliance guardrails: {'; '.join(_brand_safe_prompt_list(guardrails[:4]))}"
         )
+    return "\n".join(lines)
+
+
+def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
+    vertical = _brand_safe_prompt_text(str(creative_strategy.get("vertical") or "unknown"))
+    market = creative_strategy.get("market_context")
+    audience = creative_strategy.get("audience_lens")
+    video_guidance = creative_strategy.get("video_guidance")
+    topic_plan = creative_strategy.get("topic_angle_plan")
+    guardrails = creative_strategy.get("compliance_guardrails")
+
+    lines = [f"creative_strategy: creative_strategy.v2 {vertical}".strip()]
+    lines.append("Use this as duration-adaptive video direction; fit beats to duration_seconds.")
+
+    if isinstance(market, dict):
+        country = _brand_safe_prompt_text(
+            str(market.get("country_code") or market.get("country") or "")
+        )
+        language = _brand_safe_prompt_text(str(market.get("language") or ""))
+        if country or language:
+            lines.append(f"Market context: {country} {language}".strip())
+
+    if isinstance(audience, dict):
+        age_range = _brand_safe_prompt_text(str(audience.get("age_range") or ""))
+        style_items = audience.get("expression_style")
+        safe_style = _brand_safe_prompt_list(style_items[:4]) if isinstance(style_items, list) else []
+        audience_parts = [
+            part
+            for part in [f"age range {age_range}" if age_range else "", ", ".join(safe_style)]
+            if part
+        ]
+        if audience_parts:
+            lines.append(f"Audience lens for internal strategy only: {'; '.join(audience_parts)}")
+
+    if isinstance(topic_plan, list) and topic_plan:
+        safe_angles = []
+        for item in topic_plan[:3]:
+            if isinstance(item, dict):
+                angle_type = _brand_safe_prompt_text(str(item.get("angle_type") or ""))
+                purpose = _brand_safe_prompt_text(str(item.get("purpose") or ""))
+                if angle_type:
+                    safe_angles.append(f"{angle_type}: {purpose}".strip())
+        if safe_angles:
+            lines.append(f"Topic angles: {'; '.join(safe_angles)}")
+
+    if isinstance(video_guidance, dict):
+        for key, label in (
+            ("short_video_rules", "Short duration rules"),
+            ("medium_video_rules", "Medium duration rules"),
+            ("long_video_rules", "Long duration rules"),
+            ("beats_by_vertical", "Vertical beats"),
+        ):
+            values = video_guidance.get(key)
+            if isinstance(values, list) and values:
+                safe_values = _brand_safe_prompt_list(values[:5])
+                if safe_values:
+                    lines.append(f"{label}: {'; '.join(safe_values)}")
+
+    if isinstance(guardrails, list) and guardrails:
+        safe_guardrails = _brand_safe_prompt_list(guardrails[:6])
+        if safe_guardrails:
+            lines.append(f"Compliance guardrails: {'; '.join(safe_guardrails)}")
     return "\n".join(lines)
 
 

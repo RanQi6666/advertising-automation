@@ -575,6 +575,46 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "Subtitle: Register" not in prompt
 
 
+def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> None:
+    creative_strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "game",
+        "market_context": {"country_code": "SG", "language": "English"},
+        "audience_lens": {"age_range": "25-34", "expression_style": ["short", "energetic"]},
+        "topic_angle_plan": [
+            {"slot": 1, "angle_type": "challenge_failure", "purpose": "Test challenge hook."}
+        ],
+        "video_guidance": {
+            "duration_adaptive": True,
+            "short_video_rules": ["One strong hook, one payoff, one CTA."],
+            "medium_video_rules": ["Hook, conflict, payoff, CTA."],
+            "long_video_rules": ["Full story with proof and CTA."],
+            "beats_by_vertical": ["challenge", "failure", "correct move", "reward"],
+        },
+        "compliance_guardrails": ["Do not imply guaranteed wins."],
+    }
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 6,
+                "visual": "Open with a level challenge.",
+                "subtitle": "Can you pass?",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "creative_strategy: creative_strategy.v2 game" in prompt
+    assert "duration-adaptive" in prompt
+    assert "12-second first/last-frame workflow" not in prompt
+    assert "challenge_failure" in prompt
+    assert "One strong hook, one payoff, one CTA." in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
 def test_video_storyboard_prompt_includes_country_concepts_and_text_layout_rules() -> None:
     creative_strategy = build_game_creative_strategy(
         {
@@ -823,6 +863,47 @@ async def test_mock_provider_revises_video_storyboard() -> None:
     assert storyboard.aspect_ratio == "9:16"
     assert storyboard.scenes[0].source_asset_ids == ["asset-1"]
     assert storyboard.scenes[0].notes == "Revision applied: Make the hook faster."
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_v2_storyboard_respects_short_duration() -> None:
+    provider = MockLLMProvider()
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "video_guidance": {
+            "duration_adaptive": True,
+            "short_video_rules": ["Pain point, product, CTA."],
+        },
+    }
+    campaign = Campaign(
+        id="campaign-1",
+        name="Glow Serum",
+        product_name="Glow Serum",
+        audience_description="Female 25-34",
+        metadata_json={"creative_strategy": strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="A quick skincare routine.",
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=6,
+        aspect_ratio="9:16",
+        context={"creative_strategy": strategy},
+        instructions=None,
+    )
+
+    assert storyboard.duration_seconds == 6
+    assert storyboard.scenes[-1].end_second == 6
+    assert len(storyboard.scenes) <= 3
 
 
 @pytest.mark.asyncio
