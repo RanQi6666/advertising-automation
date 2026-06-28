@@ -96,7 +96,7 @@ async def test_topic_service_adds_game_creative_strategy_to_signals() -> None:
         name="GAJA777 India",
         objective="first recharge",
         product_name="GAJA777",
-        audience_description="India users age 18-65",
+        audience_description="India game users age 18-65",
         metadata_json={
             "work_order": {
                 "raw_content": mini_game_brief,
@@ -107,13 +107,14 @@ async def test_topic_service_adds_game_creative_strategy_to_signals() -> None:
                     "event_name": "first recharge",
                     "age_min": 18,
                     "age_max": 65,
+                    "brief": "Mini game challenge with level rewards",
                 },
             },
             "landing_page": {
                 "url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
                 "status": "fetched",
-                "title": "GAJA777",
-                "description": "Casual game hub",
+                "title": "GAJA777 game hub",
+                "description": "Casual game hub with challenge rewards",
             },
         },
     )
@@ -124,11 +125,10 @@ async def test_topic_service_adds_game_creative_strategy_to_signals() -> None:
         request_signals={"integration": "publishing_jump_workflow"},
     )
 
-    assert signals["creative_strategy"]["template_id"] == "mini_game_pool"
-    assert signals["creative_strategy"]["duration_seconds"] == 12
-    assert signals["creative_strategy"]["brand"]["display_name"] == "GAJA"
-    assert "metallic GAJA" in str(signals["creative_strategy"])
-    assert "no visible brand-number text" in str(signals["creative_strategy"])
+    assert signals["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+    assert signals["creative_strategy"]["vertical"] == "game"
+    assert len(signals["creative_strategy"]["topic_angle_plan"]) == 3
+    assert signals["creative_strategy"]["topic_angle_plan"][0]["angle_type"] == "challenge_failure"
     serialized = json.dumps(signals, ensure_ascii=False)
     assert "raw_content" not in serialized
     assert mini_game_brief not in serialized
@@ -153,6 +153,43 @@ def test_topic_source_data_promotes_creative_strategy_for_downstream() -> None:
     )
 
     assert topic.source_data["creative_strategy"]["template_id"] == "gaja_brand"
+
+
+def test_topic_source_data_records_angle_plan_slot() -> None:
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "game",
+        "topic_angle_plan": [
+            {
+                "slot": 1,
+                "angle_type": "challenge_failure",
+                "purpose": "Test failure hook.",
+                "avoid_repeating": ["reward_burst"],
+            }
+        ],
+    }
+
+    topic = TopicService()._topic_from_candidate(  # noqa: SLF001
+        campaign_id="campaign-game",
+        candidate=TopicCandidate(
+            title="Can you beat level 10?",
+            angle="challenge_failure: Show the failed attempt.",
+            angle_type="challenge_failure",
+            audience="game users",
+            selling_points=["Fast challenge"],
+            risk_notes="Avoid guarantees.",
+            rationale="Uses slot 1.",
+            score=0.9,
+        ),
+        signals={"creative_strategy": strategy},
+        streamed=False,
+        provider="mock",
+        model="mock-model",
+        angle_plan_item=strategy["topic_angle_plan"][0],
+    )
+
+    assert topic.source_data["topic_angle"]["slot"] == 1
+    assert topic.source_data["topic_angle"]["angle_type"] == "challenge_failure"
 
 
 @pytest.mark.asyncio
@@ -277,18 +314,39 @@ async def test_openai_topic_generation_sends_compact_payload(
             ],
             "topic_revision_feedback": "Make it more family-oriented.",
             "creative_strategy": {
-                "template_id": "mini_game_pool",
-                "template_name": "Mini-game pool to GAJA game hub ad",
-                "duration_seconds": 12,
-                "aspect_ratio": "9:16",
-                "brand": {
-                    "display_name": "GAJA777",
-                    "landing_domain": "gaja777.game",
+                "schema_version": "creative_strategy.v2",
+                "vertical": "game",
+                "topic_angle_plan": [
+                    {
+                        "slot": 1,
+                        "angle_type": "challenge_failure",
+                        "purpose": "Test whether failure and challenge hooks drive curiosity.",
+                        "avoid_repeating": ["comeback_growth", "reward_burst"],
+                    },
+                    {
+                        "slot": 2,
+                        "angle_type": "comeback_growth",
+                        "purpose": "Test weak-to-strong or wrong-to-right progression.",
+                        "avoid_repeating": ["challenge_failure", "reward_burst"],
+                    },
+                    {
+                        "slot": 3,
+                        "angle_type": "reward_burst",
+                        "purpose": "Test visual satisfaction, rewards, upgrades, and payoff.",
+                        "avoid_repeating": ["challenge_failure", "comeback_growth"],
+                    },
+                ],
+                "copy_guidance": {
+                    "language": "English",
+                    "tone": "clear, specific, and culturally neutral",
                 },
-                "first_frame": {"visual_must_include": ["light GAJA777 corner logo"]},
-                "last_frame": {"cta_must_include": ["Register", "Play Now"]},
-                "motion_direction": "Expand into GAJA777 game hub.",
-                "compliance_guardrails": ["Meta-safe casual-game visuals"],
+                "image_guidance": {
+                    "composition": "Use a gameplay or challenge-first visual with a clear payoff.",
+                },
+                "video_guidance": {
+                    "opening": "Lead with a visible challenge or failed attempt.",
+                },
+                "compliance_guardrails": ["Do not invent local trending topics."],
                 "ignored": "SHOULD NOT BE SENT",
             },
             "unrelated_large_blob": "SHOULD NOT BE SENT",
@@ -307,7 +365,9 @@ async def test_openai_topic_generation_sends_compact_payload(
     assert signals["work_order"]["landing_domain"] == "example.com"  # type: ignore[index]
     assert len(signals["landing_page"]["text_excerpt"]) <= 600  # type: ignore[index]
     assert signals["selling_points"][:2] == ["Live TV", "HD shows"]  # type: ignore[index]
-    assert signals["creative_strategy"]["template_id"] == "mini_game_pool"  # type: ignore[index]
+    assert signals["creative_strategy"]["schema_version"] == "creative_strategy.v2"  # type: ignore[index]
+    assert "topic_angle_plan" in signals["creative_strategy"]  # type: ignore[operator]
+    assert "raw_content" not in json.dumps(signals["creative_strategy"], ensure_ascii=False)  # type: ignore[index]
     assert "ignored" not in signals["creative_strategy"]  # type: ignore[index]
     assert "creative_strategy" in captured["system"]  # type: ignore[operator]
     assert "mandatory" in captured["system"]  # type: ignore[operator]

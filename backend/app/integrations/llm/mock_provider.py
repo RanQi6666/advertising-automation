@@ -290,6 +290,17 @@ class MockLLMProvider:
         event_name = parsed_fields.get("event_name") or campaign.objective
         landing_title = landing_page.get("title")
         revision_feedback = _text_signal(signals, "topic_revision_feedback")
+        creative_strategy = signals.get("creative_strategy") if isinstance(signals, dict) else {}
+        angle_plan = (
+            creative_strategy.get("topic_angle_plan")
+            if isinstance(creative_strategy, dict)
+            else None
+        )
+        angle_items = (
+            [item for item in angle_plan if isinstance(item, dict)]
+            if isinstance(angle_plan, list)
+            else []
+        )
         target_language = build_target_language_context(campaign=campaign, signals=signals)
         candidates: list[TopicCandidate] = []
 
@@ -304,10 +315,20 @@ class MockLLMProvider:
                         else title
                     ),
                     angle=_append_context(
-                        angle,
+                        (
+                            f"{angle_items[index - 1].get('angle_type')}: "
+                            f"{angle_items[index - 1].get('purpose')}"
+                        )
+                        if index - 1 < len(angle_items)
+                        else angle,
                         country=country,
                         event_name=event_name,
                         landing_title=landing_title,
+                    ),
+                    angle_type=(
+                        str(angle_items[index - 1].get("angle_type"))
+                        if index - 1 < len(angle_items)
+                        else None
                     ),
                     audience=audience,
                     selling_points=[

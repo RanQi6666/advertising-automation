@@ -24,6 +24,7 @@ from backend.app.schemas.ai import (
     VideoStoryboardCandidate,
     VideoStoryboardScene,
 )
+from backend.app.services.creative_strategy_builder import compact_creative_strategy
 from backend.app.services.creative_safety_prompts import (
     creative_safety_prompt_block,
     sanitize_creative_safety_payload,
@@ -842,9 +843,18 @@ def _creative_strategy_system_instruction() -> str:
     return (
         "If draft_metadata.creative_strategy, campaign.metadata.creative_strategy, or "
         "context.creative_strategy is provided, treat creative_strategy as mandatory "
-        "ad-direction context. Honor its template_id, duration_seconds, first_frame, "
-        "last_frame, motion_direction, compliance_guardrails, negative_style_cues, "
-        "video_recipe, landing_visual_reference, country_style_pack, visual_concepts, "
+        "ad-direction context. If creative_strategy.schema_version is "
+        "creative_strategy.v2, treat it as the mandatory internal creative brief. For "
+        "topic generation, create one topic per topic_angle_plan slot when possible; "
+        "do not repeat angle_type across the three topics. Return angle_type when the "
+        "schema allows it. For copy, image, storyboard, and video, follow "
+        "market_context, audience_lens, copy_guidance, image_guidance, "
+        "video_guidance, and compliance_guardrails. Use audience traits only as "
+        "internal strategy; do not directly assert sensitive personal attributes in "
+        "user-facing text. Honor legacy template fields too: template_id, "
+        "duration_seconds, first_frame, last_frame, motion_direction, "
+        "compliance_guardrails, negative_style_cues, video_recipe, "
+        "landing_visual_reference, country_style_pack, visual_concepts, "
         "text_layout_rules, and first_three_seconds. If country_style_pack is present, "
         "treat it as mandatory country-specific art direction without adding unsafe "
         "symbols, regulated props, or real-world sensitive claims. If visual_concepts "
@@ -1123,6 +1133,7 @@ def _topic_candidate_from_data(data: dict[str, Any]) -> TopicCandidate:
     normalized = {
         "title": _coerce_text(data.get("title")),
         "angle": _coerce_text(data.get("angle")),
+        "angle_type": _coerce_optional_text(data.get("angle_type")),
         "audience": _coerce_optional_text(data.get("audience")),
         "selling_points": _coerce_text_list(data.get("selling_points")),
         "risk_notes": _coerce_optional_text(data.get("risk_notes")),
@@ -1331,33 +1342,7 @@ def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | No
 
 
 def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    compact: dict[str, Any] = {}
-    for key in (
-        "template_id",
-        "template_name",
-        "duration_seconds",
-        "aspect_ratio",
-        "brand",
-        "game_pool_examples",
-        "meta_restricted_game_ad_safe_mode",
-        "first_frame",
-        "last_frame",
-        "motion_direction",
-        "compliance_guardrails",
-        "landing_visual_reference",
-        "negative_style_cues",
-        "video_recipe",
-        "country_style_pack",
-        "visual_concepts",
-        "text_layout_rules",
-        "first_three_seconds",
-    ):
-        item = value.get(key)
-        if item not in (None, "", []):
-            compact[key] = item
-    return compact or None
+    return compact_creative_strategy(value)
 
 
 def _coerce_text(value: Any) -> str:

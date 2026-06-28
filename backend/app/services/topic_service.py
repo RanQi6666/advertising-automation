@@ -14,7 +14,10 @@ from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import TopicCandidate
 from backend.app.schemas.landing_page import LandingPageAnalyzeRequest
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
-from backend.app.services.game_creative_strategy import build_game_creative_strategy
+from backend.app.services.creative_strategy_builder import (
+    build_creative_strategy,
+    compact_creative_strategy,
+)
 from backend.app.services.landing_page_service import (
     LandingPageService,
     snapshot_to_context,
@@ -54,7 +57,8 @@ class TopicService:
             signals=effective_signals,
         )
         topics: list[ContentTopic] = []
-        for candidate in candidates:
+        angle_plan = _topic_angle_plan(effective_signals)
+        for index, candidate in enumerate(candidates):
             topic = self._topic_from_candidate(
                 campaign_id=payload.campaign_id,
                 candidate=candidate,
@@ -62,6 +66,7 @@ class TopicService:
                 streamed=False,
                 provider=llm_settings.llm_provider,
                 model=model_name,
+                angle_plan_item=_angle_plan_item(angle_plan, index),
             )
             session.add(topic)
             topics.append(topic)
@@ -95,6 +100,7 @@ class TopicService:
             yield {"type": "slot", "index": index}
 
         generated_count = 0
+        angle_plan = _topic_angle_plan(effective_signals)
         try:
             async for candidate in llm.stream_topics(
                 campaign=campaign,  # type: ignore[arg-type]
@@ -111,6 +117,7 @@ class TopicService:
                     streamed=True,
                     provider=llm_settings.llm_provider,
                     model=model_name,
+                    angle_plan_item=_angle_plan_item(angle_plan, generated_count - 1),
                 )
                 session.add(topic)
                 await session.commit()
@@ -146,7 +153,21 @@ class TopicService:
         streamed: bool,
         provider: str,
         model: str,
+        angle_plan_item: dict | None = None,
     ) -> ContentTopic:
+        source_data = {
+            "signals": signals,
+            "provider": provider,
+            "model": model,
+            "streamed": streamed,
+            **(
+                {"creative_strategy": signals["creative_strategy"]}
+                if isinstance(signals.get("creative_strategy"), dict)
+                else {}
+            ),
+            **({"topic_angle": angle_plan_item} if angle_plan_item else {}),
+            **({"angle_type": candidate.angle_type} if candidate.angle_type else {}),
+        }
         return ContentTopic(
             campaign_id=campaign_id,
             title=candidate.title,
@@ -156,17 +177,7 @@ class TopicService:
             risk_notes=candidate.risk_notes,
             rationale=candidate.rationale,
             score=candidate.score,
-            source_data={
-                "signals": signals,
-                "provider": provider,
-                "model": model,
-                "streamed": streamed,
-                **(
-                    {"creative_strategy": signals["creative_strategy"]}
-                    if isinstance(signals.get("creative_strategy"), dict)
-                    else {}
-                ),
-            },
+            source_data=source_data,
         )
 
     async def list_topics(
@@ -459,7 +470,7 @@ def _topic_creative_strategy(
     landing_page: dict,
 ) -> dict | None:
     campaign_metadata = _dict_value(campaign.metadata_json)
-    existing_strategy = _compact_creative_strategy(
+    existing_strategy = compact_creative_strategy(
         campaign_metadata.get("creative_strategy")
     )
     if existing_strategy:
@@ -473,10 +484,9 @@ def _topic_creative_strategy(
         landing_context.get("url"),
         _landing_url_from_context(work_order),
     )
-    strategy = build_game_creative_strategy(
+    strategy = build_creative_strategy(
         {
             "product_name": campaign.product_name,
-            "project_name": campaign.name,
             "campaign_name": campaign.name,
             "objective": campaign.objective,
             "audience_description": campaign.audience_description,
@@ -485,7 +495,6 @@ def _topic_creative_strategy(
             "work_order": work_order,
             "structured_fields": parsed_fields,
             "reviewed_fields": _dict_value(work_order.get("reviewed_delivery_fields")),
-            "raw_content": work_order.get("raw_content"),
             "brief": _first_text(
                 work_order.get("brief"),
                 parsed_fields.get("brief"),
@@ -502,30 +511,21 @@ def _topic_creative_strategy(
             "media": _first_text(work_order.get("media"), parsed_fields.get("media")),
         }
     )
-    return _compact_creative_strategy(strategy)
+    return compact_creative_strategy(strategy)
 
 
-def _compact_creative_strategy(value: object) -> dict | None:
-    if not isinstance(value, dict):
+def _topic_angle_plan(signals: dict) -> list[dict]:
+    strategy = signals.get("creative_strategy")
+    if not isinstance(strategy, dict):
+        return []
+    plan = strategy.get("topic_angle_plan")
+    return [item for item in plan if isinstance(item, dict)] if isinstance(plan, list) else []
+
+
+def _angle_plan_item(plan: list[dict], index: int) -> dict | None:
+    if index < 0 or index >= len(plan):
         return None
-    compact = {
-        key: value.get(key)
-        for key in (
-            "template_id",
-            "template_name",
-            "duration_seconds",
-            "aspect_ratio",
-            "brand",
-            "game_pool_examples",
-            "meta_restricted_game_ad_safe_mode",
-            "first_frame",
-            "last_frame",
-            "motion_direction",
-            "compliance_guardrails",
-        )
-        if value.get(key) not in (None, "", [])
-    }
-    return compact or None
+    return plan[index]
 
 
 def _compact_previous_topic(value: object) -> dict | None:
