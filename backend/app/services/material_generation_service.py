@@ -27,7 +27,7 @@ from backend.app.schemas.material_generation import (
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
-from backend.app.services.game_creative_strategy import build_game_creative_strategy
+from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.model_selection import effective_text_model
 from backend.app.services.video_service import VideoService
@@ -292,7 +292,7 @@ class MaterialGenerationService:
             "selling_points": selling_points,
             "constraints": payload.constraints,
         }
-        creative_strategy = build_game_creative_strategy(external_context)
+        creative_strategy = build_creative_strategy(external_context)
         if creative_strategy:
             external_context["creative_strategy"] = creative_strategy
         work_order = {
