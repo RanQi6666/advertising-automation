@@ -491,7 +491,19 @@ async def test_openai_copy_payload_includes_compact_v2_strategy(
         id="campaign-1",
         name="Glow Serum",
         product_name="Glow Serum",
-        metadata_json={"creative_strategy": strategy},
+        metadata_json={
+            "creative_strategy": strategy,
+            "raw_content": "CAMPAIGN RAW SHOULD NOT LEAK",
+            "work_order": {
+                "raw_content": "WORK ORDER RAW SHOULD NOT LEAK",
+                "country": "Singapore",
+                "landing_url": "https://shop.example.sg/products/glow-serum",
+            },
+            "landing_page": {
+                "title": "Glow Serum",
+                "text_excerpt": "landing copy " * 300,
+            },
+        },
     )
     topic = ContentTopic(
         id="topic-1",
@@ -506,7 +518,13 @@ async def test_openai_copy_payload_includes_compact_v2_strategy(
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-    assert "SHOULD NOT LEAK" not in json.dumps(payload, ensure_ascii=False)
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "SHOULD NOT LEAK" not in payload_text
+    assert "CAMPAIGN RAW SHOULD NOT LEAK" not in payload_text
+    assert "WORK ORDER RAW SHOULD NOT LEAK" not in payload_text
+    assert "raw_content" not in payload_text
+    assert payload["campaign"]["metadata"]["landing_page"]["title"] == "Glow Serum"
+    assert len(payload["campaign"]["metadata"]["landing_page"]["text_excerpt"]) <= 600
     assert "creative_strategy.v2" in captured["system"]
 
 
@@ -515,6 +533,9 @@ def test_topic_stream_prompt_mentions_creative_strategy() -> None:
 
     assert "creative_strategy" in prompt
     assert "mandatory" in prompt
+    assert "angle_type" in prompt
+    assert "topic_angle_plan" in prompt
+    assert '"angle_type":"..."' in prompt
 
 
 def test_topic_stream_parser_yields_ndjson_topics_incrementally() -> None:

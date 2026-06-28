@@ -766,6 +766,18 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
             lines.append(f"Topic angles: {'; '.join(safe_angles)}")
 
     if isinstance(video_guidance, dict):
+        narrative_beats = []
+        for key, label in (
+            ("opening", "Opening"),
+            ("middle", "Middle"),
+            ("ending", "Ending"),
+        ):
+            value = _brand_safe_prompt_text(str(video_guidance.get(key) or ""))
+            if value:
+                narrative_beats.append(f"{label}: {value}")
+        if narrative_beats:
+            lines.append(f"Duration-adaptive beats: {'; '.join(narrative_beats)}")
+
         for key, label in (
             ("short_video_rules", "Short duration rules"),
             ("medium_video_rules", "Medium duration rules"),
