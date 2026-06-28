@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.core.config import get_settings
 from backend.app.db.models.campaign import Campaign
+from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm.openai_provider import (
     OpenAILLMProvider,
     _topic_stream_system_prompt,
@@ -458,6 +459,55 @@ async def test_openai_topic_generation_sends_compact_payload(
     assert "ignored" not in signals["creative_strategy"]  # type: ignore[index]
     assert "creative_strategy" in captured["system"]  # type: ignore[operator]
     assert "mandatory" in captured["system"]  # type: ignore[operator]
+
+
+@pytest.mark.asyncio
+async def test_openai_copy_payload_includes_compact_v2_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "body": "A clear daily-use message.",
+            "primary_text": "A clear daily-use message.",
+            "headline": "Simple daily glow",
+            "description": "Designed for busy routines.",
+            "cta": "Shop Now",
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "market_context": {"country_code": "SG", "language": "English"},
+        "audience_lens": {"age_range": "25-34", "gender": "Female"},
+        "raw_content": "SHOULD NOT LEAK",
+    }
+    campaign = Campaign(
+        id="campaign-1",
+        name="Glow Serum",
+        product_name="Glow Serum",
+        metadata_json={"creative_strategy": strategy},
+    )
+    topic = ContentTopic(
+        id="topic-1",
+        campaign_id="campaign-1",
+        title="Busy-day skincare",
+        angle="scenario_resonance",
+        source_data={"creative_strategy": strategy},
+    )
+
+    await provider.generate_copy(campaign=campaign, topic=topic, constraints={})
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+    assert "SHOULD NOT LEAK" not in json.dumps(payload, ensure_ascii=False)
+    assert "creative_strategy.v2" in captured["system"]
 
 
 def test_topic_stream_prompt_mentions_creative_strategy() -> None:

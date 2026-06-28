@@ -426,8 +426,9 @@ async def test_material_context_persists_mini_game_strategy(tmp_path) -> None:
             )
 
         strategy = campaign.metadata_json["creative_strategy"]
-        assert strategy["template_id"] == "mini_game_pool"
-        assert topic.source_data["creative_strategy"]["template_id"] == "mini_game_pool"
+        assert strategy["schema_version"] == "creative_strategy.v2"
+        assert topic.source_data["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+        assert topic.source_data["creative_strategy"]["schema_version"] == strategy["schema_version"]
     finally:
         await engine.dispose()
 
@@ -481,6 +482,60 @@ async def test_copy_generation_inherits_campaign_creative_strategy(
             )
 
         assert draft.metadata_json["creative_strategy"]["template_id"] == "gaja_brand"
+    finally:
+        get_settings.cache_clear()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_copy_generation_inherits_v2_creative_strategy(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    get_settings.cache_clear()
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            strategy = {
+                "schema_version": "creative_strategy.v2",
+                "vertical": "ecommerce",
+                "market_context": {"country_code": "SG", "language": "English"},
+                "audience_lens": {"age_range": "25-34", "gender": "Female"},
+                "copy_guidance": {"tone": ["efficient", "quality-led"]},
+            }
+            campaign = Campaign(
+                name="Glow Serum",
+                product_name="Glow Serum",
+                objective="purchase",
+                audience_description="Female 25-34",
+                metadata_json={
+                    "creative_strategy": strategy,
+                    "landing_page": {
+                        "url": "https://shop.example.sg",
+                        "title": "Glow Serum",
+                    },
+                },
+            )
+            session.add(campaign)
+            await session.flush()
+            topic = ContentTopic(
+                campaign_id=campaign.id,
+                title="Busy-day skincare",
+                angle="scenario_resonance: workday skincare routine",
+                audience="Female 25-34",
+                source_data={"creative_strategy": strategy},
+            )
+            session.add(topic)
+            await session.commit()
+
+            draft = await CopywritingService().generate_copy(
+                session,
+                CopyGenerateRequest(topic_id=topic.id),
+            )
+
+        assert draft.metadata_json["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+        assert draft.metadata_json["creative_strategy"]["vertical"] == "ecommerce"
     finally:
         get_settings.cache_clear()
         await engine.dispose()

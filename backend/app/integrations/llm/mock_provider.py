@@ -981,6 +981,26 @@ def _mock_strategy_image_hint(
 ) -> str:
     if not isinstance(creative_strategy, dict):
         return ""
+    schema_version = creative_strategy.get("schema_version")
+    if schema_version == "creative_strategy.v2":
+        vertical = str(creative_strategy.get("vertical") or "unknown")
+        image_guidance = creative_strategy.get("image_guidance")
+        hooks = image_guidance.get("visual_hooks") if isinstance(image_guidance, dict) else []
+        hook_text = (
+            ", ".join(str(item) for item in hooks[:3] if str(item).strip())
+            if isinstance(hooks, list)
+            else ""
+        )
+        direction = (
+            f" Follow creative_strategy.v2 {vertical} visual direction"
+            if vertical in {"game", "ecommerce"}
+            else " Follow creative_strategy.v2 general visual direction"
+        )
+        if hook_text:
+            direction += f": {hook_text}."
+        else:
+            direction += "."
+        return direction
     template_id = creative_strategy.get("template_id")
     role = _mock_keyframe_role(image_index, storyboard_context)
     concept_hint = _mock_strategy_concept_hint(

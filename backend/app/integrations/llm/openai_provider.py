@@ -227,6 +227,14 @@ class OpenAILLMProvider:
         constraints: dict,
     ) -> CopyDraftCandidate:
         target_language = build_target_language_context(campaign=campaign)
+        campaign_metadata = (
+            campaign.metadata_json if isinstance(campaign.metadata_json, dict) else {}
+        )
+        topic_source_data = topic.source_data if isinstance(topic.source_data, dict) else {}
+        creative_strategy = _compact_creative_strategy(
+            campaign_metadata.get("creative_strategy")
+            or topic_source_data.get("creative_strategy")
+        )
         data = await self._json_completion(
             system=with_meta_ad_compliance(
                 "You are a direct-response Facebook copywriter. Return valid JSON only "
@@ -234,6 +242,8 @@ class OpenAILLMProvider:
                 "campaign, work order, and landing page context. Write compliant ad copy "
                 "that is suitable for Meta/Facebook placements. All generated copy fields "
                 "are user-facing and must use the target audience language.\n\n"
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -243,7 +253,7 @@ class OpenAILLMProvider:
                         "objective": campaign.objective,
                         "product_name": campaign.product_name,
                         "audience_description": campaign.audience_description,
-                        "metadata": campaign.metadata_json,
+                        "metadata": _compact_metadata_with_strategy(campaign_metadata),
                     },
                     "topic": {
                         "title": topic.title,
@@ -251,6 +261,7 @@ class OpenAILLMProvider:
                         "selling_points": topic.selling_points,
                         "risk_notes": topic.risk_notes,
                     },
+                    "creative_strategy": creative_strategy,
                     "constraints": constraints,
                     "target_language": target_language,
                 },
@@ -301,6 +312,7 @@ class OpenAILLMProvider:
         storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         target_language = build_target_language_context(draft_metadata=draft.metadata_json)
+        compact_draft_metadata = _compact_metadata_with_strategy(draft.metadata_json)
         data = await self._json_completion(
             system=with_meta_ad_compliance(
                 "Turn ad copy into concise image briefs. Return valid JSON only with "
@@ -340,7 +352,7 @@ class OpenAILLMProvider:
                 {
                     "copy": draft.body,
                     "headline": draft.headline,
-                    "draft_metadata": draft.metadata_json,
+                    "draft_metadata": compact_draft_metadata,
                     "count": count,
                     "size": size,
                     "target_language": target_language,
@@ -1285,6 +1297,18 @@ def _image_source_asset_context(asset: CreativeAsset | None) -> dict[str, Any] |
         "size": asset.size,
         "status": asset.status,
     }
+
+
+def _compact_metadata_with_strategy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata = dict(value)
+    creative_strategy = _compact_creative_strategy(metadata.get("creative_strategy"))
+    if creative_strategy:
+        metadata["creative_strategy"] = creative_strategy
+    else:
+        metadata.pop("creative_strategy", None)
+    return metadata
 
 
 def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | None:
