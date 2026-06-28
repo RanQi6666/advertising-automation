@@ -99,6 +99,20 @@ def test_unknown_vertical_uses_conservative_generic_plan() -> None:
     assert strategy["classification"]["confidence"] < 0.65
 
 
+def test_localized_country_aliases_resolve_to_market_context() -> None:
+    singapore_strategy = build_creative_strategy(
+        {"product_name": "Glow Serum", "country": "新加坡"},
+        today=date(2026, 6, 28),
+    )
+    malaysia_strategy = build_creative_strategy(
+        {"product_name": "Daily Planner", "country": "马来西亚"},
+        today=date(2026, 6, 28),
+    )
+
+    assert singapore_strategy["market_context"]["country_code"] == "SG"
+    assert malaysia_strategy["market_context"]["country_code"] == "MY"
+
+
 def test_nearby_holidays_are_deterministic_and_do_not_invent_trends() -> None:
     strategy = build_creative_strategy(
         {"product_name": "Shop", "country": "Singapore", "landing_url": "https://shop.sg"},
