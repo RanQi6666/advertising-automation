@@ -29,6 +29,7 @@ from backend.app.services.creative_safety_prompts import (
     sanitize_creative_safety_payload,
     sanitize_creative_safety_text,
 )
+from backend.app.services.creative_strategy_builder import compact_creative_strategy
 
 
 class OpenAILLMProvider:
@@ -226,6 +227,14 @@ class OpenAILLMProvider:
         constraints: dict,
     ) -> CopyDraftCandidate:
         target_language = build_target_language_context(campaign=campaign)
+        campaign_metadata = (
+            campaign.metadata_json if isinstance(campaign.metadata_json, dict) else {}
+        )
+        topic_source_data = topic.source_data if isinstance(topic.source_data, dict) else {}
+        creative_strategy = _compact_creative_strategy(
+            campaign_metadata.get("creative_strategy")
+            or topic_source_data.get("creative_strategy")
+        )
         data = await self._json_completion(
             system=with_meta_ad_compliance(
                 "You are a direct-response Facebook copywriter. Return valid JSON only "
@@ -233,6 +242,8 @@ class OpenAILLMProvider:
                 "campaign, work order, and landing page context. Write compliant ad copy "
                 "that is suitable for Meta/Facebook placements. All generated copy fields "
                 "are user-facing and must use the target audience language.\n\n"
+                + _creative_strategy_system_instruction()
+                + "\n\n"
                 + language_requirements_prompt()
             ),
             user=json.dumps(
@@ -242,7 +253,7 @@ class OpenAILLMProvider:
                         "objective": campaign.objective,
                         "product_name": campaign.product_name,
                         "audience_description": campaign.audience_description,
-                        "metadata": campaign.metadata_json,
+                        "metadata": _compact_metadata_with_strategy(campaign_metadata),
                     },
                     "topic": {
                         "title": topic.title,
@@ -250,6 +261,7 @@ class OpenAILLMProvider:
                         "selling_points": topic.selling_points,
                         "risk_notes": topic.risk_notes,
                     },
+                    "creative_strategy": creative_strategy,
                     "constraints": constraints,
                     "target_language": target_language,
                 },
@@ -300,6 +312,7 @@ class OpenAILLMProvider:
         storyboard_context: dict | None = None,
     ) -> list[ImageBrief]:
         target_language = build_target_language_context(draft_metadata=draft.metadata_json)
+        compact_draft_metadata = _compact_metadata_with_strategy(draft.metadata_json)
         data = await self._json_completion(
             system=with_meta_ad_compliance(
                 "Turn ad copy into concise image briefs. Return valid JSON only with "
@@ -339,7 +352,7 @@ class OpenAILLMProvider:
                 {
                     "copy": draft.body,
                     "headline": draft.headline,
-                    "draft_metadata": draft.metadata_json,
+                    "draft_metadata": compact_draft_metadata,
                     "count": count,
                     "size": size,
                     "target_language": target_language,
@@ -377,7 +390,9 @@ class OpenAILLMProvider:
                 "list. Keep subtitles "
                 "short, readable, and suitable for mobile feed placements. Do not script "
                 "unlicensed IP, fake UI, misleading controls, platform logos/UI, or "
-                "unsupported claims. "
+                "unsupported claims. Use duration_seconds as the source of truth. Compress "
+                "or expand the creative_strategy.video_guidance beats to fit that duration; "
+                "do not assume a fixed 30-second or 12-second structure. "
                 "subtitle and voiceover are user-facing and must use the target audience "
                 "language. visual, motion, notes, and rationale may use Simplified Chinese "
                 "for operator review, but any visible text requested in visual must use "
@@ -395,14 +410,14 @@ class OpenAILLMProvider:
                         "objective": campaign.objective,
                         "product_name": campaign.product_name,
                         "audience_description": campaign.audience_description,
-                        "metadata": campaign.metadata_json,
+                        "metadata": _compact_metadata_with_strategy(campaign.metadata_json),
                     },
                     "copy_draft": _draft_context(draft),
                     "assets": [_asset_context(asset) for asset in assets],
                     "selected_asset_ids": [asset.id for asset in assets],
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
-                    "context": context,
+                    "context": _compact_metadata_with_strategy(context),
                     "instructions": instructions,
                     "target_language": target_language,
                 }
@@ -442,14 +457,16 @@ class OpenAILLMProvider:
                                 "objective": campaign.objective,
                                 "product_name": campaign.product_name,
                                 "audience_description": campaign.audience_description,
-                                "metadata": campaign.metadata_json,
+                                "metadata": _compact_metadata_with_strategy(
+                                    campaign.metadata_json
+                                ),
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
                             "selected_asset_ids": [asset.id for asset in assets],
                             "duration_seconds": duration_seconds,
                             "aspect_ratio": aspect_ratio,
-                            "context": context,
+                            "context": _compact_metadata_with_strategy(context),
                             "instructions": instructions,
                             "target_language": target_language,
                         }
@@ -495,7 +512,10 @@ class OpenAILLMProvider:
                 "empty, use an empty source_asset_ids list. Keep "
                 "subtitles short, readable, and suitable for mobile feed placements. Do "
                 "not script unlicensed IP, fake UI, misleading controls, platform "
-                "logos/UI, or unsupported claims. subtitle and voiceover are user-facing "
+                "logos/UI, or unsupported claims. Use duration_seconds as the source of "
+                "truth. Compress or expand the creative_strategy.video_guidance beats to "
+                "fit that duration; do not assume a fixed 30-second or 12-second "
+                "structure. subtitle and voiceover are user-facing "
                 "and must use the target audience language. visual, motion, notes, and "
                 "rationale may use Simplified Chinese for operator review, but any visible "
                 "text requested in visual must use the target audience language. "
@@ -512,14 +532,14 @@ class OpenAILLMProvider:
                         "objective": campaign.objective,
                         "product_name": campaign.product_name,
                         "audience_description": campaign.audience_description,
-                        "metadata": campaign.metadata_json,
+                        "metadata": _compact_metadata_with_strategy(campaign.metadata_json),
                     },
                     "copy_draft": _draft_context(draft),
                     "assets": [_asset_context(asset) for asset in assets],
                     "selected_asset_ids": [asset.id for asset in assets],
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
-                    "context": context,
+                    "context": _compact_metadata_with_strategy(context),
                     "current_storyboard": _compact_storyboard_for_revision(current_storyboard),
                     "current_storyboard_text": _truncate(current_storyboard_text, 6000),
                     "revision_feedback": feedback,
@@ -563,14 +583,16 @@ class OpenAILLMProvider:
                                 "objective": campaign.objective,
                                 "product_name": campaign.product_name,
                                 "audience_description": campaign.audience_description,
-                                "metadata": campaign.metadata_json,
+                                "metadata": _compact_metadata_with_strategy(
+                                    campaign.metadata_json
+                                ),
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
                             "selected_asset_ids": [asset.id for asset in assets],
                             "duration_seconds": duration_seconds,
                             "aspect_ratio": aspect_ratio,
-                            "context": context,
+                            "context": _compact_metadata_with_strategy(context),
                             "current_storyboard": _compact_storyboard_for_revision(
                                 current_storyboard
                             ),
@@ -824,7 +846,9 @@ def _video_storyboard_text_system_prompt(revision: bool) -> str:
         "ids from `selected_asset_ids`. Never write `No source image provided` when assets "
         "is non-empty. If assets is empty, write `Source image id notes: No source image "
         "provided.` Use the selected images as source assets and do not invent unavailable "
-        "image ids. Keep subtitles short, readable, and suitable for "
+        "image ids. Use duration_seconds as the source of truth. Compress or expand the "
+        "creative_strategy.video_guidance beats to fit that duration; do not assume a fixed "
+        "30-second or 12-second structure. Keep subtitles short, readable, and suitable for "
         "mobile feed placements. Do not script unlicensed IP, fake UI, misleading controls, "
         "platform logos/UI, QR codes, watermarks, or unsupported claims. subtitle and "
         "voiceover are user-facing and must use the target audience language. Operator-facing "
@@ -842,9 +866,18 @@ def _creative_strategy_system_instruction() -> str:
     return (
         "If draft_metadata.creative_strategy, campaign.metadata.creative_strategy, or "
         "context.creative_strategy is provided, treat creative_strategy as mandatory "
-        "ad-direction context. Honor its template_id, duration_seconds, first_frame, "
-        "last_frame, motion_direction, compliance_guardrails, negative_style_cues, "
-        "video_recipe, landing_visual_reference, country_style_pack, visual_concepts, "
+        "ad-direction context. If creative_strategy.schema_version is "
+        "creative_strategy.v2, treat it as the mandatory internal creative brief. For "
+        "topic generation, create one topic per topic_angle_plan slot when possible; "
+        "do not repeat angle_type across the three topics. Return angle_type when the "
+        "schema allows it. For copy, image, storyboard, and video, follow "
+        "market_context, audience_lens, copy_guidance, image_guidance, "
+        "video_guidance, and compliance_guardrails. Use audience traits only as "
+        "internal strategy; do not directly assert sensitive personal attributes in "
+        "user-facing text. Honor legacy template fields too: template_id, "
+        "duration_seconds, first_frame, last_frame, motion_direction, "
+        "compliance_guardrails, negative_style_cues, video_recipe, "
+        "landing_visual_reference, country_style_pack, visual_concepts, "
         "text_layout_rules, and first_three_seconds. If country_style_pack is present, "
         "treat it as mandatory country-specific art direction without adding unsafe "
         "symbols, regulated props, or real-world sensitive claims. If visual_concepts "
@@ -876,12 +909,14 @@ def _topic_stream_system_prompt() -> str:
         "JSON object. Emit exactly one complete JSON object per line. Each topic line "
         "must use this shape: "
         "{\"type\":\"topic\",\"index\":1,\"topic\":{\"title\":\"...\",\"angle\":\"...\","
-        "\"audience\":\"...\",\"selling_points\":[\"...\"],\"risk_notes\":\"...\","
-        "\"rationale\":\"...\",\"score\":0.85}}. "
+        "\"angle_type\":\"...\",\"audience\":\"...\",\"selling_points\":[\"...\"],"
+        "\"risk_notes\":\"...\",\"rationale\":\"...\",\"score\":0.85}}. "
         "Emit each topic as soon as it is complete. After the requested number of topics, "
         "emit one final line: {\"type\":\"done\"}. topic.title is user-facing and must use "
         "the target audience language. angle, audience, selling_points, risk_notes, and "
         "rationale are operator-facing planning fields and may use Simplified Chinese. "
+        "If creative_strategy.topic_angle_plan is present, set topic.angle_type to one of "
+        "the plan's angle_type values. "
         "If signals.previous_topics is present, avoid repeating those existing topics. "
         "If signals.topic_revision_feedback is present, treat it as mandatory operator "
         "feedback: adjust the new topics to satisfy it, avoid repeating previous_topics, "
@@ -1123,6 +1158,7 @@ def _topic_candidate_from_data(data: dict[str, Any]) -> TopicCandidate:
     normalized = {
         "title": _coerce_text(data.get("title")),
         "angle": _coerce_text(data.get("angle")),
+        "angle_type": _coerce_optional_text(data.get("angle_type")),
         "audience": _coerce_optional_text(data.get("audience")),
         "selling_points": _coerce_text_list(data.get("selling_points")),
         "risk_notes": _coerce_optional_text(data.get("risk_notes")),
@@ -1246,7 +1282,7 @@ def _draft_context(draft: CopyDraft | None) -> dict[str, Any] | None:
         "headline": draft.headline,
         "description": draft.description,
         "cta": draft.cta,
-        "metadata": draft.metadata_json,
+        "metadata": _compact_metadata_with_strategy(draft.metadata_json),
     }
 
 
@@ -1257,7 +1293,7 @@ def _asset_context(asset: CreativeAsset) -> dict[str, Any]:
         "prompt": asset.prompt,
         "alt_text": asset.alt_text,
         "size": asset.size,
-        "metadata": asset.metadata_json,
+        "metadata": _compact_metadata_with_strategy(asset.metadata_json),
     }
 
 
@@ -1274,6 +1310,130 @@ def _image_source_asset_context(asset: CreativeAsset | None) -> dict[str, Any] |
         "size": asset.size,
         "status": asset.status,
     }
+
+
+def _compact_metadata_with_strategy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    creative_strategy = _compact_creative_strategy(value.get("creative_strategy"))
+    if creative_strategy:
+        metadata["creative_strategy"] = creative_strategy
+
+    landing_page = _compact_landing_page_metadata(value.get("landing_page"))
+    if landing_page:
+        metadata["landing_page"] = landing_page
+
+    work_order = _compact_work_order_metadata(value.get("work_order"))
+    if work_order:
+        metadata["work_order"] = work_order
+
+    for key in (
+        "external_request_id",
+        "external_order_id",
+        "campaign_id",
+        "topic_id",
+        "draft_id",
+        "image_index",
+        "provider",
+        "source",
+        "size",
+        "status",
+        "version",
+        "url",
+        "storage_key",
+        "landing_url",
+        "country",
+        "event_name",
+        "audience",
+        "audience_description",
+    ):
+        value_item = value.get(key)
+        compact_value = _compact_metadata_scalar(value_item)
+        if compact_value not in (None, "", []):
+            metadata[key] = compact_value
+    return metadata
+
+
+def _compact_landing_page_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, limit in (
+        ("url", 500),
+        ("domain", 120),
+        ("title", 180),
+        ("description", 300),
+        ("text_excerpt", 600),
+        ("status", 80),
+    ):
+        compact_value = _truncate(_coerce_optional_text(value.get(key)), limit)
+        if compact_value:
+            compact[key] = compact_value
+    headings = value.get("headings")
+    if isinstance(headings, list):
+        compact_headings = [
+            item
+            for item in (
+                _truncate(_coerce_text(heading), 120) for heading in headings[:8]
+            )
+            if item
+        ]
+        if compact_headings:
+            compact["headings"] = compact_headings
+    return compact
+
+
+def _compact_work_order_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in (
+        "country",
+        "media",
+        "landing_url",
+        "event_name",
+        "report_timezone",
+        "audience_description",
+        "audience_description_raw",
+    ):
+        compact_value = _compact_metadata_scalar(value.get(key))
+        if compact_value not in (None, "", []):
+            compact[key] = compact_value
+    parsed_fields = value.get("parsed_fields")
+    if isinstance(parsed_fields, dict):
+        compact_fields = {
+            key: compact_value
+            for key in (
+                "country",
+                "landing_url",
+                "event_name",
+                "product_name",
+                "audience_description_raw",
+                "gender",
+                "age_min",
+                "age_max",
+            )
+            if (compact_value := _compact_metadata_scalar(parsed_fields.get(key)))
+            not in (None, "", [])
+        }
+        if compact_fields:
+            compact["parsed_fields"] = compact_fields
+    return compact
+
+
+def _compact_metadata_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return _truncate(value, 500)
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_compact_metadata_scalar(entry) for entry in value[:8])
+            if item not in (None, "", [])
+        ]
+    return None
 
 
 def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | None:
@@ -1331,33 +1491,7 @@ def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | No
 
 
 def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    compact: dict[str, Any] = {}
-    for key in (
-        "template_id",
-        "template_name",
-        "duration_seconds",
-        "aspect_ratio",
-        "brand",
-        "game_pool_examples",
-        "meta_restricted_game_ad_safe_mode",
-        "first_frame",
-        "last_frame",
-        "motion_direction",
-        "compliance_guardrails",
-        "landing_visual_reference",
-        "negative_style_cues",
-        "video_recipe",
-        "country_style_pack",
-        "visual_concepts",
-        "text_layout_rules",
-        "first_three_seconds",
-    ):
-        item = value.get(key)
-        if item not in (None, "", []):
-            compact[key] = item
-    return compact or None
+    return compact_creative_strategy(value)
 
 
 def _coerce_text(value: Any) -> str:

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class TopicCandidate(BaseModel):
     title: str
     angle: str
+    angle_type: str | None = None
     audience: str | None = None
     selling_points: list[str] = Field(default_factory=list)
     risk_notes: str | None = None

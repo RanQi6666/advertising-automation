@@ -19,7 +19,10 @@ from backend.app.db.session import get_session
 from backend.app.integrations.video.placeholder_provider import PlaceholderVideoProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import CopyDraftCandidate
-from backend.app.schemas.material_generation import MaterialVideoGenerateRequest
+from backend.app.schemas.material_generation import (
+    MaterialCopyGenerateRequest,
+    MaterialVideoGenerateRequest,
+)
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.material_generation_service import MaterialGenerationService
 from backend.app.services.video_service import VideoService
@@ -431,6 +434,40 @@ async def test_material_copy_generation_returns_copy_and_stores_external_context
     assert campaigns[0].metadata_json["external_request_id"] == "copy-ext-1"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_material_generation_context_uses_generic_creative_strategy(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    get_settings.cache_clear()
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            campaign, topic = await MaterialGenerationService()._create_context(
+                session,
+                MaterialCopyGenerateRequest(
+                    external_request_id="strategy-v2-material",
+                    product_name="Glow Serum",
+                    landing_url="https://shop.example.sg/products/glow-serum",
+                    country="Singapore",
+                    audience="Female 25-34",
+                    event_name="purchase",
+                    brief="Skincare for busy office workers.",
+                    selling_points=["Fast routine", "Hydrating glow"],
+                ),
+            )
+
+        strategy = campaign.metadata_json["creative_strategy"]
+        assert strategy["schema_version"] == "creative_strategy.v2"
+        assert strategy["vertical"] == "ecommerce"
+        assert strategy["market_context"]["country_code"] == "SG"
+        assert topic.source_data["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+    finally:
+        get_settings.cache_clear()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

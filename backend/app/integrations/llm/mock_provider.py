@@ -290,6 +290,17 @@ class MockLLMProvider:
         event_name = parsed_fields.get("event_name") or campaign.objective
         landing_title = landing_page.get("title")
         revision_feedback = _text_signal(signals, "topic_revision_feedback")
+        creative_strategy = signals.get("creative_strategy") if isinstance(signals, dict) else {}
+        angle_plan = (
+            creative_strategy.get("topic_angle_plan")
+            if isinstance(creative_strategy, dict)
+            else None
+        )
+        angle_items = (
+            [item for item in angle_plan if isinstance(item, dict)]
+            if isinstance(angle_plan, list)
+            else []
+        )
         target_language = build_target_language_context(campaign=campaign, signals=signals)
         candidates: list[TopicCandidate] = []
 
@@ -304,10 +315,20 @@ class MockLLMProvider:
                         else title
                     ),
                     angle=_append_context(
-                        angle,
+                        (
+                            f"{angle_items[index - 1].get('angle_type')}: "
+                            f"{angle_items[index - 1].get('purpose')}"
+                        )
+                        if index - 1 < len(angle_items)
+                        else angle,
                         country=country,
                         event_name=event_name,
                         landing_title=landing_title,
+                    ),
+                    angle_type=(
+                        str(angle_items[index - 1].get("angle_type"))
+                        if index - 1 < len(angle_items)
+                        else None
                     ),
                     audience=audience,
                     selling_points=[
@@ -498,6 +519,49 @@ class MockLLMProvider:
             context,
             *[asset.metadata_json for asset in assets],
         )
+        if (
+            isinstance(creative_strategy, dict)
+            and creative_strategy.get("schema_version") == "creative_strategy.v2"
+        ):
+            scene_count = 2 if duration_seconds <= 6 else 3 if duration_seconds <= 12 else 4
+            step = max(1, duration_seconds // scene_count)
+            scenes = []
+            for index in range(scene_count):
+                start = index * step
+                end = (
+                    duration_seconds
+                    if index == scene_count - 1
+                    else min(duration_seconds, (index + 1) * step)
+                )
+                scenes.append(
+                    VideoStoryboardScene(
+                        scene_index=index + 1,
+                        start_second=start,
+                        end_second=end,
+                        visual=_mock_v2_strategy_scene_visual(
+                            creative_strategy, index, scene_count, safe_product
+                        ),
+                        subtitle=(
+                            "Shop Now"
+                            if creative_strategy.get("vertical") == "ecommerce"
+                            and index == scene_count - 1
+                            else "Try Now"
+                        ),
+                        motion="Fast readable motion.",
+                        voiceover=None,
+                        source_asset_ids=[assets[index % len(assets)].id] if assets else [],
+                        notes="Duration-adaptive v2 strategy scene.",
+                    )
+                )
+            return VideoStoryboardCandidate(
+                duration_seconds=duration_seconds,
+                aspect_ratio=aspect_ratio,
+                scenes=scenes,
+                rationale=(
+                    "Mock storyboard follows creative_strategy.v2 and requested "
+                    "duration_seconds."
+                ),
+            )
         asset_count = max(1, len(assets))
         scene_count = min(max(asset_count, 3), 5)
         segment = max(1, duration_seconds // scene_count)
@@ -960,6 +1024,26 @@ def _mock_strategy_image_hint(
 ) -> str:
     if not isinstance(creative_strategy, dict):
         return ""
+    schema_version = creative_strategy.get("schema_version")
+    if schema_version == "creative_strategy.v2":
+        vertical = str(creative_strategy.get("vertical") or "unknown")
+        image_guidance = creative_strategy.get("image_guidance")
+        hooks = image_guidance.get("visual_hooks") if isinstance(image_guidance, dict) else []
+        hook_text = (
+            ", ".join(str(item) for item in hooks[:3] if str(item).strip())
+            if isinstance(hooks, list)
+            else ""
+        )
+        direction = (
+            f" Follow creative_strategy.v2 {vertical} visual direction"
+            if vertical in {"game", "ecommerce"}
+            else " Follow creative_strategy.v2 general visual direction"
+        )
+        if hook_text:
+            direction += f": {hook_text}."
+        else:
+            direction += "."
+        return direction
     template_id = creative_strategy.get("template_id")
     role = _mock_keyframe_role(image_index, storyboard_context)
     concept_hint = _mock_strategy_concept_hint(
@@ -1166,6 +1250,25 @@ def _mock_strategy_scene_visual(
             f"brand-number text. {concept_visual} {layout_hint}".strip()
         )
     return fallback
+
+
+def _mock_v2_strategy_scene_visual(
+    creative_strategy: dict[str, Any],
+    index: int,
+    scene_count: int,
+    product: str,
+) -> str:
+    vertical = str(creative_strategy.get("vertical") or "unknown")
+    if vertical == "game":
+        beats = ["challenge hook", "failure moment", "correct move", "reward payoff"]
+    elif vertical == "ecommerce":
+        beats = ["pain point scene", "product appears", "benefit demonstration", "clear CTA"]
+    else:
+        beats = ["practical scenario", "product benefit", "clear next step"]
+    beat = beats[min(index, len(beats) - 1)]
+    if index == scene_count - 1:
+        beat = "clear CTA"
+    return f"{product}: {beat} following creative_strategy.v2."
 
 
 def _mock_storyboard_hint(storyboard_context: dict | None) -> str:

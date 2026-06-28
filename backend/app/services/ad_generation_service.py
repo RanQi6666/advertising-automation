@@ -37,8 +37,8 @@ from backend.app.schemas.work_order import (
 )
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.custom_event_types import custom_event_key, custom_event_type
-from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -516,7 +516,7 @@ class AdGenerationService:
         landing_url = _field_value(reviewed_fields, "landing_url") or work_order.landing_url
         event_name = _field_value(reviewed_fields, "event_name") or work_order.event_name
         country_value = _field_value(reviewed_fields, "country")
-        creative_strategy = build_game_creative_strategy(
+        creative_strategy = build_creative_strategy(
             {
                 "raw_content": raw_content,
                 "structured_fields": structured_fields,
@@ -526,6 +526,10 @@ class AdGenerationService:
                 "landing_url": landing_url,
                 "event_name": event_name,
                 "country": country_value or work_order.country,
+                "audience_description": _field_value(
+                    reviewed_fields,
+                    "audience_description_raw",
+                ),
                 "work_order": {
                     "raw_content": raw_content,
                     "parsed_fields": work_order.parsed_fields,

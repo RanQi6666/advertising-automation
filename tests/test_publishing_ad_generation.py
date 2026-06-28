@@ -124,7 +124,7 @@ async def test_publishing_ad_generation_builds_single_country_package() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publishing_ad_generation_persists_game_creative_strategy() -> None:
+async def test_publishing_ad_generation_persists_generic_creative_strategy() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -135,38 +135,40 @@ async def test_publishing_ad_generation_persists_game_creative_strategy() -> Non
         job = await service.create_job(
             session,
             PublishingAdGenerationJobCreate(
-                external_order_id="order-gaja",
+                external_order_id="order-strategy-v2",
                 work_order=PublishingWorkOrderPayload(
                     raw_content=(
-                        "Project: GAJA777\n"
-                        "Country: India\n"
-                        "Event: complete_registration\n"
-                        "Brief: \u5c0f\u6e38\u620f\u6d41\u91cf\u6c60, "
-                        "\u6700\u7ec8\u5bfc\u5230 GAJA \u5c0f\u6e38\u620f\u5408\u96c6\n"
-                        "Landing: https://www.gaja777.game/#/?invite=YBG71118&register=true"
+                        "Project: puzzle game\n"
+                        "Country: Singapore\n"
+                        "Audience: Female 25-34\n"
+                        "Event: traffic\n"
+                        "Landing: https://play.example.sg/level-challenge\n"
+                        "Brief: Make a level challenge game ad."
                     ),
+                    delivery_extraction=_delivery_extraction(),
                     structured_fields={
-                        "project_name": "GAJA777",
-                        "product_name": "GAJA777",
-                        "country": "India",
-                        "event_name": "complete_registration",
-                        "landing_url": (
-                            "https://www.gaja777.game/#/?invite=YBG71118&register=true"
-                        ),
+                        "product_name": "Puzzle Quest",
+                        "country": "Singapore",
+                        "landing_url": "https://play.example.sg/level-challenge",
+                        "audience_description_raw": "Female 25-34",
                     },
                 ),
-                preferences=PublishingAdGenerationPreferences(image_count=1),
             ),
         )
-
         completed = await service.process_job(session, job.id)
-        campaign = await session.scalar(select(Campaign).where(Campaign.name == "GAJA777"))
+        campaign = await session.get(
+            Campaign,
+            completed.result_payload["metadata_json"]["campaign_id"],
+        )
 
     assert campaign is not None
-    assert campaign.metadata_json["creative_strategy"]["template_id"] == "mini_game_pool"
-    assert (
-        completed.result_payload["metadata_json"]["creative_strategy"]["template_id"]
-        == "mini_game_pool"
+    strategy = campaign.metadata_json["creative_strategy"]
+    assert strategy["schema_version"] == "creative_strategy.v2"
+    assert strategy["vertical"] == "game"
+    assert strategy["market_context"]["country_code"] == "SG"
+    assert len({item["angle_type"] for item in strategy["topic_angle_plan"]}) == 3
+    assert completed.result_payload["metadata_json"]["creative_strategy"]["schema_version"] == (
+        "creative_strategy.v2"
     )
 
     await engine.dispose()
@@ -373,8 +375,20 @@ async def test_publishing_ad_generation_result_endpoint_returns_final_json(
     assert result["job_id"] == returned.id
     assert result["external_order_id"] == "order-result-returned"
     assert result["status"] == "returned"
+    assert set(result.keys()) >= {
+        "job_id",
+        "external_order_id",
+        "status",
+        "campaign_payload",
+        "adset_payload",
+        "creative_payload",
+        "assets",
+        "review",
+        "metadata_json",
+    }
     assert result["campaign_payload"]["objective"] == "OUTCOME_SALES"
     assert result["creative_payload"]["video_asset_url"] == "https://cdn.example/video.mp4"
+    assert "creative_strategy" in result["metadata_json"]
     assert "request_payload" not in result
 
     await engine.dispose()

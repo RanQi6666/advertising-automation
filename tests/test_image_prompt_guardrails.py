@@ -410,6 +410,62 @@ async def test_openai_image_brief_payload_preserves_landing_visual_reference(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_brief_payload_keeps_v2_strategy_image_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Busy-day routine",
+                    "short_text": "Simple daily glow",
+                    "visual_direction": "Serum used in a bright city routine scene.",
+                    "size": "1:1",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "market_context": {"country_code": "SG", "language": "English"},
+        "audience_lens": {"age_range": "25-34", "gender": "Female"},
+        "image_guidance": {
+            "composition": "Show a realistic daily routine with one clear benefit cue.",
+            "visual_hooks": ["bathroom counter close-up", "humid city commute", "clean serum drop"],
+        },
+        "raw_content": "SHOULD NOT LEAK",
+    }
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Busy-day skincare made simple.",
+        headline="Simple daily glow",
+        version=1,
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    await provider.generate_image_briefs(draft=draft, count=1, size="1:1")
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert "creative_strategy.v2" in captured["system"]
+    strategy_payload = payload["draft_metadata"]["creative_strategy"]
+    assert strategy_payload["image_guidance"]["visual_hooks"]
+    assert strategy_payload["market_context"]["country_code"] == "SG"
+    assert strategy_payload["audience_lens"]["age_range"] == "25-34"
+    assert "SHOULD NOT LEAK" not in json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 async def test_mock_image_briefs_are_platform_neutral() -> None:
     provider = MockLLMProvider()
     draft = CopyDraft(
@@ -655,3 +711,31 @@ async def test_mock_image_briefs_filter_risky_visual_reference_strings() -> None
     assert "slot machine reflections" not in visual_direction
     assert "cash gold gradient" not in visual_direction
     assert "money green highlights" not in visual_direction
+
+
+@pytest.mark.asyncio
+async def test_mock_image_briefs_include_v2_strategy_direction() -> None:
+    provider = MockLLMProvider()
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "market_context": {"country_code": "SG", "language": "English"},
+        "audience_lens": {"age_range": "25-34", "gender": "Female"},
+        "image_guidance": {
+            "visual_hooks": ["bathroom counter close-up", "clean serum drop", "humid city commute"]
+        },
+    }
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Busy-day skincare made simple.",
+        headline="Simple daily glow",
+        version=1,
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(draft=draft, count=1, size="1:1")
+
+    assert "creative_strategy.v2 ecommerce visual direction" in briefs[0].visual_direction
+    assert "bathroom counter close-up" in briefs[0].visual_direction

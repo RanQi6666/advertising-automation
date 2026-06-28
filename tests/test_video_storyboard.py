@@ -24,6 +24,7 @@ from backend.app.schemas.video import (
 from backend.app.services import video_service
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import creative_safety_prompt_block
+from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
@@ -575,6 +576,170 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "Subtitle: Register" not in prompt
 
 
+def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> None:
+    creative_strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "game",
+        "market_context": {"country_code": "SG", "language": "English"},
+        "audience_lens": {"age_range": "25-34", "expression_style": ["short", "energetic"]},
+        "topic_angle_plan": [
+            {"slot": 1, "angle_type": "challenge_failure", "purpose": "Test challenge hook."}
+        ],
+        "video_guidance": {
+            "duration_adaptive": True,
+            "short_video_rules": ["One strong hook, one payoff, one CTA."],
+            "medium_video_rules": ["Hook, conflict, payoff, CTA."],
+            "long_video_rules": ["Full story with proof and CTA."],
+            "beats_by_vertical": ["challenge", "failure", "correct move", "reward"],
+        },
+        "compliance_guardrails": ["Do not imply guaranteed wins."],
+    }
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 6,
+                "visual": "Open with a level challenge.",
+                "subtitle": "Can you pass?",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "creative_strategy: creative_strategy.v2 game" in prompt
+    assert "duration-adaptive" in prompt
+    assert "12-second first/last-frame workflow" not in prompt
+    assert "challenge_failure" in prompt
+    assert "One strong hook, one payoff, one CTA." in prompt
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
+def test_video_storyboard_prompt_includes_builder_video_guidance() -> None:
+    creative_strategy = build_creative_strategy(
+        {
+            "product_name": "Puzzle Quest",
+            "landing_url": "https://play.example.sg/level-challenge",
+            "country": "Singapore",
+            "brief": "Create a level challenge game ad.",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 6,
+                "visual": "Open with a level challenge.",
+                "subtitle": "Can you pass?",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "Lead with a visible challenge or failed attempt." in prompt
+    assert "Show progression, choice, or improvement." in prompt
+    assert "Resolve with reward, unlock, or next-action payoff." in prompt
+
+
+@pytest.mark.asyncio
+async def test_openai_video_storyboard_payload_compacts_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "video_guidance": {"opening": "Lead with the routine problem."},
+        "raw_content": "STRATEGY RAW SHOULD NOT LEAK",
+    }
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["payload"] = json.loads(user)
+        return {
+            "duration_seconds": 6,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "visual": "Show product in use.",
+                    "subtitle": "Shop Now",
+                    "motion": "Simple push in.",
+                    "voiceover": None,
+                    "source_asset_ids": ["asset-1"],
+                    "notes": "Safe scene.",
+                }
+            ],
+            "rationale": "Short v2 test.",
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    campaign = Campaign(
+        id="campaign-1",
+        name="Glow Serum",
+        product_name="Glow Serum",
+        audience_description="Female 25-34",
+        metadata_json={
+            "creative_strategy": strategy,
+            "raw_content": "CAMPAIGN RAW SHOULD NOT LEAK",
+            "landing_page": {"title": "Glow Serum", "text_excerpt": "landing copy " * 300},
+        },
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="A quick skincare routine.",
+        metadata_json={
+            "creative_strategy": strategy,
+            "raw_content": "DRAFT RAW SHOULD NOT LEAK",
+        },
+    )
+    asset = CreativeAsset(
+        id="asset-1",
+        campaign_id="campaign-1",
+        draft_id=draft.id,
+        prompt="Show serum on a bathroom counter.",
+        metadata_json={
+            "creative_strategy": strategy,
+            "raw_content": "ASSET RAW SHOULD NOT LEAK",
+            "image_index": 1,
+        },
+    )
+
+    await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[asset],
+        duration_seconds=6,
+        aspect_ratio="9:16",
+        context={"creative_strategy": strategy},
+        instructions=None,
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "raw_content" not in payload_text
+    assert "SHOULD NOT LEAK" not in payload_text
+    assert payload["campaign"]["metadata"]["creative_strategy"]["schema_version"] == (
+        "creative_strategy.v2"
+    )
+    assert len(payload["campaign"]["metadata"]["landing_page"]["text_excerpt"]) <= 600
+    assert payload["copy_draft"]["metadata"]["creative_strategy"]["schema_version"] == (
+        "creative_strategy.v2"
+    )
+    assert payload["assets"][0]["metadata"]["image_index"] == 1
+    assert payload["assets"][0]["metadata"]["creative_strategy"]["schema_version"] == (
+        "creative_strategy.v2"
+    )
+
+
 def test_video_storyboard_prompt_includes_country_concepts_and_text_layout_rules() -> None:
     creative_strategy = build_game_creative_strategy(
         {
@@ -823,6 +988,47 @@ async def test_mock_provider_revises_video_storyboard() -> None:
     assert storyboard.aspect_ratio == "9:16"
     assert storyboard.scenes[0].source_asset_ids == ["asset-1"]
     assert storyboard.scenes[0].notes == "Revision applied: Make the hook faster."
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_v2_storyboard_respects_short_duration() -> None:
+    provider = MockLLMProvider()
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "vertical": "ecommerce",
+        "video_guidance": {
+            "duration_adaptive": True,
+            "short_video_rules": ["Pain point, product, CTA."],
+        },
+    }
+    campaign = Campaign(
+        id="campaign-1",
+        name="Glow Serum",
+        product_name="Glow Serum",
+        audience_description="Female 25-34",
+        metadata_json={"creative_strategy": strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="A quick skincare routine.",
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=6,
+        aspect_ratio="9:16",
+        context={"creative_strategy": strategy},
+        instructions=None,
+    )
+
+    assert storyboard.duration_seconds == 6
+    assert storyboard.scenes[-1].end_second == 6
+    assert len(storyboard.scenes) <= 3
 
 
 @pytest.mark.asyncio

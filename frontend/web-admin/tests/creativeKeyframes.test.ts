@@ -5,6 +5,7 @@ import {
   DEFAULT_KEYFRAME_VARIANT_COUNT,
   buildKeyframePlanProgress,
   creativeGenerationPlan,
+  imageGenerationPlanForMode,
   keyframeGroupSlotIndices,
   normalizeKeyframeVariantCount,
 } from "../src/lib/creativeKeyframes.ts";
@@ -62,4 +63,27 @@ test("returns the slot indices for regenerating one方案 as a group", () => {
   assert.deepEqual(keyframeGroupSlotIndices(1), [1, 2]);
   assert.deepEqual(keyframeGroupSlotIndices(2), [3, 4]);
   assert.deepEqual(keyframeGroupSlotIndices(3), [5, 6]);
+});
+
+test("copy image mode generates exactly two standard images without keyframe metadata", () => {
+  const plan = imageGenerationPlanForMode("copy_images", 12, "9:16", 3);
+
+  assert.equal(plan.count, 2);
+  assert.equal(plan.size, "1:1");
+  assert.equal(plan.generationMode, "standard");
+  assert.equal(plan.isKeyframeVariant, false);
+  assert.equal(plan.variantCount, undefined);
+  assert.equal(plan.framesPerVariant, undefined);
+});
+
+test("video keyframe mode preserves selectable first and last frame schemes", () => {
+  const plan = imageGenerationPlanForMode("video_keyframes", 12, "9:16", 3);
+
+  assert.equal(plan.count, 6);
+  assert.equal(plan.size, "9:16");
+  assert.equal(plan.generationMode, "video_keyframe_variants");
+  assert.equal(plan.isKeyframeVariant, true);
+  assert.equal(plan.variantCount, 3);
+  assert.equal(plan.framesPerVariant, 2);
+  assert.equal(plan.videoDurationSeconds, 12);
 });
