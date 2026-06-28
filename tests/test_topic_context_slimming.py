@@ -7,12 +7,12 @@ import pytest
 from backend.app.core.config import get_settings
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.topic import ContentTopic
+from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.openai_provider import (
     OpenAILLMProvider,
     _topic_stream_system_prompt,
     _TopicNDJSONStreamParser,
 )
-from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.schemas.ai import TopicCandidate
 from backend.app.services.topic_service import (
     TopicService,

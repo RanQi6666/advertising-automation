@@ -428,7 +428,10 @@ async def test_material_context_persists_mini_game_strategy(tmp_path) -> None:
         strategy = campaign.metadata_json["creative_strategy"]
         assert strategy["schema_version"] == "creative_strategy.v2"
         assert topic.source_data["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-        assert topic.source_data["creative_strategy"]["schema_version"] == strategy["schema_version"]
+        assert (
+            topic.source_data["creative_strategy"]["schema_version"]
+            == strategy["schema_version"]
+        )
     finally:
         await engine.dispose()
 

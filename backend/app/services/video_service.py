@@ -743,7 +743,9 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     if isinstance(audience, dict):
         age_range = _brand_safe_prompt_text(str(audience.get("age_range") or ""))
         style_items = audience.get("expression_style")
-        safe_style = _brand_safe_prompt_list(style_items[:4]) if isinstance(style_items, list) else []
+        safe_style = (
+            _brand_safe_prompt_list(style_items[:4]) if isinstance(style_items, list) else []
+        )
         audience_parts = [
             part
             for part in [f"age range {age_range}" if age_range else "", ", ".join(safe_style)]

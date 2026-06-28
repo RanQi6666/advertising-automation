@@ -73,7 +73,10 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
             assert len(topics) == 3
             assert len({topic.source_data["topic_angle"]["angle_type"] for topic in topics}) == 3
             for topic in topics:
-                assert topic.source_data["creative_strategy"]["schema_version"] == "creative_strategy.v2"
+                assert (
+                    topic.source_data["creative_strategy"]["schema_version"]
+                    == "creative_strategy.v2"
+                )
                 assert topic.source_data["creative_strategy"] == strategy
 
             campaign_metadata = dict(campaign.metadata_json or {})
@@ -88,15 +91,27 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                 session,
                 CopyGenerateRequest(topic_id=topics[0].id),
             )
-            assert draft.metadata_json["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-            assert draft.metadata_json["creative_strategy"] == topics[0].source_data["creative_strategy"]
+            assert (
+                draft.metadata_json["creative_strategy"]["schema_version"]
+                == "creative_strategy.v2"
+            )
+            assert (
+                draft.metadata_json["creative_strategy"]
+                == topics[0].source_data["creative_strategy"]
+            )
 
             assets = await CreativeService().generate_creatives(
                 session,
                 CreativeGenerateRequest(draft_id=draft.id, count=1, size="1:1"),
             )
-            assert assets[0].metadata_json["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-            assert assets[0].metadata_json["creative_strategy"] == draft.metadata_json["creative_strategy"]
+            assert (
+                assets[0].metadata_json["creative_strategy"]["schema_version"]
+                == "creative_strategy.v2"
+            )
+            assert (
+                assets[0].metadata_json["creative_strategy"]
+                == draft.metadata_json["creative_strategy"]
+            )
 
             storyboard = await VideoService().generate_storyboard(
                 session,
@@ -108,8 +123,14 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                     aspect_ratio="9:16",
                 ),
             )
-            assert storyboard.metadata_json["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-            assert storyboard.metadata_json["creative_strategy"] == draft.metadata_json["creative_strategy"]
+            assert (
+                storyboard.metadata_json["creative_strategy"]["schema_version"]
+                == "creative_strategy.v2"
+            )
+            assert (
+                storyboard.metadata_json["creative_strategy"]
+                == draft.metadata_json["creative_strategy"]
+            )
             assert storyboard.duration_seconds == 6
             assert "creative_strategy" not in (campaign.metadata_json or {})
 
@@ -128,8 +149,14 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                     metadata_json=storyboard.metadata_json,
                 ),
             )
-            assert video.metadata_json["creative_strategy"]["schema_version"] == "creative_strategy.v2"
-            assert video.metadata_json["creative_strategy"] == storyboard.metadata_json["creative_strategy"]
+            assert (
+                video.metadata_json["creative_strategy"]["schema_version"]
+                == "creative_strategy.v2"
+            )
+            assert (
+                video.metadata_json["creative_strategy"]
+                == storyboard.metadata_json["creative_strategy"]
+            )
             assert video.duration_seconds == 6
     finally:
         get_settings.cache_clear()

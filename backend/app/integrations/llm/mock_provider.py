@@ -557,7 +557,10 @@ class MockLLMProvider:
                 duration_seconds=duration_seconds,
                 aspect_ratio=aspect_ratio,
                 scenes=scenes,
-                rationale="Mock storyboard follows creative_strategy.v2 and requested duration_seconds.",
+                rationale=(
+                    "Mock storyboard follows creative_strategy.v2 and requested "
+                    "duration_seconds."
+                ),
             )
         asset_count = max(1, len(assets))
         scene_count = min(max(asset_count, 3), 5)

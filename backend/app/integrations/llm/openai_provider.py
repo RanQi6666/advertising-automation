@@ -24,12 +24,12 @@ from backend.app.schemas.ai import (
     VideoStoryboardCandidate,
     VideoStoryboardScene,
 )
-from backend.app.services.creative_strategy_builder import compact_creative_strategy
 from backend.app.services.creative_safety_prompts import (
     creative_safety_prompt_block,
     sanitize_creative_safety_payload,
     sanitize_creative_safety_text,
 )
+from backend.app.services.creative_strategy_builder import compact_creative_strategy
 
 
 class OpenAILLMProvider:
