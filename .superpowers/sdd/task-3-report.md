@@ -75,3 +75,24 @@ Result:
 - No single-brand default strategy was hard-coded.
 - Topic strategy uses compact v2 metadata and supports three default angle slots when present.
 - Prompt guidance preserves Meta/Facebook compliance guardrails around sensitive attributes.
+
+## Fix follow-up
+
+### What I changed
+
+- Updated `backend/app/services/topic_service.py` so topic-angle resolution prefers a unique `candidate.angle_type` match from `creative_strategy.topic_angle_plan`, then falls back to the original positional slot mapping when `angle_type` is missing or ambiguous.
+- Updated both topic generation paths to use the new resolver so regular and streaming topic creation store the correct `source_data["topic_angle"]`.
+- Added focused regression coverage in `tests/test_topic_context_slimming.py` for:
+  - out-of-slot-order candidate mapping by `angle_type`
+  - mock-provider topic candidates inheriting distinct `angle_type` values from `creative_strategy.topic_angle_plan`
+
+### Tests run
+
+- `& 'C:\Users\panda\Documents\Advertising Automation\.venv\Scripts\python.exe' -m pytest tests/test_topic_context_slimming.py::test_angle_plan_item_prefers_unique_angle_type_match_over_position tests/test_topic_context_slimming.py::test_mock_provider_uses_strategy_plan_angle_types -q`
+  - Result: `2 passed in 0.96s`
+- `& 'C:\Users\panda\Documents\Advertising Automation\.venv\Scripts\python.exe' -m pytest tests/test_topic_context_slimming.py -q`
+  - Result: `10 passed in 1.07s`
+
+### Commit SHA
+
+- `PENDING`

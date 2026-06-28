@@ -66,7 +66,11 @@ class TopicService:
                 streamed=False,
                 provider=llm_settings.llm_provider,
                 model=model_name,
-                angle_plan_item=_angle_plan_item(angle_plan, index),
+                angle_plan_item=_angle_plan_item_for_candidate(
+                    angle_plan,
+                    index,
+                    candidate,
+                ),
             )
             session.add(topic)
             topics.append(topic)
@@ -117,7 +121,11 @@ class TopicService:
                     streamed=True,
                     provider=llm_settings.llm_provider,
                     model=model_name,
-                    angle_plan_item=_angle_plan_item(angle_plan, generated_count - 1),
+                    angle_plan_item=_angle_plan_item_for_candidate(
+                        angle_plan,
+                        generated_count - 1,
+                        candidate,
+                    ),
                 )
                 session.add(topic)
                 await session.commit()
@@ -526,6 +534,23 @@ def _angle_plan_item(plan: list[dict], index: int) -> dict | None:
     if index < 0 or index >= len(plan):
         return None
     return plan[index]
+
+
+def _angle_plan_item_for_candidate(
+    plan: list[dict],
+    index: int,
+    candidate: TopicCandidate,
+) -> dict | None:
+    angle_type = _text_or_none(candidate.angle_type)
+    if angle_type:
+        matches = [
+            item
+            for item in plan
+            if _text_or_none(item.get("angle_type")) == angle_type
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return _angle_plan_item(plan, index)
 
 
 def _compact_previous_topic(value: object) -> dict | None:

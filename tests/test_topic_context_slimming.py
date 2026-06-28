@@ -11,8 +11,12 @@ from backend.app.integrations.llm.openai_provider import (
     _topic_stream_system_prompt,
     _TopicNDJSONStreamParser,
 )
+from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.schemas.ai import TopicCandidate
-from backend.app.services.topic_service import TopicService
+from backend.app.services.topic_service import (
+    TopicService,
+    _angle_plan_item_for_candidate,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -190,6 +194,89 @@ def test_topic_source_data_records_angle_plan_slot() -> None:
 
     assert topic.source_data["topic_angle"]["slot"] == 1
     assert topic.source_data["topic_angle"]["angle_type"] == "challenge_failure"
+
+
+def test_angle_plan_item_prefers_unique_angle_type_match_over_position() -> None:
+    plan = [
+        {
+            "slot": 1,
+            "angle_type": "challenge_failure",
+            "purpose": "Failed attempt first.",
+        },
+        {
+            "slot": 2,
+            "angle_type": "comeback_growth",
+            "purpose": "Weak to strong progression.",
+        },
+        {
+            "slot": 3,
+            "angle_type": "reward_burst",
+            "purpose": "Reward payoff reveal.",
+        },
+    ]
+
+    matched = _angle_plan_item_for_candidate(
+        plan,
+        0,
+        TopicCandidate(
+            title="Big reward after the win",
+            angle="reward_burst: Show the payoff after the challenge.",
+            angle_type="reward_burst",
+            audience="game users",
+            selling_points=["Reward loop"],
+            risk_notes="Avoid guarantees.",
+            rationale="Should resolve by angle type, not slot order.",
+            score=0.84,
+        ),
+    )
+
+    assert matched == plan[2]
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_uses_strategy_plan_angle_types() -> None:
+    provider = MockLLMProvider()
+    campaign = Campaign(
+        id="campaign-game",
+        name="Game campaign",
+        objective="purchase",
+        product_name="Game Hub",
+        audience_description="game users",
+        metadata_json={},
+    )
+    signals = {
+        "creative_strategy": {
+            "schema_version": "creative_strategy.v2",
+            "topic_angle_plan": [
+                {
+                    "slot": 1,
+                    "angle_type": "challenge_failure",
+                    "purpose": "Open on the failed attempt.",
+                },
+                {
+                    "slot": 2,
+                    "angle_type": "comeback_growth",
+                    "purpose": "Show the improvement arc.",
+                },
+                {
+                    "slot": 3,
+                    "angle_type": "reward_burst",
+                    "purpose": "Land on the reward reveal.",
+                },
+            ]
+        }
+    }
+
+    topics = await provider.generate_topics(campaign=campaign, limit=3, signals=signals)
+
+    assert [topic.angle_type for topic in topics] == [
+        "challenge_failure",
+        "comeback_growth",
+        "reward_burst",
+    ]
+    assert topics[0].angle.startswith("challenge_failure: Open on the failed attempt.")
+    assert topics[1].angle.startswith("comeback_growth: Show the improvement arc.")
+    assert topics[2].angle.startswith("reward_burst: Land on the reward reveal.")
 
 
 @pytest.mark.asyncio
