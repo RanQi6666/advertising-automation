@@ -43,6 +43,7 @@ import {
   adPreviewCreativeOptions,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
+  videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
   type CreativeReviewKeyframeGroup,
 } from "./lib/workflowArtifacts";
@@ -2099,10 +2100,9 @@ function App() {
   }
 
   function selectedCreativeIdsForVideo(): string[] {
-    const approvedIds = new Set(approvedCreatives.map((item) => item.id));
-    const selected = selectedCreativeIds.filter((id) => approvedIds.has(id));
-    return (selected.length ? selected : approvedCreatives.slice(0, VIDEO_MAX_REFERENCE_IMAGES).map((item) => item.id)).slice(
-      0,
+    return videoCreativeAssetIdsForSelection(
+      approvedCreatives,
+      selectedCreativeIds,
       VIDEO_MAX_REFERENCE_IMAGES,
     );
   }

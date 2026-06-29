@@ -114,6 +114,36 @@ export function videoCreativeReferenceOptions(
     }));
 }
 
+export function videoCreativeAssetIdsForSelection(
+  approvedCreatives: CreativeAsset[],
+  selectedCreativeIds: string[],
+  maxReferenceImages: number,
+): string[] {
+  const approvedIds = new Set(
+    approvedCreatives.filter((asset) => asset.status === "approved").map((asset) => asset.id),
+  );
+  const selected = selectedCreativeIds.filter((id) => approvedIds.has(id));
+  const selectedSet = new Set(selected);
+  const referenceOptions = videoCreativeReferenceOptions(approvedCreatives);
+  const selectedKeyframeScheme = referenceOptions.find(
+    (option) => option.assetIds.length > 1 && option.assetIds.some((id) => selectedSet.has(id)),
+  );
+
+  if (selectedKeyframeScheme) {
+    return selectedKeyframeScheme.assetIds.slice(0, maxReferenceImages);
+  }
+  if (selected.length) return selected.slice(0, maxReferenceImages);
+
+  const fallbackKeyframeScheme = referenceOptions.find((option) => option.assetIds.length > 1);
+  if (fallbackKeyframeScheme) {
+    return fallbackKeyframeScheme.assetIds.slice(0, maxReferenceImages);
+  }
+  return approvedCreatives
+    .filter((asset) => asset.status === "approved")
+    .slice(0, maxReferenceImages)
+    .map((asset) => asset.id);
+}
+
 export function adPreviewCreativeOptions(
   creatives: CreativeAsset[],
   selectedDraft: CopyDraft | null,

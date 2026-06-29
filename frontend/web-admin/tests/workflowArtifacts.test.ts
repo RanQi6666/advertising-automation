@@ -5,6 +5,7 @@ import {
   adPreviewCreativeOptions,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
+  videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
 } from "../src/lib/workflowArtifacts.ts";
 import type { CopyDraft, CreativeAsset, Topic, VideoAsset } from "../src/types/domain.ts";
@@ -182,6 +183,21 @@ test("builds video reference options as approved keyframe schemes", () => {
       approved: true,
     },
   ]);
+});
+
+test("expands partial keyframe selection into the full approved video scheme", () => {
+  const group1First = keyframeCreative("group-1-first", 1, 1, 1, "approved");
+  const group1Last = keyframeCreative("group-1-last", 1, 2, 1, "approved");
+  const group2First = keyframeCreative("group-2-first", 2, 1, 1, "approved");
+  const group2Last = keyframeCreative("group-2-last", 2, 2, 1, "generated");
+
+  const selected = videoCreativeAssetIdsForSelection(
+    [group1First, group1Last, group2First, group2Last],
+    ["group-1-first"],
+    2,
+  );
+
+  assert.deepEqual(selected, ["group-1-first", "group-1-last"]);
 });
 
 test("ad preview options include approved normal images and exclude keyframe assets", () => {
