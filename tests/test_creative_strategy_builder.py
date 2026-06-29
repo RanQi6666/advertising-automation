@@ -123,6 +123,9 @@ def test_builds_india_game_market_style_pack_for_male_18_24() -> None:
     assert pack["gameplay_process"]["player_actions"]
     assert pack["gameplay_process"]["progression_feedback"]
     assert pack["gameplay_process"]["ending_transition"]
+    pack_text = str(pack).casefold()
+    assert "game lobby" not in pack_text
+    assert "app-lobby" not in pack_text
     assert "real deity names or real religious figures" in pack["cultural_safety"]["avoid"]
     assert (
         "prayers, worship, sacrifices, or ritual reenactments"
@@ -272,3 +275,15 @@ def test_compact_strategy_keeps_v2_fields_and_drops_large_unknown_blob() -> None
     assert "market_game_style_pack" in compact
     assert "raw_content" not in compact
     assert "SHOULD NOT LEAK" not in str(compact)
+
+
+def test_compact_strategy_drops_disabled_gaja_brand_template() -> None:
+    compact = compact_creative_strategy(
+        {
+            "template_id": "gaja_brand",
+            "first_frame": {"visual_must_include": ["dark neon app lobby"]},
+            "video_recipe": {"beats": ["0-2s: dark neon GAJA lobby hook"]},
+        }
+    )
+
+    assert compact is None

@@ -222,8 +222,9 @@ async def test_openai_video_storyboard_payload_sanitizes_creative_prompt_terms(
     assert "GAJA777" not in payload_text
     assert "777" not in payload_text
     assert "Register" not in payload_text
-    assert "metallic GAJA logo" in payload_text
-    assert "Start" in payload_text
+    assert "metallic GAJA logo" not in payload_text
+    assert "dark premium mobile game lobby" not in payload_text
+    assert "dark neon" not in payload_text
 
 
 @pytest.mark.asyncio
@@ -606,7 +607,7 @@ def test_video_storyboard_text_prompt_requires_opening_brand_without_digits() ->
     assert "remove digit characters from visible brand text" in prompt
 
 
-def test_gaja_video_prompt_requires_opening_brand_rule_without_numeric_suffix() -> None:
+def test_gaja_video_prompt_ignores_disabled_brand_template() -> None:
     creative_strategy = build_game_creative_strategy(
         {
             "product_name": "GAJA777",
@@ -620,18 +621,19 @@ def test_gaja_video_prompt_requires_opening_brand_rule_without_numeric_suffix() 
                 "scene_index": 1,
                 "start_second": 0,
                 "end_second": 3,
-                "visual": "Open with a dark neon lobby.",
+                "visual": "Open with a gameplay challenge.",
                 "subtitle": "Start",
             }
         ],
         creative_strategy=creative_strategy,
     )
 
-    assert (
-        "Opening brand rule: show the visible GAJA logo or GAJA wordmark in the first frame"
-        in prompt
-    )
-    assert "do not show any numeric suffix or brand-number text" in prompt
+    prompt_text = prompt.casefold()
+    assert "creative_strategy: gaja_brand" not in prompt_text
+    assert "opening brand rule" not in prompt_text
+    assert "dark neon" not in prompt_text
+    assert "premium neon" not in prompt_text
+    assert "game lobby" not in prompt_text
 
 
 def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> None:
@@ -908,50 +910,37 @@ def test_video_storyboard_prompt_includes_country_concepts_and_text_layout_rules
         creative_strategy=creative_strategy,
     )
 
-    assert "Country style pack: IN India" in prompt
-    assert "original Indian epic guardian" in prompt
-    assert "Variant visual concepts:" in prompt
-    assert "india_epic_guardian" in prompt
-    assert "india_royal_portal" in prompt
-    assert "india_mythic_neon_lobby" in prompt
-    assert "Text layout rules:" in prompt
-    assert "safe area width 86%" in prompt
-    assert "auto-fit text" in prompt
-    assert "no overflow outside the image or video frame" in prompt
-    assert "First 3 seconds hook:" in prompt
-    assert "0-1s" in prompt
-    assert "1-2s" in prompt
-    assert "2-3s" in prompt
+    assert "Country style pack: IN India" not in prompt
+    assert "original Indian epic guardian" not in prompt
+    assert "Variant visual concepts:" not in prompt
+    assert "india_epic_guardian" not in prompt
+    assert "india_royal_portal" not in prompt
+    assert "india_mythic_neon_lobby" not in prompt
+    assert "Text layout rules:" not in prompt
+    assert "premium neon" not in prompt.casefold()
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
-    creative_strategy = build_game_creative_strategy(
-        {
-            "product_name": "GAJA777",
-            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
-            "landing_page": {
-                "extracted_data": {
-                    "visual_reference": {
-                        "source": "reference_image",
-                        "status": "analyzed",
-                        "palette": ["near-black navy background"],
-                        "surface_style": ["dark premium mobile game lobby"],
-                        "gameplay_moment_archetypes": ["failed attempt and retry moment"],
-                        "composition_cues": ["visible challenge setup with reward cue"],
-                        "negative_style_cues": ["childlike puzzle blocks"],
-                        "video_recipe": {
-                            "duration_seconds": 12,
-                            "beats": [
-                                "0-2s: dark neon GAJA lobby hook with visible challenge setup",
-                                "10-12s: simple Start / Play Now CTA beat",
-                            ],
-                        },
-                    }
-                }
+    creative_strategy = {
+        "template_id": "custom_reference",
+        "landing_visual_reference": {
+            "source": "reference_image",
+            "status": "analyzed",
+            "palette": ["near-black navy background"],
+            "surface_style": ["brushed metal app surface"],
+            "gameplay_moment_archetypes": ["failed attempt and retry moment"],
+            "composition_cues": ["visible challenge setup with reward cue"],
+            "video_recipe": {
+                "duration_seconds": 12,
+                "beats": [
+                    "0-2s: metallic GAJA hook with visible challenge setup",
+                    "10-12s: simple Start / Play Now CTA beat",
+                ],
             },
-        }
-    )
+        },
+        "negative_style_cues": ["childlike puzzle blocks"],
+    }
 
     prompt = _storyboard_to_prompt(
         [
@@ -966,11 +955,11 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     )
 
     assert "Landing visual reference" in prompt
-    assert "dark premium mobile game lobby" in prompt
+    assert "brushed metal app surface" in prompt
     assert "near-black navy background" in prompt
     assert "failed attempt and retry moment" in prompt
     assert "visible challenge setup with reward cue" in prompt
-    assert "0-2s: dark neon GAJA lobby hook with visible challenge setup" in prompt
+    assert "0-2s: metallic GAJA hook with visible challenge setup" in prompt
     assert "10-12s: simple Start / Play Now CTA beat" in prompt
     assert "Avoid style cues: childlike puzzle blocks" in prompt
     prompt_text = prompt.casefold()
@@ -982,7 +971,7 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
 
 def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> None:
     creative_strategy = {
-        "template_id": "gaja_brand",
+        "template_id": "custom_reference",
         "first_frame": {
             "role": "hook",
             "visual_must_include": ["dark neon GAJA777 lobby"],
@@ -1027,7 +1016,7 @@ def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> N
 
 def test_video_storyboard_prompt_sanitizes_strategy_list_fields() -> None:
     creative_strategy = {
-        "template_id": "gaja_brand",
+        "template_id": "custom_reference",
         "first_frame": {
             "role": "hook",
             "visual_must_include": ["dark neon GAJA777 lobby"],
@@ -1267,15 +1256,12 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
         instructions=None,
     )
 
-    assert "dark neon app lobby" in storyboard.scenes[0].visual
-    assert "metallic GAJA wordmark" in storyboard.scenes[0].visual
-    assert "no visible brand-number text" in storyboard.scenes[0].visual
-    assert "no visible numeric suffix" in storyboard.scenes[0].visual
+    assert "dark neon app lobby" not in storyboard.scenes[0].visual
+    assert "metallic GAJA wordmark" not in storyboard.scenes[0].visual
+    assert "no visible brand-number text" not in storyboard.scenes[0].visual
+    assert "no visible numeric suffix" not in storyboard.scenes[0].visual
     assert "title treatment" not in storyboard.scenes[0].visual
-    assert "title styling" in storyboard.scenes[0].visual
-    assert "visible game challenge" in storyboard.scenes[0].visual
-    assert "player choice cue" in storyboard.scenes[0].visual
-    assert "premium neon game lobby" in storyboard.scenes[-1].visual
+    assert "premium neon game lobby" not in storyboard.scenes[-1].visual
     assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
 
 
@@ -1316,12 +1302,11 @@ async def test_mock_provider_uses_country_epic_gaja_storyboard() -> None:
         instructions=None,
     )
 
-    assert "original Indian epic guardian" in storyboard.scenes[0].visual
-    assert "mandala light geometry" in storyboard.scenes[0].visual
-    assert "metallic GAJA" in storyboard.scenes[0].visual
-    assert "no visible brand-number text" in storyboard.scenes[0].visual
-    assert "no overflow outside the image or video frame" in storyboard.scenes[0].visual
-    assert "premium neon game lobby" in storyboard.scenes[-1].visual
+    assert "original Indian epic guardian" not in storyboard.scenes[0].visual
+    assert "mandala light geometry" not in storyboard.scenes[0].visual
+    assert "metallic GAJA" not in storyboard.scenes[0].visual
+    assert "no visible brand-number text" not in storyboard.scenes[0].visual
+    assert "premium neon game lobby" not in storyboard.scenes[-1].visual
     combined = " ".join(scene.visual for scene in storyboard.scenes)
     for banned in ("777", "Luck", "casino", "slot", "jackpot", "cash", "coin", "recharge"):
         assert banned.lower() not in combined.lower()
@@ -1376,8 +1361,10 @@ async def test_mock_provider_gaja_video_avoids_banned_text_and_props() -> None:
         )
         for scene in storyboard.scenes
     )
-    assert "metallic GAJA" in combined
-    assert "no visible brand-number text" in combined
+    assert "metallic GAJA" not in combined
+    assert "no visible brand-number text" not in combined
+    assert "dark neon" not in combined.lower()
+    assert "premium neon" not in combined.lower()
     for banned in (
         "777",
         "Luck",

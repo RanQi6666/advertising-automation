@@ -191,7 +191,7 @@ def test_gaja_country_style_pack_changes_with_work_order_country() -> None:
         assert india_only not in style_text
 
 
-def test_plain_gaja_url_uses_domain_fallback_landing_visual_reference() -> None:
+def test_plain_gaja_url_does_not_use_builtin_landing_visual_reference() -> None:
     strategy = build_game_creative_strategy(
         {
             "product_name": "GAJA777",
@@ -200,7 +200,7 @@ def test_plain_gaja_url_uses_domain_fallback_landing_visual_reference() -> None:
     )
 
     assert strategy is not None
-    assert strategy["landing_visual_reference"]["source"] == "domain_fallback"
+    assert "landing_visual_reference" not in strategy
 
 
 def test_gaja_strategy_uses_landing_visual_reference() -> None:

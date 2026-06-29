@@ -670,6 +670,8 @@ def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:
 
 def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
     template_id = creative_strategy.get("template_id") or "unknown"
+    if template_id == "gaja_brand":
+        return ""
     first_frame = creative_strategy.get("first_frame")
     last_frame = creative_strategy.get("last_frame")
     motion_direction = creative_strategy.get("motion_direction")

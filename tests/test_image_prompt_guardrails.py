@@ -9,7 +9,10 @@ from backend.app.integrations.llm.mock_provider import (
     _mock_keyframe_role,
     _mock_v2_strategy_scene_visual,
 )
-from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
+from backend.app.integrations.llm.openai_provider import (
+    OpenAILLMProvider,
+    _creative_strategy_system_instruction,
+)
 from backend.app.schemas.ai import ImageBrief
 from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import (
@@ -81,6 +84,14 @@ def test_creative_safety_fallback_is_not_gaja_specific() -> None:
     assert "premium app lobby" in sanitized
     assert "start action" in sanitized
     assert not contains_creative_safety_risk(sanitized)
+
+
+def test_openai_creative_strategy_instruction_does_not_force_gaja_lobby_style() -> None:
+    instruction = _creative_strategy_system_instruction().casefold()
+
+    assert "for gaja_brand, use a dark premium neon game lobby" not in instruction
+    assert "dark premium neon game lobby" not in instruction
+    assert "dark neon app lobby" not in instruction
 
 
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
@@ -346,11 +357,11 @@ async def test_openai_image_brief_prompt_carries_country_concepts_and_layout_rul
     assert "auto-fit" in system
     assert "no overflow" in system
     assert "map keyframe group 1/2/3 to visual_concepts 1/2/3" in system
-    strategy = payload["storyboard_context"]["creative_strategy"]
-    assert strategy["country_style_pack"]["country_code"] == "IN"
-    assert len(strategy["visual_concepts"]) == 3
-    assert strategy["text_layout_rules"]["auto_fit"] is True
-    assert strategy["first_three_seconds"][0]["time_range"] == "0-1s"
+    assert "creative_strategy" not in payload["storyboard_context"]
+    payload_text = json.dumps(payload, ensure_ascii=False).casefold()
+    assert "india_mythic_neon_lobby" not in payload_text
+    assert "premium neon" not in payload_text
+    assert "dark neon" not in payload_text
 
 
 @pytest.mark.asyncio
@@ -410,18 +421,13 @@ async def test_openai_image_brief_payload_preserves_landing_visual_reference(
 
     payload = captured["payload"]
     assert isinstance(payload, dict)
-    strategy = payload["draft_metadata"]["creative_strategy"]
     payload_text = json.dumps(payload, ensure_ascii=False)
     assert "GAJA777" not in payload_text
     assert "777" not in payload_text
     assert "Register" not in payload_text
-    assert "metallic GAJA logo" in payload_text
-    assert "Start" in payload_text
-    assert strategy["landing_visual_reference"]["surface_style"] == [
-        "dark premium mobile game lobby"
-    ]
-    assert "negative_style_cues" in strategy
-    assert "video_recipe" in strategy
+    assert "dark premium mobile game lobby" not in payload_text
+    assert "dark neon" not in payload_text
+    assert "creative_strategy" not in payload["draft_metadata"]
     assert "landing visual reference" in captured["system"]
 
 
@@ -579,13 +585,10 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
         },
     )
 
-    assert "dark neon app lobby" in briefs[0].visual_direction
-    assert "metallic GAJA wordmark" in briefs[0].visual_direction
-    assert "no visible brand-number text" in briefs[0].visual_direction
-    assert "no visible numeric suffix" in briefs[0].visual_direction
-    assert "visible game challenge" in briefs[0].visual_direction
-    assert "premium neon game lobby" in briefs[1].visual_direction
-    assert "reward unlock cue" in briefs[1].visual_direction
+    assert "dark neon app lobby" not in briefs[0].visual_direction
+    assert "metallic GAJA wordmark" not in briefs[0].visual_direction
+    assert "no visible brand-number text" not in briefs[0].visual_direction
+    assert "premium neon game lobby" not in briefs[1].visual_direction
     assert briefs[0].short_text == "Start"
     brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
     for risky_term in (
@@ -599,6 +602,9 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
         "premium game cards",
         "card carousel",
         "end card",
+        "dark neon",
+        "premium neon",
+        "game lobby",
     ):
         assert risky_term not in brief_text
 
@@ -639,14 +645,13 @@ async def test_mock_image_briefs_map_keyframe_groups_to_country_visual_concepts(
     )
 
     directions = [brief.visual_direction for brief in briefs]
-    assert all("india_epic_guardian" in directions[index] for index in (0, 1))
-    assert all("india_royal_portal" in directions[index] for index in (2, 3))
-    assert all("india_mythic_neon_lobby" in directions[index] for index in (4, 5))
-    assert "first-frame" in directions[0]
-    assert "last-frame" in directions[1]
     combined = " ".join(directions)
-    assert "original Indian epic guardian" in combined
-    assert "metallic GAJA" in combined
+    assert "india_epic_guardian" not in combined
+    assert "india_royal_portal" not in combined
+    assert "india_mythic_neon_lobby" not in combined
+    assert "original Indian epic guardian" not in combined
+    assert "premium neon" not in combined.lower()
+    assert "dark neon" not in combined.lower()
     for banned in BANNED_VISIBLE_TEXT:
         assert banned not in combined
     for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "recharge"):
@@ -687,8 +692,10 @@ async def test_mock_image_briefs_use_low_text_gaja_direction() -> None:
     )
 
     combined = " ".join(brief.visual_direction for brief in briefs)
-    assert "metallic GAJA" in combined
-    assert "no visible brand-number text" in combined
+    assert "metallic GAJA" not in combined
+    assert "no visible brand-number text" not in combined
+    assert "dark neon" not in combined.lower()
+    assert "premium neon" not in combined.lower()
     for banned in BANNED_VISIBLE_TEXT:
         assert banned not in combined
 
@@ -733,8 +740,8 @@ async def test_mock_image_briefs_filter_risky_visual_reference_strings() -> None
     briefs = await provider.generate_image_briefs(draft=draft, count=1, size="9:16")
 
     visual_direction = briefs[0].visual_direction.lower()
-    assert "brushed metal panels" in visual_direction
-    assert "near-black navy background" in visual_direction
+    assert "brushed metal panels" not in visual_direction
+    assert "near-black navy background" not in visual_direction
     assert "casino floor lighting" not in visual_direction
     assert "slot machine reflections" not in visual_direction
     assert "cash gold gradient" not in visual_direction

@@ -27,7 +27,7 @@ class FakeAsyncClient:
         return FakeResponse()
 
 
-async def test_fetch_snapshot_stores_gaja_visual_reference(monkeypatch) -> None:
+async def test_fetch_snapshot_does_not_store_gaja_visual_reference(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.app.services.landing_page_service.httpx.AsyncClient",
         FakeAsyncClient,
@@ -45,8 +45,5 @@ async def test_fetch_snapshot_stores_gaja_visual_reference(monkeypatch) -> None:
         metadata={"reference_images": ["C:/temp/gaja-reference.png"]},
     )
 
-    visual_reference = snapshot.extracted_data["visual_reference"]
-    assert visual_reference["source"] == "reference_image"
-    assert visual_reference["status"] == "analyzed"
-    assert "dark premium mobile game lobby" in visual_reference["surface_style"]
-    assert snapshot_to_context(snapshot)["extracted_data"]["visual_reference"] == visual_reference
+    assert "visual_reference" not in snapshot.extracted_data
+    assert "visual_reference" not in snapshot_to_context(snapshot)["extracted_data"]

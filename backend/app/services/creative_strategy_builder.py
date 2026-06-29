@@ -19,7 +19,6 @@ GAME_KEYWORDS = (
     "quest",
     "runner",
     "mini game",
-    "game lobby",
     "first_recharge",
 )
 ECOMMERCE_KEYWORDS = (
@@ -189,6 +188,8 @@ def build_creative_strategy(
 
 def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
+        return None
+    if value.get("template_id") == "gaja_brand":
         return None
     allowed = (
         "schema_version",
@@ -636,7 +637,7 @@ def _market_game_visual_world(country_code: str) -> list[str]:
     return [
         "localized cinematic fantasy world",
         "high-detail challenge arena",
-        "clear app-lobby transition for the final CTA",
+        "clear playable challenge transition for the final CTA",
     ]
 
 
@@ -696,7 +697,7 @@ def _gameplay_process(country_code: str, age_bucket: str) -> dict[str, Any]:
         "player_actions": player_actions,
         "progression_feedback": progression_feedback,
         "ending_transition": (
-            "camera races into the branded game lobby with a Start or Play Now CTA"
+            "camera races into the branded game world with a Start or Play Now CTA"
         ),
     }
 

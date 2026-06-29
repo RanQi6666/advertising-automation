@@ -5,59 +5,26 @@ from backend.app.services.landing_visual_reference import (
 )
 
 GAJA_URL = "https://www.gaja777.game/#/?invite=YBG71118&register=true"
-FIXED_CARD_STYLE_TERMS = (
-    "premium cards",
-    "game cards",
-    "card carousel",
-    "fast carousel",
-    "end card",
-    "hero card",
-    "jewel card",
-    "game-card",
-)
 
 
-def _reference_text(reference: dict) -> str:
-    return str(reference).casefold()
-
-
-def test_gaja_domain_returns_premium_visual_fallback() -> None:
-    reference = build_landing_visual_reference(GAJA_URL)
-
-    assert reference is not None
-    assert reference["source"] == "domain_fallback"
-    assert reference["status"] == "fallback"
-    assert "near-black navy background" in reference["palette"]
-    assert "dark premium mobile game lobby" in reference["surface_style"]
-    assert "metallic GAJA logo styling" in reference["surface_style"]
-    assert "original_game_card_archetypes" not in reference
-    assert "visible challenge setup" in reference["gameplay_moment_archetypes"]
-    assert "failed attempt and retry moment" in reference["gameplay_moment_archetypes"]
-    assert "metallic GAJA logo visible in the first frame" in reference["composition_cues"]
-    assert "restricted_review_props" in reference["negative_style_cues"]
-    assert "financial_prop_cues" in reference["negative_style_cues"]
-    assert "outcome_claim_cues" in reference["negative_style_cues"]
-    assert reference["video_recipe"]["duration_seconds"] == 12
-    assert reference["video_recipe"]["beats"][0].startswith("0-2s")
-    assert "GAJA lobby hook" in reference["video_recipe"]["beats"][0]
-    assert not any(term in _reference_text(reference) for term in FIXED_CARD_STYLE_TERMS)
-    assert "777" not in str(reference)
+def test_gaja_domain_returns_no_builtin_visual_reference() -> None:
+    assert build_landing_visual_reference(GAJA_URL) is None
 
 
 def test_lookalike_host_does_not_match_gaja_domain() -> None:
     assert build_landing_visual_reference("https://badgaja777.game") is None
 
 
-def test_gaja_host_with_port_still_matches() -> None:
-    reference = build_landing_visual_reference(
-        "https://www.gaja777.game:443/#/?invite=YBG71118&register=true"
+def test_gaja_host_with_port_returns_no_builtin_visual_reference() -> None:
+    assert (
+        build_landing_visual_reference(
+            "https://www.gaja777.game:443/#/?invite=YBG71118&register=true"
+        )
+        is None
     )
 
-    assert reference is not None
-    assert reference["source"] == "domain_fallback"
 
-
-def test_reference_images_mark_source_without_network_fetch() -> None:
+def test_reference_images_do_not_create_builtin_gaja_reference() -> None:
     reference = build_landing_visual_reference(
         GAJA_URL,
         metadata={
@@ -67,13 +34,7 @@ def test_reference_images_mark_source_without_network_fetch() -> None:
         },
     )
 
-    assert reference is not None
-    assert reference["source"] == "reference_image"
-    assert reference["status"] == "analyzed"
-    assert reference["reference_image_count"] == 1
-    assert reference["analysis_note"] == (
-        "Using operator-provided landing page screenshots as visual style anchors."
-    )
+    assert reference is None
 
 
 def test_non_gaja_without_reference_images_returns_none() -> None:
@@ -90,7 +51,7 @@ def test_non_gaja_reference_images_do_not_return_gaja_reference() -> None:
 
 
 def test_extract_landing_visual_reference_accepts_snapshot_context_shapes() -> None:
-    reference = build_landing_visual_reference(GAJA_URL)
+    reference = {"source": "manual_reference", "surface_style": ["operator supplied"]}
     context = {"extracted_data": {"visual_reference": reference}}
 
     assert extract_landing_visual_reference(context) == reference
@@ -99,7 +60,7 @@ def test_extract_landing_visual_reference_accepts_snapshot_context_shapes() -> N
 
 
 def test_merge_landing_visual_reference_copies_strategy() -> None:
-    reference = build_landing_visual_reference(GAJA_URL)
+    reference = {"source": "manual_reference", "surface_style": ["operator supplied"]}
     strategy = {"template_id": "gaja_brand", "brand": {"display_name": "GAJA777"}}
 
     merged = merge_landing_visual_reference(

@@ -1069,23 +1069,14 @@ def _mock_strategy_image_hint(
             f"visible brand-number text.{concept_hint}{text_layout_hint}"
         )
     if template_id == "gaja_brand":
-        if role == "last_frame":
-            return (
-                " Follow creative_strategy gaja_brand: last-frame premium neon game "
-                "lobby with metallic GAJA logo, reward unlock cue, Start / Play Now CTA, "
-                "orange button, "
-                f"and no visible numeric suffix.{concept_hint}{text_layout_hint}"
-            )
-        return (
-            " Follow creative_strategy gaja_brand: first-frame dark neon app lobby "
-            "with metallic GAJA wordmark, no visible numeric suffix, no visible "
-            f"brand-number text, and visible game challenge.{concept_hint}{text_layout_hint}"
-        )
+        return ""
     return f" Follow creative_strategy {template_id}."
 
 
 def _mock_visual_reference_hint(creative_strategy: dict[str, Any] | None) -> str:
     if not isinstance(creative_strategy, dict):
+        return ""
+    if creative_strategy.get("template_id") == "gaja_brand":
         return ""
     reference = creative_strategy.get("landing_visual_reference")
     if not isinstance(reference, dict):
@@ -1243,18 +1234,7 @@ def _mock_strategy_scene_visual(
             f"{concept_visual} {layout_hint}".strip()
         )
     if template_id == "gaja_brand":
-        if role == "last_frame":
-            return (
-                "End on a premium neon game lobby with metallic GAJA logo, Start CTA, "
-                "orange button, no visible numeric suffix, and no visible brand-number text. "
-                f"{concept_visual} {layout_hint}".strip()
-            )
-        return (
-            "Open with a dark neon app lobby, metallic GAJA wordmark, metallic title styling, "
-            "visible game challenge, player choice cue, cinematic depth, no visible numeric "
-            "suffix, and no visible "
-            f"brand-number text. {concept_visual} {layout_hint}".strip()
-        )
+        return fallback
     return fallback
 
 
