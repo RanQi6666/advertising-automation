@@ -14,6 +14,17 @@ function componentSource(name: string, nextName: string): string {
   return appSource.slice(start, end);
 }
 
+function asyncFunctionSource(name: string, nextName: string): string {
+  const start = appSource.indexOf(`async function ${name}(`);
+  const asyncEnd = appSource.indexOf(`async function ${nextName}(`);
+  const syncEnd = appSource.indexOf(`function ${nextName}(`);
+  const endCandidates = [asyncEnd, syncEnd].filter((index) => index > start);
+  const end = Math.min(...endCandidates);
+  assert.ok(start > 0, `${name} function should exist`);
+  assert.ok(end > start, `${nextName} function should follow ${name}`);
+  return appSource.slice(start, end);
+}
+
 test("review-facing topic and copy labels are Chinese", () => {
   assert.match(appSource, /<span className="topic-kicker">选题方向<\/span>/);
   assert.doesNotMatch(appSource, /<span className="topic-kicker">Topic Direction<\/span>/);
@@ -46,6 +57,24 @@ test("style and camera guidance is edited only in the image script console", () 
   assert.doesNotMatch(videosViewSource, /htmlFor="video-instructions"/);
   assert.doesNotMatch(videosViewSource, /id="video-instructions"/);
   assert.doesNotMatch(videosViewSource, /placeholder="视频风格或镜头要求"/);
+});
+
+test("video script generation does not depend on selected reference images", () => {
+  const generateSource = asyncFunctionSource(
+    "handleGenerateVideoStoryboard",
+    "handleRewriteVideoStoryboard",
+  );
+  const rewriteSource = asyncFunctionSource("handleRewriteVideoStoryboard", "handleCreateVideo");
+  const createVideoSource = asyncFunctionSource("handleCreateVideo", "selectedCreativeIdsForVideo");
+
+  assert.match(generateSource, /api\.streamVideoStoryboard\(\s*selectedCampaign\.id,\s*\[\],/s);
+  assert.doesNotMatch(
+    generateSource,
+    /api\.streamVideoStoryboard\(\s*selectedCampaign\.id,\s*sourceIds,/s,
+  );
+  assert.match(rewriteSource, /creativeAssetIds:\s*\[\]/);
+  assert.doesNotMatch(rewriteSource, /creativeAssetIds:\s*sourceIds/);
+  assert.match(createVideoSource, /creativeAssetIds:\s*sourceIds/);
 });
 
 test("image-page script console textareas are readable on a light editing surface", () => {

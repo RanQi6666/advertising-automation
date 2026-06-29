@@ -745,6 +745,7 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     market = creative_strategy.get("market_context")
     audience = creative_strategy.get("audience_lens")
     video_guidance = creative_strategy.get("video_guidance")
+    market_game_style_pack = creative_strategy.get("market_game_style_pack")
     topic_plan = creative_strategy.get("topic_angle_plan")
     guardrails = creative_strategy.get("compliance_guardrails")
 
@@ -809,6 +810,10 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
                 if safe_values:
                     lines.append(f"{label}: {'; '.join(safe_values)}")
 
+    game_style_block = _market_game_style_pack_summary(market_game_style_pack)
+    if game_style_block:
+        lines.append(game_style_block)
+
     if isinstance(guardrails, list) and guardrails:
         safe_guardrails = _brand_safe_prompt_list(guardrails[:6])
         if safe_guardrails:
@@ -843,6 +848,90 @@ def _country_style_pack_summary(value: Any) -> str:
         if safe_guardrails:
             parts.append(f"cultural guardrails: {'; '.join(safe_guardrails)}")
     return " | ".join(part for part in parts if part.strip())
+
+
+def _market_game_style_pack_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    code = _brand_safe_prompt_text(str(value.get("country_code") or ""))
+    label = _brand_safe_prompt_text(str(value.get("country_label") or ""))
+    parts = [f"Market game style pack: {code} {label}".strip()]
+
+    interests = _brand_safe_prompt_list(_list_value(value.get("game_interest_hypothesis"))[:5])
+    if interests:
+        parts.append(f"Game interest hypothesis: {', '.join(interests)}")
+
+    archetypes: list[str] = []
+    visual_language: list[str] = []
+    aaa = value.get("aaa_game_inspiration")
+    if isinstance(aaa, dict):
+        archetypes = _brand_safe_prompt_list(_list_value(aaa.get("genre_archetypes"))[:4])
+        visual_language = _brand_safe_prompt_list(_list_value(aaa.get("visual_language"))[:4])
+    if archetypes or visual_language:
+        pieces = []
+        if archetypes:
+            pieces.append(f"genre archetypes {', '.join(archetypes)}")
+        if visual_language:
+            pieces.append(f"visual language {', '.join(visual_language)}")
+        parts.append(f"AAA-style inspiration: {'; '.join(pieces)}")
+
+    visual_world = _brand_safe_prompt_list(_list_value(value.get("visual_world"))[:5])
+    if visual_world:
+        parts.append(f"Visual world: {', '.join(visual_world)}")
+
+    gameplay = value.get("gameplay_process")
+    gameplay_block = _gameplay_process_summary(gameplay)
+    if gameplay_block:
+        parts.append(gameplay_block)
+
+    cultural = value.get("cultural_safety")
+    cultural_block = _cultural_safety_summary(cultural)
+    if cultural_block:
+        parts.append(cultural_block)
+
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _gameplay_process_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    pieces: list[str] = []
+    for key, label in (
+        ("player_goal", "player goal"),
+        ("opening_conflict", "opening conflict"),
+        ("ending_transition", "ending transition"),
+    ):
+        text = _brand_safe_prompt_text(str(value.get(key) or ""))
+        if text:
+            pieces.append(f"{label}: {text}")
+
+    actions = _brand_safe_prompt_list(_list_value(value.get("player_actions"))[:5])
+    if actions:
+        pieces.append(f"player actions: {', '.join(actions)}")
+
+    feedback = _brand_safe_prompt_list(_list_value(value.get("progression_feedback"))[:5])
+    if feedback:
+        pieces.append(f"progression feedback: {', '.join(feedback)}")
+
+    if not pieces:
+        return ""
+    return (
+        "Gameplay process: show the player actively playing the game; "
+        + "; ".join(pieces)
+    )
+
+
+def _cultural_safety_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    allowed = _brand_safe_prompt_list(_list_value(value.get("allowed"))[:4])
+    avoid = _brand_safe_prompt_list(_list_value(value.get("avoid"))[:5])
+    pieces = []
+    if allowed:
+        pieces.append(f"allowed {', '.join(allowed)}")
+    if avoid:
+        pieces.append(f"avoid {', '.join(avoid)}")
+    return f"Cultural safety: {'; '.join(pieces)}" if pieces else ""
 
 
 def _visual_concepts_summary(value: Any) -> str:
@@ -916,6 +1005,10 @@ def _first_three_seconds_summary(value: Any) -> str:
     if not beats:
         return ""
     return f"First 3 seconds hook: {'; '.join(beats)}"
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _strategy_frame_summary(value: Any) -> str:
@@ -1059,7 +1152,13 @@ def _strategy_from_metadata(metadata: Any) -> dict | None:
 
 def _ensure_storyboard_source_asset_notes(text: str, assets: list[CreativeAsset]) -> str:
     asset_ids = [asset.id for asset in assets if asset.id]
-    if not asset_ids or "No source image provided" not in text:
+    if not asset_ids:
+        return text
+    empty_reference_markers = (
+        "No source image provided",
+        "No reference image required",
+    )
+    if not any(marker in text for marker in empty_reference_markers):
         return text
     source_note = ", ".join(asset_ids)
     return text.replace(
@@ -1067,6 +1166,12 @@ def _ensure_storyboard_source_asset_notes(text: str, assets: list[CreativeAsset]
         f"Source image id notes: {source_note}.",
     ).replace(
         "Source image id notes: No source image provided",
+        f"Source image id notes: {source_note}",
+    ).replace(
+        "Source image id notes: No reference image required.",
+        f"Source image id notes: {source_note}.",
+    ).replace(
+        "Source image id notes: No reference image required",
         f"Source image id notes: {source_note}",
     )
 

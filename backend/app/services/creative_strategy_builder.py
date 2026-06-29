@@ -164,7 +164,7 @@ def build_creative_strategy(
     audience_lens = _audience_lens(context)
     vertical, classification = _classify_vertical(context)
     topic_angle_plan = _topic_angle_plan(vertical)
-    return {
+    strategy = {
         "schema_version": CREATIVE_STRATEGY_SCHEMA_VERSION,
         "vertical": vertical,
         "classification": classification,
@@ -176,6 +176,15 @@ def build_creative_strategy(
         "video_guidance": _video_guidance(vertical),
         "compliance_guardrails": _compliance_guardrails(vertical),
     }
+    market_game_style_pack = _market_game_style_pack(
+        context=context,
+        market_context=market_context,
+        audience_lens=audience_lens,
+        vertical=vertical,
+    )
+    if market_game_style_pack:
+        strategy["market_game_style_pack"] = market_game_style_pack
+    return strategy
 
 
 def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
@@ -191,6 +200,7 @@ def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "copy_guidance",
         "image_guidance",
         "video_guidance",
+        "market_game_style_pack",
         "compliance_guardrails",
         # legacy keys remain allowed so older metadata still works downstream
         "template_id",
@@ -449,6 +459,293 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
         "middle": "Show product use and visible value cue.",
         "ending": "Close with offer, proof, or clear next step.",
     }
+
+
+def _market_game_style_pack(
+    *,
+    context: Mapping[str, Any],
+    market_context: Mapping[str, Any],
+    audience_lens: Mapping[str, Any],
+    vertical: str,
+) -> dict[str, Any] | None:
+    if vertical != "game":
+        return None
+
+    country_code = _string_value(market_context.get("country_code")) or "US"
+    country_label = _string_value(market_context.get("country")) or country_code
+    gender = _normalized_audience_label(audience_lens.get("gender"), fallback="All")
+    age_range = _string_value(audience_lens.get("age_range")) or "All"
+    age_bucket = _game_age_bucket(age_range)
+    game_interest_hypothesis = _game_interest_hypothesis(age_bucket)
+    gender_lens = _gender_game_lens(gender)
+    if gender_lens:
+        game_interest_hypothesis.append(gender_lens)
+
+    preferred_game_archetypes = _preferred_game_archetypes(age_bucket)
+    visual_world = _market_game_visual_world(country_code)
+    gameplay_process = _gameplay_process(country_code, age_bucket)
+    cultural_safety = _market_game_cultural_safety(country_code)
+
+    return {
+        "source": "system_inferred",
+        "country_code": country_code,
+        "country_label": country_label,
+        "gender": gender,
+        "age_range": age_range,
+        "audience_summary": (
+            f"Internal lens only: {country_label}, {gender}, {age_range}; adapt pacing, "
+            "visual density, and challenge clarity without stating these traits in ad copy."
+        ),
+        "game_interest_hypothesis": _dedupe(game_interest_hypothesis),
+        "preferred_game_archetypes": preferred_game_archetypes,
+        "aaa_game_inspiration": {
+            "genre_archetypes": preferred_game_archetypes[:3],
+            "visual_language": [
+                "AAA-style cinematic camera movement",
+                "hero entrance into a high-detail fantasy arena",
+                "boss-pressure encounter without gore",
+                "skill burst VFX and mission-complete reward reveal",
+            ],
+            "must_avoid": [
+                "licensed game names, logos, characters, or copied UI",
+                "graphic violence or gore",
+                "regulated gambling or monetary reward mechanics",
+                "real religious figures, sacred content, or political claims",
+            ],
+        },
+        "visual_world": visual_world,
+        "gameplay_process": gameplay_process,
+        "cultural_safety": cultural_safety,
+        "confidence": "medium",
+        "inference_basis": _market_game_inference_basis(context),
+    }
+
+
+def _game_age_bucket(age_range: str) -> str:
+    numbers = _numbers_from_text(age_range)
+    if not numbers:
+        return "all"
+    lower = numbers[0]
+    upper = numbers[1] if len(numbers) > 1 else lower
+    if lower <= 24 and upper <= 34:
+        return "18-24"
+    if lower <= 34 and upper <= 44:
+        return "25-34"
+    if lower >= 35:
+        return "35+"
+    return "all"
+
+
+def _numbers_from_text(value: str) -> list[int]:
+    numbers: list[int] = []
+    current = ""
+    for char in _string_value(value):
+        if char.isdigit():
+            current += char
+            continue
+        if current:
+            numbers.append(int(current))
+            current = ""
+    if current:
+        numbers.append(int(current))
+    return numbers
+
+
+def _game_interest_hypothesis(age_bucket: str) -> list[str]:
+    if age_bucket == "18-24":
+        return [
+            "fast challenge and retry loop",
+            "competitive achievement without outcome promises",
+            "cinematic action energy",
+        ]
+    if age_bucket == "25-34":
+        return [
+            "progression mastery",
+            "strategic choice and upgrade planning",
+            "premium visual escape",
+        ]
+    if age_bucket == "35+":
+        return [
+            "clear rules and simple start",
+            "low-friction progression",
+            "readable reward reveal",
+        ]
+    return [
+        "clear gameplay challenge",
+        "simple player choice",
+        "visible progress and unlock payoff",
+    ]
+
+
+def _gender_game_lens(gender: str) -> str:
+    normalized = gender.strip().casefold()
+    if normalized in {"male", "men", "man"}:
+        return "bold mission pressure with high-contrast action pacing"
+    if normalized in {"female", "women", "woman"}:
+        return "stylish character agency with readable progression choices"
+    return ""
+
+
+def _preferred_game_archetypes(age_bucket: str) -> list[str]:
+    if age_bucket == "18-24":
+        return [
+            "open-world action adventure",
+            "cinematic RPG progression",
+            "skill-based mission challenge",
+        ]
+    if age_bucket == "25-34":
+        return [
+            "cinematic RPG progression",
+            "strategy adventure progression",
+            "premium quest hub exploration",
+        ]
+    if age_bucket == "35+":
+        return [
+            "guided puzzle adventure",
+            "clear mission progression",
+            "light strategy challenge",
+        ]
+    return [
+        "cinematic RPG progression",
+        "mission-based adventure",
+        "guided challenge run",
+    ]
+
+
+def _market_game_visual_world(country_code: str) -> list[str]:
+    if country_code == "IN":
+        return [
+            "culture-inspired epic fantasy",
+            "royal sandstone archway game portal",
+            "festival-like gold lighting without sacred objects",
+            "monsoon storm sky over a stylized fortress",
+            "original fantasy guardian silhouette",
+        ]
+    if country_code == "SG":
+        return [
+            "sleek urban neon mission hub",
+            "clean high-tech challenge arena",
+            "rain-lit city depth with premium VFX",
+        ]
+    if country_code == "US":
+        return [
+            "large-scale cinematic mission world",
+            "high-detail action arena",
+            "comic-book energy without copied characters",
+        ]
+    return [
+        "localized cinematic fantasy world",
+        "high-detail challenge arena",
+        "clear app-lobby transition for the final CTA",
+    ]
+
+
+def _gameplay_process(country_code: str, age_bucket: str) -> dict[str, Any]:
+    if country_code == "IN":
+        opening_conflict = (
+            "a towering original guardian blocks the fortress gate with a timing challenge"
+        )
+        player_goal = "reach the glowing fortress gate and unlock the next arena"
+    else:
+        opening_conflict = "a high-pressure mission gate blocks progress"
+        player_goal = "complete the challenge path and unlock the next arena"
+
+    if age_bucket == "18-24":
+        player_actions = [
+            "dodge an energy wave",
+            "choose the right skill",
+            "retry the timing window",
+            "chain a clean combo",
+        ]
+        progression_feedback = [
+            "progress bar fills",
+            "skill icon upgrades",
+            "new path opens",
+            "mission-complete flash",
+        ]
+    elif age_bucket == "25-34":
+        player_actions = [
+            "scan the arena route",
+            "choose a strategy skill",
+            "upgrade the hero loadout",
+            "clear the mission gate",
+        ]
+        progression_feedback = [
+            "power meter rises",
+            "route marker unlocks",
+            "new arena preview opens",
+            "reward panel resolves into CTA",
+        ]
+    else:
+        player_actions = [
+            "tap to start",
+            "follow a clear path",
+            "make one readable choice",
+            "complete the challenge",
+        ]
+        progression_feedback = [
+            "step-by-step progress lights up",
+            "next path opens",
+            "unlock glow appears",
+            "CTA panel settles cleanly",
+        ]
+
+    return {
+        "player_goal": player_goal,
+        "opening_conflict": opening_conflict,
+        "player_actions": player_actions,
+        "progression_feedback": progression_feedback,
+        "ending_transition": (
+            "camera races into the branded game lobby with a Start or Play Now CTA"
+        ),
+    }
+
+
+def _market_game_cultural_safety(country_code: str) -> dict[str, list[str]]:
+    if country_code == "IN":
+        return {
+            "allowed": [
+                "India-inspired color, architecture, textile, and festival-lighting cues",
+                "original fantasy guardians and symbolic light patterns",
+                "fictional worldbuilding rather than religious depiction",
+            ],
+            "avoid": [
+                "real deity names or real religious figures",
+                "prayers, worship, sacrifices, or ritual reenactments",
+                "scripture, mantras, sacred text, or religious claims",
+                "caste, politics, or real community identity claims",
+            ],
+        }
+    return {
+        "allowed": [
+            "local color, architecture, and entertainment cues as fictional worldbuilding",
+            "original characters and symbolic light patterns",
+        ],
+        "avoid": [
+            "real religious figures or sacred symbols",
+            "political or real community identity claims",
+            "licensed game IP, copied characters, logos, or UI",
+        ],
+    }
+
+
+def _market_game_inference_basis(context: Mapping[str, Any]) -> list[str]:
+    basis = ["country", "audience_lens", "game vertical classification"]
+    text = _context_text(context)
+    if "gaja" in text or "game_tld" in _game_signals(context, text):
+        basis.append("game landing signal")
+    if any(keyword in text for keyword in ("challenge", "level", "quest", "play")):
+        basis.append("gameplay brief signal")
+    return basis
+
+
+def _normalized_audience_label(value: Any, *, fallback: str) -> str:
+    text = _string_value(value).strip()
+    return text if text else fallback
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in values if item))
 
 
 def _compliance_guardrails(vertical: str) -> list[str]:

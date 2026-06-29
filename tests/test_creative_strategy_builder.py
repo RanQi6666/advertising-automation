@@ -87,6 +87,82 @@ def test_builds_game_strategy_without_gaja_default_template() -> None:
     assert "guaranteed winning" in guardrail_text
 
 
+def test_builds_india_game_market_style_pack_for_male_18_24() -> None:
+    strategy = build_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "work_order": {
+                "parsed_fields": {
+                    "gender": "Male",
+                    "age_min": 18,
+                    "age_max": 24,
+                    "audience_description_raw": "India male 18-24 game interest",
+                }
+            },
+            "brief": "Create a cinematic game ad with a playable challenge process.",
+        },
+        today=date(2026, 6, 29),
+    )
+
+    pack = strategy["market_game_style_pack"]
+
+    assert strategy["vertical"] == "game"
+    assert pack["source"] == "system_inferred"
+    assert pack["country_code"] == "IN"
+    assert pack["country_label"] == "India"
+    assert pack["gender"] == "Male"
+    assert pack["age_range"] == "18-24"
+    assert "fast challenge and retry loop" in pack["game_interest_hypothesis"]
+    assert "open-world action adventure" in pack["aaa_game_inspiration"]["genre_archetypes"]
+    assert "cinematic RPG progression" in pack["aaa_game_inspiration"]["genre_archetypes"]
+    assert "culture-inspired epic fantasy" in pack["visual_world"]
+    assert pack["gameplay_process"]["player_goal"]
+    assert pack["gameplay_process"]["opening_conflict"]
+    assert pack["gameplay_process"]["player_actions"]
+    assert pack["gameplay_process"]["progression_feedback"]
+    assert pack["gameplay_process"]["ending_transition"]
+    assert "real deity names or real religious figures" in pack["cultural_safety"]["avoid"]
+    assert (
+        "prayers, worship, sacrifices, or ritual reenactments"
+        in pack["cultural_safety"]["avoid"]
+    )
+    assert (
+        "scripture, mantras, sacred text, or religious claims"
+        in pack["cultural_safety"]["avoid"]
+    )
+
+    positive_text = " ".join(
+        [
+            str(pack["game_interest_hypothesis"]),
+            str(pack["preferred_game_archetypes"]),
+            str(pack["aaa_game_inspiration"]),
+            str(pack["visual_world"]),
+            str(pack["gameplay_process"]),
+        ]
+    ).casefold()
+    for banned in (
+        "ganesha",
+        "shiva",
+        "krishna",
+        "prayer",
+        "worship",
+        "sacrifice",
+        "ritual",
+        "scripture",
+        "casino",
+        "slot",
+        "jackpot",
+        "cash",
+        "coin",
+        "recharge",
+        "deposit",
+        "withdraw",
+    ):
+        assert banned not in positive_text
+
+
 def test_ecommerce_strategy_does_not_receive_game_specific_guardrails() -> None:
     strategy = build_creative_strategy(
         {
@@ -193,5 +269,6 @@ def test_compact_strategy_keeps_v2_fields_and_drops_large_unknown_blob() -> None
     assert compact["schema_version"] == "creative_strategy.v2"
     assert compact["vertical"] == "game"
     assert "topic_angle_plan" in compact
+    assert "market_game_style_pack" in compact
     assert "raw_content" not in compact
     assert "SHOULD NOT LEAK" not in str(compact)

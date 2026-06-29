@@ -29,6 +29,7 @@ from backend.app.services.game_creative_strategy import build_game_creative_stra
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import (
     VideoService,
+    _ensure_storyboard_source_asset_notes,
     _prompt_with_creative_strategy,
     _redact_provider_request_payload,
     _resolve_video_source_image_url,
@@ -420,6 +421,26 @@ async def test_video_service_done_text_replaces_empty_source_notes_when_assets_s
     await engine.dispose()
 
 
+def test_video_service_replaces_no_reference_image_required_when_assets_selected() -> None:
+    asset = CreativeAsset(
+        id="asset-1",
+        campaign_id="campaign-1",
+        draft_id="draft-1",
+        prompt="Approved reference frame.",
+        metadata_json={},
+    )
+
+    text = (
+        "Scene 1 | 0.0-2.0s\n"
+        "Source image id notes: No reference image required.\n"
+    )
+
+    fixed = _ensure_storyboard_source_asset_notes(text, [asset])
+
+    assert "Source image id notes: asset-1." in fixed
+    assert "No reference image required" not in fixed
+
+
 @pytest.mark.asyncio
 async def test_video_context_merges_latest_landing_visual_reference_snapshot() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -665,6 +686,65 @@ def test_video_storyboard_prompt_includes_builder_video_guidance() -> None:
     assert "Lead with a visible challenge or failed attempt." in prompt
     assert "Show progression, choice, or improvement." in prompt
     assert "Resolve with reward, unlock, or next-action payoff." in prompt
+
+
+def test_video_storyboard_prompt_includes_market_game_style_pack_gameplay_process() -> None:
+    creative_strategy = build_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "work_order": {
+                "parsed_fields": {
+                    "gender": "Male",
+                    "age_min": 18,
+                    "age_max": 24,
+                }
+            },
+            "brief": "Create a cinematic game ad with a playable challenge process.",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 4,
+                "visual": "Open with a cinematic playable challenge.",
+                "subtitle": "Start",
+            },
+            {
+                "scene_index": 2,
+                "start_second": 4,
+                "end_second": 8,
+                "visual": "Show the player retrying with a better move.",
+                "subtitle": "Try Now",
+            },
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "Market game style pack: IN India" in prompt
+    assert "Game interest hypothesis:" in prompt
+    assert "fast challenge and retry loop" in prompt
+    assert "AAA-style inspiration:" in prompt
+    assert "open-world action adventure" in prompt
+    assert "cinematic RPG progression" in prompt
+    assert "Gameplay process:" in prompt
+    assert "player goal" in prompt
+    assert "opening conflict" in prompt
+    assert "player actions" in prompt
+    assert "progression feedback" in prompt
+    assert "ending transition" in prompt
+    assert "culture-inspired epic fantasy" in prompt
+    assert "Cultural safety:" in prompt
+    assert "real deity names or real religious figures" in prompt
+    assert "scripture, mantras, sacred text, or religious claims" in prompt
+    strategy_section = prompt.split("Market game style pack:", 1)[1]
+    for banned in ("Ganesha", "Shiva", "Krishna", "casino", "slot", "jackpot", "cash"):
+        assert banned not in strategy_section
+    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 @pytest.mark.asyncio
@@ -969,8 +1049,10 @@ def test_video_storyboard_text_prompt_requires_selected_source_image_ids(
     assert "every scene block must include `Source image id notes:`" in prompt
     assert "one or more exact ids from `selected_asset_ids`" in prompt
     assert "Never write `No source image provided` when assets is non-empty" in prompt
+    assert "Selected images are optional for script generation" in prompt
+    assert "Use selected images only when assets are provided" in prompt
     assert (
-        "If assets is empty, write `Source image id notes: No source image provided.`"
+        "If assets is empty, write `Source image id notes: No reference image required.`"
         in prompt
     )
 
@@ -1059,6 +1141,59 @@ async def test_mock_provider_v2_storyboard_respects_short_duration() -> None:
     assert storyboard.duration_seconds == 6
     assert storyboard.scenes[-1].end_second == 6
     assert len(storyboard.scenes) <= 3
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_v2_game_storyboard_uses_market_gameplay_process() -> None:
+    provider = MockLLMProvider()
+    strategy = build_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "work_order": {
+                "parsed_fields": {
+                    "gender": "Male",
+                    "age_min": 18,
+                    "age_max": 24,
+                }
+            },
+            "brief": "Create a cinematic game ad with a playable challenge process.",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA campaign",
+        product_name="GAJA777",
+        audience_description="India male 18-24",
+        metadata_json={"creative_strategy": strategy},
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Create a short game challenge ad.",
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    storyboard = await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=draft,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": strategy},
+        instructions=None,
+    )
+
+    combined = " ".join(scene.visual for scene in storyboard.scenes)
+    assert "open-world action adventure" in combined
+    assert "fast challenge and retry loop" in combined
+    assert "player action:" in combined
+    assert "progression feedback:" in combined
+    assert "ending transition:" in combined
+    for banned in ("Ganesha", "Shiva", "Krishna", "casino", "slot", "jackpot", "cash"):
+        assert banned.lower() not in combined.lower()
 
 
 @pytest.mark.asyncio

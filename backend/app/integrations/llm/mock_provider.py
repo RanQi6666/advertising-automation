@@ -1043,6 +1043,9 @@ def _mock_strategy_image_hint(
             direction += f": {hook_text}."
         else:
             direction += "."
+        market_game_hint = _mock_market_game_image_hint(creative_strategy)
+        if market_game_hint:
+            direction += market_game_hint
         return direction
     template_id = creative_strategy.get("template_id")
     role = _mock_keyframe_role(image_index, storyboard_context)
@@ -1262,6 +1265,14 @@ def _mock_v2_strategy_scene_visual(
     product: str,
 ) -> str:
     vertical = _mock_strategy_vertical(creative_strategy)
+    market_game_visual = _mock_market_game_scene_visual(
+        creative_strategy,
+        index=index,
+        scene_count=scene_count,
+        product=product,
+    )
+    if market_game_visual:
+        return market_game_visual
     if vertical == "game":
         beats = ["challenge hook", "failure moment", "correct move", "reward payoff"]
     else:
@@ -1270,6 +1281,105 @@ def _mock_v2_strategy_scene_visual(
     if index == scene_count - 1:
         beat = "clear CTA"
     return f"{product}: {beat} following creative_strategy.v2."
+
+
+def _mock_market_game_image_hint(creative_strategy: dict[str, Any]) -> str:
+    pack = creative_strategy.get("market_game_style_pack")
+    if not isinstance(pack, dict):
+        return ""
+    visual_world = _mock_safe_strategy_values(pack.get("visual_world"), limit=3)
+    aaa = pack.get("aaa_game_inspiration")
+    archetypes = (
+        _mock_safe_strategy_values(aaa.get("genre_archetypes"), limit=3)
+        if isinstance(aaa, dict)
+        else []
+    )
+    gameplay = pack.get("gameplay_process")
+    actions = (
+        _mock_safe_strategy_values(gameplay.get("player_actions"), limit=2)
+        if isinstance(gameplay, dict)
+        else []
+    )
+    cultural = pack.get("cultural_safety")
+    avoid = (
+        _mock_safe_strategy_values(cultural.get("avoid"), limit=2)
+        if isinstance(cultural, dict)
+        else []
+    )
+    pieces: list[str] = []
+    if visual_world:
+        pieces.append(f" visual world: {', '.join(visual_world)}")
+    if archetypes:
+        pieces.append(f" AAA-style archetypes: {', '.join(archetypes)}")
+    if actions:
+        pieces.append(f" player action: {', '.join(actions)}")
+    if avoid:
+        pieces.append(f" cultural safety avoid: {', '.join(avoid)}")
+    return "." + ";".join(pieces) + "." if pieces else ""
+
+
+def _mock_market_game_scene_visual(
+    creative_strategy: dict[str, Any],
+    *,
+    index: int,
+    scene_count: int,
+    product: str,
+) -> str:
+    if _mock_strategy_vertical(creative_strategy) != "game":
+        return ""
+    pack = creative_strategy.get("market_game_style_pack")
+    if not isinstance(pack, dict):
+        return ""
+    interests = _mock_safe_strategy_values(pack.get("game_interest_hypothesis"), limit=2)
+    visual_world = _mock_safe_strategy_values(pack.get("visual_world"), limit=2)
+    aaa = pack.get("aaa_game_inspiration")
+    archetypes = (
+        _mock_safe_strategy_values(aaa.get("genre_archetypes"), limit=2)
+        if isinstance(aaa, dict)
+        else []
+    )
+    gameplay = pack.get("gameplay_process")
+    if not isinstance(gameplay, dict):
+        gameplay = {}
+    goal = _mock_safe_strategy_text(gameplay.get("player_goal"))
+    conflict = _mock_safe_strategy_text(gameplay.get("opening_conflict"))
+    actions = _mock_safe_strategy_values(gameplay.get("player_actions"), limit=4)
+    feedback = _mock_safe_strategy_values(gameplay.get("progression_feedback"), limit=4)
+    ending = _mock_safe_strategy_text(gameplay.get("ending_transition"))
+
+    base = [
+        product,
+        ", ".join(archetypes) if archetypes else "cinematic gameplay challenge",
+        ", ".join(visual_world) if visual_world else "",
+        ", ".join(interests) if interests else "",
+    ]
+    if index == 0:
+        beat = f"player goal: {goal}; opening conflict: {conflict}"
+    elif index == scene_count - 1:
+        action = actions[min(index, len(actions) - 1)] if actions else "complete the challenge"
+        progress = feedback[min(index, len(feedback) - 1)] if feedback else "unlock glow appears"
+        beat = (
+            f"player action: {action}; progression feedback: {progress}; "
+            f"ending transition: {ending}"
+        )
+    else:
+        action = actions[min(index, len(actions) - 1)] if actions else "choose the right move"
+        progress = feedback[min(index, len(feedback) - 1)] if feedback else "progress bar fills"
+        beat = f"player action: {action}; progression feedback: {progress}"
+    return ". ".join(part for part in [": ".join(item for item in base if item), beat] if part)
+
+
+def _mock_safe_strategy_values(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    safe_values = [
+        safe_item
+        for item in value
+        if str(item).strip()
+        for safe_item in [_mock_safe_strategy_text(item)]
+        if safe_item
+    ]
+    return safe_values[:limit]
 
 
 def _mock_strategy_vertical(creative_strategy: dict[str, Any]) -> str:

@@ -41,6 +41,7 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                     "brief": "Create a level challenge game ad.",
                 }
             )
+            market_pack = strategy["market_game_style_pack"]
             campaign = Campaign(
                 name="Puzzle Quest SG",
                 objective="traffic",
@@ -78,6 +79,10 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                     == "creative_strategy.v2"
                 )
                 assert topic.source_data["creative_strategy"] == strategy
+                assert (
+                    topic.source_data["creative_strategy"]["market_game_style_pack"]
+                    == market_pack
+                )
 
             campaign_metadata = dict(campaign.metadata_json or {})
             campaign_metadata.pop("creative_strategy", None)
@@ -99,6 +104,7 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                 draft.metadata_json["creative_strategy"]
                 == topics[0].source_data["creative_strategy"]
             )
+            assert draft.metadata_json["creative_strategy"]["market_game_style_pack"] == market_pack
 
             assets = await CreativeService().generate_creatives(
                 session,
@@ -111,6 +117,10 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
             assert (
                 assets[0].metadata_json["creative_strategy"]
                 == draft.metadata_json["creative_strategy"]
+            )
+            assert (
+                assets[0].metadata_json["creative_strategy"]["market_game_style_pack"]
+                == market_pack
             )
 
             storyboard = await VideoService().generate_storyboard(
@@ -131,6 +141,11 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                 storyboard.metadata_json["creative_strategy"]
                 == draft.metadata_json["creative_strategy"]
             )
+            assert (
+                storyboard.metadata_json["creative_strategy"]["market_game_style_pack"]
+                == market_pack
+            )
+            assert "Gameplay process:" in storyboard.prompt
             assert storyboard.duration_seconds == 6
             assert "creative_strategy" not in (campaign.metadata_json or {})
 
@@ -157,6 +172,9 @@ async def test_creative_strategy_v2_propagates_across_generation_chain(
                 video.metadata_json["creative_strategy"]
                 == storyboard.metadata_json["creative_strategy"]
             )
+            assert video.metadata_json["creative_strategy"]["market_game_style_pack"] == market_pack
+            assert video.prompt is not None
+            assert "Gameplay process:" in video.prompt
             assert video.duration_seconds == 6
     finally:
         get_settings.cache_clear()

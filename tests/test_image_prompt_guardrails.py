@@ -17,6 +17,7 @@ from backend.app.services.creative_safety_prompts import (
     creative_safety_prompt_block,
     sanitize_creative_safety_text,
 )
+from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
 
 BANNED_VISIBLE_TEXT = (
@@ -766,6 +767,46 @@ async def test_mock_image_briefs_include_v2_strategy_direction() -> None:
 
     assert "creative_strategy.v2 ecommerce visual direction" in briefs[0].visual_direction
     assert "bathroom counter close-up" in briefs[0].visual_direction
+
+
+@pytest.mark.asyncio
+async def test_mock_game_image_briefs_include_market_game_style_pack() -> None:
+    provider = MockLLMProvider()
+    strategy = build_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "work_order": {
+                "parsed_fields": {
+                    "gender": "Female",
+                    "age_min": 25,
+                    "age_max": 34,
+                }
+            },
+            "brief": "Create a cinematic gameplay challenge ad.",
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Try a cinematic game challenge.",
+        headline="Start",
+        version=1,
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(draft=draft, count=1, size="9:16")
+
+    visual_direction = briefs[0].visual_direction
+    assert "creative_strategy.v2 game visual direction" in visual_direction
+    assert "culture-inspired epic fantasy" in visual_direction
+    assert "cinematic RPG progression" in visual_direction
+    assert "player action:" in visual_direction
+    assert "real deity names" in visual_direction
+    for banned in ("Ganesha", "Shiva", "Krishna", "casino", "slot", "jackpot", "cash"):
+        assert banned.lower() not in visual_direction.lower()
 
 
 @pytest.mark.asyncio

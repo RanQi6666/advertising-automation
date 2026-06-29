@@ -1885,14 +1885,9 @@ function App() {
 
   async function handleGenerateVideoStoryboard() {
     if (!selectedCampaign) return;
-    const sourceIds = selectedCreativeIdsForVideo();
     const draftId = approvedDraft?.id ?? selectedDraft?.id ?? null;
-    if (!sourceIds.length && !draftId) {
-      setError("请先生成并审核通过文案，或选择参考图片。", "video");
-      return;
-    }
-    if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`, "video");
+    if (!draftId) {
+      setError("请先生成并审核通过文案。", "video");
       return;
     }
     const previousText = videoStoryboardText;
@@ -1906,7 +1901,7 @@ function App() {
     try {
       await api.streamVideoStoryboard(
         selectedCampaign.id,
-        sourceIds,
+        [],
         draftId,
         videoDurationSeconds,
         videoAspectRatio,
@@ -1957,15 +1952,10 @@ function App() {
 
   async function handleRewriteVideoStoryboard() {
     if (!selectedCampaign) return;
-    const sourceIds = selectedCreativeIdsForVideo();
     const feedback = videoStoryboardFeedback.trim();
     const draftId = approvedDraft?.id ?? selectedDraft?.id ?? null;
-    if (!sourceIds.length && !draftId) {
-      setError("请先生成并审核通过文案，或选择参考图片。", "video");
-      return;
-    }
-    if (sourceIds.length > VIDEO_MAX_REFERENCE_IMAGES) {
-      setError(`视频生成最多支持 ${VIDEO_MAX_REFERENCE_IMAGES} 张参考图片，请减少选择。`, "video");
+    if (!draftId) {
+      setError("请先生成并审核通过文案。", "video");
       return;
     }
     if (!videoStoryboardText.trim()) {
@@ -1991,7 +1981,7 @@ function App() {
       await api.streamRewriteVideoStoryboard(
         {
           campaignId: selectedCampaign.id,
-          creativeAssetIds: sourceIds,
+          creativeAssetIds: [],
           draftId,
           durationSeconds: videoDurationSeconds,
           aspectRatio: videoAspectRatio,
