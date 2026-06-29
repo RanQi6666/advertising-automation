@@ -599,6 +599,41 @@ def test_video_storyboard_prompt_includes_game_creative_strategy() -> None:
     assert "Subtitle: Register" not in prompt
 
 
+def test_video_storyboard_text_prompt_requires_opening_brand_without_digits() -> None:
+    prompt = _video_storyboard_text_system_prompt(revision=False)
+
+    assert "opening frame must show the project or product name" in prompt
+    assert "remove digit characters from visible brand text" in prompt
+
+
+def test_gaja_video_prompt_requires_opening_brand_rule_without_numeric_suffix() -> None:
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 3,
+                "visual": "Open with a dark neon lobby.",
+                "subtitle": "Start",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert (
+        "Opening brand rule: show the visible GAJA logo or GAJA wordmark in the first frame"
+        in prompt
+    )
+    assert "do not show any numeric suffix or brand-number text" in prompt
+
+
 def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> None:
     creative_strategy = {
         "schema_version": "creative_strategy.v2",

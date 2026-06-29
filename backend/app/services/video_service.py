@@ -692,11 +692,18 @@ def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
             "Mini-game-pool rule: open with gameplay-led curiosity and close on a "
             "low-text metallic GAJA game hub CTA beat with no numeric suffix."
         )
+        lines.append(
+            "Opening brand rule: show the visible GAJA logo or GAJA wordmark in the "
+            "first frame; do not show any numeric suffix or brand-number text."
+        )
     elif template_id == "gaja_brand":
         lines.append(
-            "GAJA brand rule: use a metallic GAJA logo or GAJA wordmark from the first "
-            "frame, avoid visible numeric suffix or visible brand-number text, and build "
-            "the video around challenge, retry, reward, and a Start or Play Now CTA."
+            "Opening brand rule: show the visible GAJA logo or GAJA wordmark in the "
+            "first frame; do not show any numeric suffix or brand-number text."
+        )
+        lines.append(
+            "GAJA brand rule: build the video around challenge, retry, reward, and a "
+            "Start or Play Now CTA."
         )
     country_block = _country_style_pack_summary(country_style_pack)
     if country_block:
