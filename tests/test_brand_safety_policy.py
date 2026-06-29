@@ -2,6 +2,7 @@ from backend.app.services.brand_safety_policy import (
     BRAND_SAFETY_PROMPT_GUARDRAILS,
     scan_brand_safety,
 )
+from backend.app.services.creative_safety_prompts import creative_safety_prompt_block
 
 
 def test_brand_safety_scanner_blocks_price_promotion_terms() -> None:
@@ -127,3 +128,19 @@ def test_brand_safety_prompt_guardrails_name_the_hard_bans() -> None:
     assert "medicine" in BRAND_SAFETY_PROMPT_GUARDRAILS
     assert "discount" in BRAND_SAFETY_PROMPT_GUARDRAILS
     assert "low price" in BRAND_SAFETY_PROMPT_GUARDRAILS
+
+
+def test_brand_safety_scanner_allows_creative_safety_rule_block() -> None:
+    report = scan_brand_safety({"prompt": creative_safety_prompt_block()})
+
+    assert report["status"] == "passed"
+    assert report["findings"] == []
+
+
+def test_brand_safety_scanner_still_blocks_unsafe_game_visual_requests() -> None:
+    report = scan_brand_safety(
+        {"visual_direction": "Show casino cash, deposit, and withdrawal UI."}
+    )
+
+    assert report["status"] == "blocked"
+    assert {item["category"] for item in report["findings"]} >= {"gambling", "money"}

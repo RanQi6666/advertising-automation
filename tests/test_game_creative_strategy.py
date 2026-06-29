@@ -20,6 +20,16 @@ PROMPT_FACING_GAJA_BANNED_TEXT = (
     "\u91d1\u5e01\u96e8",
     "\u8d4c\u573a\u684c\u9762",
 )
+FIXED_CARD_STYLE_TERMS = (
+    "premium cards",
+    "game cards",
+    "card carousel",
+    "fast carousel",
+    "end card",
+    "hero card",
+    "jewel card",
+    "game-card",
+)
 
 
 def test_gaja_landing_url_uses_brand_template() -> None:
@@ -44,7 +54,10 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert "metallic GAJA wordmark" in " ".join(
         strategy["first_frame"]["visual_must_include"]
     )
-    assert "premium game cards" in " ".join(strategy["first_frame"]["visual_must_include"])
+    assert "visible challenge setup" in " ".join(
+        strategy["first_frame"]["visual_must_include"]
+    )
+    assert "reward unlock cue" in " ".join(strategy["last_frame"]["visual_must_include"])
     assert "Start" in " ".join(strategy["last_frame"]["cta_must_include"])
     assert "Play Now" in " ".join(strategy["last_frame"]["cta_must_include"])
     assert strategy["meta_restricted_game_ad_safe_mode"] is True
@@ -53,6 +66,8 @@ def test_gaja_landing_url_uses_brand_template() -> None:
     assert "financial_prop_cues" in strategy["negative_style_cues"]
     assert "outcome_claim_cues" in strategy["negative_style_cues"]
     assert "0-2s" in " ".join(strategy["video_recipe"]["beats"])
+    strategy_text = str(strategy).casefold()
+    assert not any(term in strategy_text for term in FIXED_CARD_STYLE_TERMS)
 
 
 def test_gaja_india_work_order_uses_country_epic_style_pack() -> None:
@@ -378,7 +393,9 @@ def test_gaja_strategy_avoids_meta_gambling_review_triggers() -> None:
     ):
         assert risky_term not in strategy_text
     for risky_term in (
-        "reward",
+        "cash reward",
+        "money reward",
+        "reward amount",
         "value-return",
         "payment",
         "casino",

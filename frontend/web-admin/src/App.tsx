@@ -302,7 +302,7 @@ function App() {
     DEFAULT_KEYFRAME_VARIANT_COUNT,
   );
   const [creativeGenerationMode, setCreativeGenerationMode] =
-    useState<CreativeGenerationUiMode>("copy_images");
+    useState<CreativeGenerationUiMode>("video_keyframes");
   const [keyframeRewriteFeedbacks, setKeyframeRewriteFeedbacks] = useState<Record<string, string>>({});
   const [videos, setVideos] = useState<VideoAsset[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
@@ -1529,8 +1529,8 @@ function App() {
         ? currentStoryboardContextForKeyframes()
         : null;
       if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
-        setError("Generate or paste a video script before creating keyframes.", "image");
-        markLoadingCreativeSlotsFailed("Waiting for a video script.");
+        setError("请先生成或粘贴视频脚本，再生成关键帧。", "image");
+        markLoadingCreativeSlotsFailed("等待视频脚本。");
         return;
       }
       await api.generateCreativesStream(
@@ -1669,10 +1669,10 @@ function App() {
         ? currentStoryboardContextForKeyframes()
         : null;
       if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
-        setError("Generate or paste a video script before creating keyframes.", "image");
+        setError("请先生成或粘贴视频脚本，再生成关键帧。", "image");
         updateCreativeGenerationSlot(slotIndex, {
           status: "error",
-          message: "Waiting for a video script.",
+          message: "等待视频脚本。",
         });
         return;
       }
@@ -3737,6 +3737,9 @@ function CreativesView({
   const hasSlotErrors = visibleSlots.some((slot) => slot.status === "error");
   const isGenerating =
     loading === "creatives" || modeGenerationSlots.some((slot) => slot.status === "loading");
+  const hasStoryboardText = Boolean(storyboardText.trim());
+  const canGenerateCurrentMode =
+    !isGenerating && (!generationPlan.isKeyframeVariant || hasStoryboardText);
   const keyframeReviewActive =
     generationPlan.isKeyframeVariant &&
     (modeGenerationSlots.length > 0 ||
@@ -3779,7 +3782,7 @@ function CreativesView({
             <span className="panel-note">{panelNote}</span>
           </div>
           <div className="button-row model-action-row image-console-rail">
-            <div className="generation-mode-switch" role="tablist" aria-label="Image generation mode">
+            <div className="generation-mode-switch" role="tablist" aria-label="图片生成模式">
               <button
                 className={generationMode === "copy_images" ? "active" : ""}
                 type="button"
@@ -3787,7 +3790,7 @@ function CreativesView({
                 disabled={Boolean(loading)}
               >
                 <Image size={16} />
-                <span>Copy images</span>
+                <span>文案生图</span>
               </button>
               <button
                 className={generationMode === "video_keyframes" ? "active" : ""}
@@ -3796,7 +3799,7 @@ function CreativesView({
                 disabled={Boolean(loading)}
               >
                 <Film size={16} />
-                <span>Video keyframes</span>
+                <span>视频关键帧</span>
               </button>
             </div>
             <ModelSelect
@@ -3827,7 +3830,7 @@ function CreativesView({
                 </select>
               </label>
             )}
-            <button className="secondary-button" onClick={onGenerate} disabled={isGenerating}>
+            <button className="secondary-button" onClick={onGenerate} disabled={!canGenerateCurrentMode}>
               {isGenerating ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
               <span>
                 {generationPlan.isKeyframeVariant
@@ -3845,8 +3848,8 @@ function CreativesView({
           <section className="script-console">
             <div className="script-console-head">
               <div>
-                <span className="section-eyebrow">SCRIPT ENGINE</span>
-                <h3>Video creative script</h3>
+                <span className="section-eyebrow">脚本生成</span>
+                <h3>视频创意脚本</h3>
               </div>
               <div className="script-console-actions">
                 <button
@@ -3856,7 +3859,7 @@ function CreativesView({
                   disabled={Boolean(loading)}
                 >
                   {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                  <span>Generate script</span>
+                  <span>生成脚本</span>
                 </button>
                 <button
                   className="secondary-button"
@@ -3869,7 +3872,7 @@ function CreativesView({
                   ) : (
                     <RefreshCw size={16} />
                   )}
-                  <span>Rewrite script</span>
+                  <span>改写脚本</span>
                 </button>
               </div>
             </div>
@@ -3877,7 +3880,7 @@ function CreativesView({
               className="storyboard-input script-console-textarea"
               value={storyboardText}
               onChange={(event) => setStoryboardText(event.target.value)}
-              placeholder="Generate or paste a video script before creating keyframes."
+              placeholder="请先生成或粘贴视频脚本，再生成关键帧。"
               disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
             />
             <div className="script-console-grid">
@@ -3885,14 +3888,14 @@ function CreativesView({
                 className="video-instructions script-console-input"
                 value={videoInstructions}
                 onChange={(event) => setVideoInstructions(event.target.value)}
-                placeholder="Style and camera direction"
+                placeholder="风格与镜头要求"
                 disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
               />
               <textarea
                 className="storyboard-feedback-input script-console-input"
                 value={storyboardFeedback}
                 onChange={(event) => setStoryboardFeedback(event.target.value)}
-                placeholder="Rewrite notes"
+                placeholder="脚本修改意见"
                 disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
               />
             </div>

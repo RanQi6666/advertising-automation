@@ -7,6 +7,7 @@ from backend.app.integrations.image.volcengine_provider import _prompt_from_brie
 from backend.app.integrations.llm.mock_provider import (
     MockLLMProvider,
     _mock_keyframe_role,
+    _mock_v2_strategy_scene_visual,
 )
 from backend.app.integrations.llm.openai_provider import OpenAILLMProvider
 from backend.app.schemas.ai import ImageBrief
@@ -33,8 +34,12 @@ def test_creative_safety_prompt_blocks_banned_visible_words() -> None:
 
     for banned in BANNED_VISIBLE_TEXT:
         assert banned in block
-    assert "metallic GAJA logo" in block
-    assert "no visible brand-number text" in block
+    assert "metallic GAJA logo" not in block
+    assert "provided product or brand name" in block
+    assert "real-money gambling" in block
+    assert "deposit/recharge" in block
+    assert "withdrawal" in block
+    assert "guaranteed winning" in block
     assert "casino tables" in block
     assert "withdrawal UI" in block
 
@@ -68,6 +73,15 @@ def test_creative_safety_sanitizer_preserves_gaja_brand_without_numbers() -> Non
     assert "premium cards" in sanitized
 
 
+def test_creative_safety_fallback_is_not_gaja_specific() -> None:
+    sanitized = sanitize_creative_safety_text("Show casino cash and withdrawal UI.")
+
+    assert "GAJA" not in sanitized
+    assert "premium app lobby" in sanitized
+    assert "start action" in sanitized
+    assert not contains_creative_safety_risk(sanitized)
+
+
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
     prompt = _prompt_from_brief(
         ImageBrief(
@@ -96,7 +110,8 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
     assert "Creative safety hard rules" in prompt
     assert "Visible text hard ban" in prompt
-    assert "no visible brand-number text" in prompt
+    assert "Game creative safety" in prompt
+    assert "provided product or brand name" in prompt
 
 
 @pytest.mark.asyncio
@@ -567,11 +582,23 @@ async def test_mock_image_briefs_use_premium_gaja_brand_direction() -> None:
     assert "metallic GAJA wordmark" in briefs[0].visual_direction
     assert "no visible brand-number text" in briefs[0].visual_direction
     assert "no visible numeric suffix" in briefs[0].visual_direction
-    assert "premium game cards" in briefs[0].visual_direction
+    assert "visible game challenge" in briefs[0].visual_direction
     assert "premium neon game lobby" in briefs[1].visual_direction
+    assert "reward unlock cue" in briefs[1].visual_direction
     assert briefs[0].short_text == "Start"
     brief_text = " ".join(brief.visual_direction for brief in briefs).lower()
-    for risky_term in ("casino", "slot", "jackpot", "cash", "coin", "money", "recharge"):
+    for risky_term in (
+        "casino",
+        "slot",
+        "jackpot",
+        "cash",
+        "coin",
+        "money",
+        "recharge",
+        "premium game cards",
+        "card carousel",
+        "end card",
+    ):
         assert risky_term not in brief_text
 
 
@@ -739,3 +766,28 @@ async def test_mock_image_briefs_include_v2_strategy_direction() -> None:
 
     assert "creative_strategy.v2 ecommerce visual direction" in briefs[0].visual_direction
     assert "bathroom counter close-up" in briefs[0].visual_direction
+
+
+@pytest.mark.asyncio
+async def test_mock_v2_strategy_defaults_missing_vertical_to_ecommerce() -> None:
+    provider = MockLLMProvider()
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "image_guidance": {"visual_hooks": ["desk routine"]},
+    }
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Make the daily setup easier.",
+        headline="Simple daily use",
+        version=1,
+        metadata_json={"creative_strategy": strategy},
+    )
+
+    briefs = await provider.generate_image_briefs(draft=draft, count=1, size="1:1")
+    scene_visual = _mock_v2_strategy_scene_visual(strategy, 0, 3, "Demo Product")
+
+    assert "creative_strategy.v2 ecommerce visual direction" in briefs[0].visual_direction
+    assert "pain point scene" in scene_visual
+    assert "unknown" not in briefs[0].visual_direction.casefold()

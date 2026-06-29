@@ -16,27 +16,26 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
     ],
     "surface_style": [
         "dark premium mobile game lobby",
-        "glossy rectangular game cards",
         "metallic GAJA logo styling",
         "metallic GAJA wordmark styling",
         "cinematic neon rim light",
-        "high contrast card carousel",
-        "glossy black reflective floor",
+        "glossy black reflective environment",
+        "orange CTA accent",
     ],
-    "original_game_card_archetypes": [
-        "mythic fire warrior card",
-        "ice energy hero card",
-        "flame fortress adventure card",
-        "glossy jewel and fruit matching card",
-        "abstract neon app-badge card",
+    "gameplay_moment_archetypes": [
+        "visible challenge setup",
+        "failed attempt and retry moment",
+        "clear player choice cue",
+        "progression or level-up feedback",
+        "reward unlock payoff cue",
     ],
     "composition_cues": [
         "metallic GAJA logo visible in the first frame",
         "premium GAJA brand emblem as a supporting icon",
         "no visible numeric suffix or brand-number text",
         "phone-screen vertical lobby composition",
-        "multiple premium cards angled in depth",
-        "clear orange Start or Play Now CTA in final frame",
+        "visible challenge, retry, and reward cues",
+        "clear orange Start or Play Now CTA in final beat",
     ],
     "negative_style_cues": [
         "childlike puzzle blocks",
@@ -51,10 +50,10 @@ _GAJA_BASE_REFERENCE: dict[str, Any] = {
     "video_recipe": {
         "duration_seconds": 12,
         "beats": [
-            "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and premium cards",
-            "2-7s: fast carousel through original fantasy hero and jewel game cards",
-            "7-10s: coherent glossy app lobby reveal matching landing page style",
-            "10-12s: Start / Play Now low-text end card",
+            "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and visible challenge setup",
+            "2-7s: show failed attempt, quick retry choice, or progression moment",
+            "7-10s: reward unlock payoff cue in a coherent glossy app lobby",
+            "10-12s: simple Start / Play Now CTA beat",
         ],
     },
 }

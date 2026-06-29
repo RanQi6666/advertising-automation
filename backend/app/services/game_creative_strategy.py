@@ -90,10 +90,10 @@ def _gaja_brand_strategy() -> dict[str, Any]:
     video_recipe = {
         "duration_seconds": 12,
         "beats": [
-            "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and premium cards",
-            "2-7s: fast carousel through original fantasy hero and jewel game cards",
-            "7-10s: coherent glossy app lobby reveal matching landing page style",
-            "10-12s: Start / Play Now low-text end card",
+            "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and visible challenge setup",
+            "2-7s: show failed attempt, quick retry choice, or progression moment",
+            "7-10s: reward unlock payoff cue in a coherent glossy app lobby",
+            "10-12s: simple Start / Play Now CTA beat",
         ],
     }
     return {
@@ -118,8 +118,8 @@ def _gaja_brand_strategy() -> dict[str, Any]:
                 "no visible numeric suffix",
                 "no visible brand-number text",
                 "dark premium mobile game lobby",
-                "glossy rectangular game cards",
-                "glossy black reflective floor",
+                "visible challenge, retry, and reward cues",
+                "glossy black reflective environment",
                 "orange Start button",
             ],
         },
@@ -133,39 +133,40 @@ def _gaja_brand_strategy() -> dict[str, Any]:
                 "no visible numeric suffix",
                 "no visible brand-number text",
                 "dark premium mobile game lobby",
-                "premium game cards angled in depth",
-                "fantasy hero and jewel card gallery",
-                "glossy black reflective floor",
+                "visible challenge setup",
+                "clear player choice cue",
+                "glossy black reflective environment",
                 "metallic 3D brand styling",
                 "cinematic neon rim light",
             ],
             "composition": (
                 "Use a mature, high-contrast premium neon game lobby poster with glossy "
-                "cards, cinematic depth, reflective black floor, and a metallic GAJA logo "
-                "without any numeric suffix."
+                "depth, challenge tension, and a metallic GAJA logo without any numeric "
+                "suffix."
             ),
         },
         "last_frame": {
-            "role": "conversion end card",
+            "role": "CTA payoff beat",
             "visual_must_include": [
                 "premium neon game lobby",
                 "metallic GAJA logo",
                 "GAJA wordmark without numeric suffix",
                 "Start / Play Now CTA",
                 "orange CTA button matching the landing page",
+                "reward unlock cue",
                 "clean phone start cue when appropriate",
             ],
             "cta_must_include": ["Start", "Play Now"],
             "composition": (
-                "End on a clear low-text action card connected to the premium game lobby "
-                "style with metallic GAJA branding and no visible numeric suffix."
+                "Close on a clear low-text CTA beat connected to the premium game lobby "
+                "style, reward payoff, metallic GAJA branding, and no visible numeric suffix."
             ),
         },
         "motion_direction": [
             "Start with a strong dark neon poster frame.",
-            "Move through glossy fantasy and jewel game cards with energy transitions.",
+            "Move through failed attempt, retry choice, and reward feedback.",
             "Reveal the coherent premium neon GAJA lobby before the CTA.",
-            "Hold the final Start or Play Now end card long enough to read.",
+            "Hold the final Start or Play Now CTA beat long enough to read.",
         ],
         "negative_style_cues": [
             "childlike puzzle blocks",
@@ -178,7 +179,7 @@ def _gaja_brand_strategy() -> dict[str, Any]:
             "outcome_claim_cues",
         ],
         "compliance_guardrails": [
-            "Use original game-card visuals inspired by the landing page style.",
+            "Use original challenge, retry, and reward visuals inspired by the landing page style.",
             "Use low-text metallic GAJA branding without a numeric suffix.",
             "Do not show visible numeric suffix or visible brand-number text.",
             "Keep copy about navigation, variety, simple start, and app experience.",
@@ -216,7 +217,7 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
             "real_page_signals": [
                 "casual game category tabs",
                 "puzzle, runner, bubble, tile, and reaction game tiles",
-                "metallic GAJA game hub end card",
+                "metallic GAJA game hub CTA beat",
                 "no visible numeric suffix",
                 "no visible brand-number text",
                 "orange Start button",
@@ -236,11 +237,11 @@ def _mini_game_pool_strategy() -> dict[str, Any]:
             ],
             "composition": (
                 "Lead with playable-looking challenge energy. Keep GAJA branding present "
-                "but secondary until the final end card."
+                "but secondary until the final CTA beat."
             ),
         },
         "last_frame": {
-            "role": "GAJA game hub end card",
+            "role": "GAJA game hub CTA beat",
             "visual_must_include": [
                 "metallic GAJA game hub with multiple mini-game tiles",
                 "GAJA wordmark without numeric suffix",

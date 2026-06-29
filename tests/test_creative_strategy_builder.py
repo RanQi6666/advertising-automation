@@ -80,9 +80,31 @@ def test_builds_game_strategy_without_gaja_default_template() -> None:
     }
     assert "0-3s" not in str(strategy["video_guidance"])
     assert "duration_seconds" not in str(strategy["video_guidance"])
+    guardrail_text = " ".join(strategy["compliance_guardrails"])
+    assert "real-money gambling" in guardrail_text
+    assert "deposit/recharge" in guardrail_text
+    assert "withdrawal" in guardrail_text
+    assert "guaranteed winning" in guardrail_text
 
 
-def test_unknown_vertical_uses_conservative_generic_plan() -> None:
+def test_ecommerce_strategy_does_not_receive_game_specific_guardrails() -> None:
+    strategy = build_creative_strategy(
+        {
+            "product_name": "Glow Serum",
+            "landing_url": "https://shop.example.sg/products/glow-serum",
+            "country": "Singapore",
+            "brief": "Promote skincare for office workers.",
+        },
+        today=date(2026, 6, 28),
+    )
+
+    guardrail_text = " ".join(strategy["compliance_guardrails"])
+    assert strategy["vertical"] == "ecommerce"
+    assert "real-money gambling" not in guardrail_text
+    assert "deposit/recharge" not in guardrail_text
+
+
+def test_weak_vertical_signals_fall_back_to_ecommerce_not_unknown() -> None:
     strategy = build_creative_strategy(
         {
             "product_name": "Daily Planner",
@@ -93,10 +115,39 @@ def test_unknown_vertical_uses_conservative_generic_plan() -> None:
         today=date(2026, 6, 28),
     )
 
-    assert strategy["vertical"] == "unknown"
+    assert strategy["vertical"] == "ecommerce"
     assert strategy["market_context"]["country_code"] == "MY"
-    assert strategy["topic_angle_plan"][0]["angle_type"] == "scenario_resonance"
+    assert strategy["topic_angle_plan"][0]["angle_type"] == "pain_point"
+    assert strategy["classification"]["fallback"] is True
     assert strategy["classification"]["confidence"] < 0.65
+
+
+def test_gaja_game_landing_and_first_recharge_classify_as_game() -> None:
+    strategy = build_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "event_name": "first_recharge",
+            "work_order": {
+                "parsed_fields": {
+                    "media": "fb",
+                    "event_name": "first_recharge",
+                    "audience_description_raw": "年龄18-65",
+                }
+            },
+        },
+        today=date(2026, 6, 29),
+    )
+
+    assert strategy["vertical"] == "game"
+    assert strategy["classification"]["fallback"] is False
+    assert "game_tld" in strategy["classification"]["signals"]
+    assert {item["angle_type"] for item in strategy["topic_angle_plan"]} == {
+        "challenge_failure",
+        "comeback_growth",
+        "reward_burst",
+    }
 
 
 def test_localized_country_aliases_resolve_to_market_context() -> None:

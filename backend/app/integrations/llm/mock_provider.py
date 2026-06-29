@@ -1026,7 +1026,7 @@ def _mock_strategy_image_hint(
         return ""
     schema_version = creative_strategy.get("schema_version")
     if schema_version == "creative_strategy.v2":
-        vertical = str(creative_strategy.get("vertical") or "unknown")
+        vertical = _mock_strategy_vertical(creative_strategy)
         image_guidance = creative_strategy.get("image_guidance")
         hooks = image_guidance.get("visual_hooks") if isinstance(image_guidance, dict) else []
         hook_text = (
@@ -1057,7 +1057,7 @@ def _mock_strategy_image_hint(
         if role == "last_frame":
             return (
                 " Follow creative_strategy mini_game_pool: last-frame metallic GAJA game "
-                "hub end card with Start / Play Now CTA, no visible numeric suffix, and "
+                "hub CTA beat with Start / Play Now, no visible numeric suffix, and "
                 f"no visible brand-number text.{concept_hint}{text_layout_hint}"
             )
         return (
@@ -1069,13 +1069,14 @@ def _mock_strategy_image_hint(
         if role == "last_frame":
             return (
                 " Follow creative_strategy gaja_brand: last-frame premium neon game "
-                "lobby with metallic GAJA logo, Start / Play Now CTA, orange button, "
+                "lobby with metallic GAJA logo, reward unlock cue, Start / Play Now CTA, "
+                "orange button, "
                 f"and no visible numeric suffix.{concept_hint}{text_layout_hint}"
             )
         return (
             " Follow creative_strategy gaja_brand: first-frame dark neon app lobby "
             "with metallic GAJA wordmark, no visible numeric suffix, no visible "
-            f"brand-number text, and premium game cards.{concept_hint}{text_layout_hint}"
+            f"brand-number text, and visible game challenge.{concept_hint}{text_layout_hint}"
         )
     return f" Follow creative_strategy {template_id}."
 
@@ -1228,7 +1229,8 @@ def _mock_strategy_scene_visual(
     if template_id == "mini_game_pool":
         if role == "last_frame":
             return (
-                "End on a metallic GAJA game hub with multiple mini-game cards, Start CTA, "
+                "End on a metallic GAJA game hub with multiple mini-game challenge tiles, "
+                "Start CTA, "
                 "no visible numeric suffix, and no visible brand-number text. "
                 f"{concept_visual} {layout_hint}".strip()
             )
@@ -1246,7 +1248,8 @@ def _mock_strategy_scene_visual(
             )
         return (
             "Open with a dark neon app lobby, metallic GAJA wordmark, metallic title styling, "
-            "premium game cards, cinematic depth, no visible numeric suffix, and no visible "
+            "visible game challenge, player choice cue, cinematic depth, no visible numeric "
+            "suffix, and no visible "
             f"brand-number text. {concept_visual} {layout_hint}".strip()
         )
     return fallback
@@ -1258,17 +1261,22 @@ def _mock_v2_strategy_scene_visual(
     scene_count: int,
     product: str,
 ) -> str:
-    vertical = str(creative_strategy.get("vertical") or "unknown")
+    vertical = _mock_strategy_vertical(creative_strategy)
     if vertical == "game":
         beats = ["challenge hook", "failure moment", "correct move", "reward payoff"]
-    elif vertical == "ecommerce":
-        beats = ["pain point scene", "product appears", "benefit demonstration", "clear CTA"]
     else:
-        beats = ["practical scenario", "product benefit", "clear next step"]
+        beats = ["pain point scene", "product appears", "benefit demonstration", "clear CTA"]
     beat = beats[min(index, len(beats) - 1)]
     if index == scene_count - 1:
         beat = "clear CTA"
     return f"{product}: {beat} following creative_strategy.v2."
+
+
+def _mock_strategy_vertical(creative_strategy: dict[str, Any]) -> str:
+    vertical = str(creative_strategy.get("vertical") or "").strip().casefold()
+    if vertical == "game":
+        return "game"
+    return "ecommerce"
 
 
 def _mock_storyboard_hint(storyboard_context: dict | None) -> str:

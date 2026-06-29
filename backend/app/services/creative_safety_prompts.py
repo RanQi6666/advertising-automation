@@ -8,7 +8,7 @@ CREATIVE_VISIBLE_TEXT_BAN = (
     "Visible text hard ban: do not show or request visible text containing 777, "
     "Luck, \u8d62\u94b1, \u63d0\u73b0, \u91d1\u5e01\u96e8, "
     "\u8d4c\u573a\u684c\u9762, jackpot, casino, cash, coin, wallet, payout, "
-    "withdraw, bonus, or balance."
+    "withdraw, deposit, recharge, bonus, winning, or balance."
 )
 
 CREATIVE_VISUAL_PROP_BAN = (
@@ -17,10 +17,19 @@ CREATIVE_VISUAL_PROP_BAN = (
     "balance counters, jackpot panels, withdrawal UI, or gambling-like reward effects."
 )
 
+CREATIVE_GAME_SAFETY_RULE = (
+    "Game creative safety: keep rewards as in-game progress, level-up, unlock, or "
+    "next-action feedback only. Do not show or imply real-money gambling, "
+    "deposit/recharge, withdrawal, payout, cash value, wallet or balance UI, casino "
+    "props, slot machines, chips, roulette, dice, poker props, jackpot panels, "
+    "guaranteed winning, or guaranteed outcome claims."
+)
+
 CREATIVE_LOW_TEXT_DIRECTION = (
-    "Use a low-text or no-text visual style. Express brand presence through a metallic "
-    "GAJA logo or GAJA wordmark, premium neon app-lobby shapes, and "
-    "game-card silhouettes; use no visible numeric suffix and no visible brand-number text."
+    "Use a low-text or no-text visual style. Express brand presence through the "
+    "provided product or brand name, original app-lobby shapes, game challenge, "
+    "progression, and reward-entry silhouettes. Do not invent brand names, numeric "
+    "suffixes, unsupported logos, or extra visible text."
 )
 
 CREATIVE_SAFE_CTA = (
@@ -28,8 +37,8 @@ CREATIVE_SAFE_CTA = (
 )
 
 CREATIVE_SAFETY_FALLBACK = (
-    "low-text premium neon app lobby with metallic GAJA logo, glossy game-card "
-    "silhouettes, no visible numeric suffix, and no visible brand-number text"
+    "low-text premium mobile game scene with the provided brand, original game challenge "
+    "and reward-entry silhouettes, no real-money cues, and no unsupported visible text"
 )
 
 CREATIVE_SAFETY_PAYLOAD_PRESERVE_KEYS = frozenset(
@@ -68,9 +77,12 @@ CREATIVE_SAFETY_RISK_TERMS = (
     "payout",
     "withdraw",
     "withdrawal",
+    "deposit",
+    "recharge",
     "jackpot",
     "balance",
     "bonus",
+    "winning",
 )
 
 _REPLACEMENTS = (
@@ -84,9 +96,9 @@ _REPLACEMENTS = (
     (r"\bcasino\b", "premium app lobby"),
     (r"\bgambling\b", "game entertainment"),
     (r"\bbet(?:ting)?\b", "game interaction"),
-    (r"\bpoker\b", "original game-card art"),
+    (r"\bpoker\b", "original game challenge art"),
     (r"\broulette\b", "neon radial accent"),
-    (r"\bslot(?:\s*machine)?s?\b", "original game-card carousel"),
+    (r"\bslot(?:\s*machine)?s?\b", "original game reward sequence"),
     (r"\bchips?\b", "glossy app tokens"),
     (r"\bcash\b", "neon highlight"),
     (r"\bcoins?\b", "neon particles"),
@@ -95,9 +107,12 @@ _REPLACEMENTS = (
     (r"\bbank\s*cards?\b", "clean app panel"),
     (r"\bpayout\b", "start action"),
     (r"\bwithdraw(?:al)?\b", "start action"),
+    (r"\bdeposits?\b", "quick start"),
+    (r"\brecharges?\b", "quick start"),
     (r"\bjackpot\b", "feature highlight"),
     (r"\bbalances?\b", "status indicator"),
     (r"\bbonus(?:es)?\b", "feature highlight"),
+    (r"\bwinning\b", "progress payoff"),
     (r"\bregister\b", "Start"),
     (r"\bregistration\b", "quick start"),
     ("\u8d62\u94b1", "progress moment"),
@@ -113,6 +128,7 @@ def creative_safety_prompt_block() -> str:
             "Creative safety hard rules:",
             CREATIVE_VISIBLE_TEXT_BAN,
             CREATIVE_VISUAL_PROP_BAN,
+            CREATIVE_GAME_SAFETY_RULE,
             CREATIVE_LOW_TEXT_DIRECTION,
             CREATIVE_SAFE_CTA,
         )

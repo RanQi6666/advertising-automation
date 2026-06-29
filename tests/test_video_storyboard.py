@@ -495,7 +495,8 @@ def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() ->
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
     assert "Creative safety hard rules" in prompt
     assert "Visible text hard ban" in prompt
-    assert "no visible brand-number text" in prompt
+    assert "Game creative safety" in prompt
+    assert "provided product or brand name" in prompt
 
 
 def test_video_storyboard_prompt_includes_creative_text_and_prop_bans() -> None:
@@ -513,7 +514,8 @@ def test_video_storyboard_prompt_includes_creative_text_and_prop_bans() -> None:
 
     assert "Creative safety hard rules" in prompt
     assert "Visible text hard ban" in prompt
-    assert "no visible brand-number text" in prompt
+    assert "Game creative safety" in prompt
+    assert "provided product or brand name" in prompt
     assert "casino tables" in prompt
     assert "withdrawal UI" in prompt
     for banned in (
@@ -614,6 +616,27 @@ def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> Non
     assert "challenge_failure" in prompt
     assert "One strong hook, one payoff, one CTA." in prompt
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+
+
+def test_video_storyboard_prompt_defaults_missing_v2_vertical_to_ecommerce() -> None:
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 6,
+                "visual": "Show a routine product moment.",
+                "subtitle": "Make daily use easier.",
+            }
+        ],
+        creative_strategy={
+            "schema_version": "creative_strategy.v2",
+            "video_guidance": {"opening": "Lead with the routine problem."},
+        },
+    )
+
+    assert "creative_strategy: creative_strategy.v2 ecommerce" in prompt
+    assert "unknown" not in prompt.casefold()
 
 
 def test_video_storyboard_prompt_includes_builder_video_guidance() -> None:
@@ -799,13 +822,14 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
                         "status": "analyzed",
                         "palette": ["near-black navy background"],
                         "surface_style": ["dark premium mobile game lobby"],
-                        "composition_cues": ["premium cards angled in depth"],
+                        "gameplay_moment_archetypes": ["failed attempt and retry moment"],
+                        "composition_cues": ["visible challenge setup with reward cue"],
                         "negative_style_cues": ["childlike puzzle blocks"],
                         "video_recipe": {
                             "duration_seconds": 12,
                             "beats": [
-                                "0-2s: dark neon GAJA777 lobby hook with premium cards",
-                                "10-12s: Register / Play Now end card",
+                                "0-2s: dark neon GAJA lobby hook with visible challenge setup",
+                                "10-12s: simple Start / Play Now CTA beat",
                             ],
                         },
                     }
@@ -829,9 +853,15 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert "Landing visual reference" in prompt
     assert "dark premium mobile game lobby" in prompt
     assert "near-black navy background" in prompt
-    assert "0-2s: dark neon GAJA lobby hook with metallic GAJA logo and premium cards" in prompt
-    assert "10-12s: Start / Play Now end card" in prompt
+    assert "failed attempt and retry moment" in prompt
+    assert "visible challenge setup with reward cue" in prompt
+    assert "0-2s: dark neon GAJA lobby hook with visible challenge setup" in prompt
+    assert "10-12s: simple Start / Play Now CTA beat" in prompt
     assert "Avoid style cues: childlike puzzle blocks" in prompt
+    prompt_text = prompt.casefold()
+    assert "premium cards" not in prompt_text
+    assert "card carousel" not in prompt_text
+    assert "end card" not in prompt_text
     assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
@@ -1073,7 +1103,8 @@ async def test_mock_provider_uses_premium_gaja_brand_storyboard() -> None:
     assert "no visible numeric suffix" in storyboard.scenes[0].visual
     assert "title treatment" not in storyboard.scenes[0].visual
     assert "title styling" in storyboard.scenes[0].visual
-    assert "premium game cards" in storyboard.scenes[0].visual
+    assert "visible game challenge" in storyboard.scenes[0].visual
+    assert "player choice cue" in storyboard.scenes[0].visual
     assert "premium neon game lobby" in storyboard.scenes[-1].visual
     assert storyboard.scenes[-1].subtitle in {"Start", "Play Now"}
 

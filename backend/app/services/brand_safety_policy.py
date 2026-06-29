@@ -194,6 +194,7 @@ _SAFETY_POLICY_LINE_PREFIXES = (
     "Creative safety hard rules:",
     "Visible text hard ban:",
     "Visual prop hard ban:",
+    "Game creative safety:",
     "Use a low-text or no-text visual style.",
     "CTA text should stay limited",
     "- Do not create or preserve",

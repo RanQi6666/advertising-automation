@@ -20,6 +20,7 @@ GAME_KEYWORDS = (
     "runner",
     "mini game",
     "game lobby",
+    "first_recharge",
 )
 ECOMMERCE_KEYWORDS = (
     "shop",
@@ -173,7 +174,7 @@ def build_creative_strategy(
         "copy_guidance": _copy_guidance(vertical, market_context, audience_lens),
         "image_guidance": _image_guidance(vertical),
         "video_guidance": _video_guidance(vertical),
-        "compliance_guardrails": _compliance_guardrails(),
+        "compliance_guardrails": _compliance_guardrails(vertical),
     }
 
 
@@ -310,24 +311,29 @@ def _audience_lens(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _classify_vertical(context: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     text = _context_text(context)
-    game_hits = _keyword_hits(text, GAME_KEYWORDS)
+    game_hits = _game_signals(context, text)
     ecommerce_hits = _keyword_hits(text, ECOMMERCE_KEYWORDS)
-    if len(game_hits) >= 2 and len(game_hits) >= len(ecommerce_hits):
+    if game_hits and len(game_hits) >= len(ecommerce_hits):
         return "game", {
             "method": "keyword_heuristic",
             "confidence": min(0.95, 0.55 + len(game_hits) * 0.08),
             "signals": game_hits,
+            "fallback": False,
         }
-    if len(ecommerce_hits) >= 2:
+    if ecommerce_hits:
         return "ecommerce", {
             "method": "keyword_heuristic",
             "confidence": min(0.92, 0.55 + len(ecommerce_hits) * 0.07),
             "signals": ecommerce_hits,
+            "fallback": False,
         }
-    return "unknown", {
+
+    return "ecommerce", {
         "method": "keyword_heuristic",
-        "confidence": 0.45,
-        "signals": game_hits + ecommerce_hits,
+        "confidence": 0.4,
+        "signals": [],
+        "fallback": True,
+        "reason": "No game or ecommerce keyword signal was strong enough; defaulted to ecommerce.",
     }
 
 
@@ -353,45 +359,24 @@ def _topic_angle_plan(vertical: str) -> list[dict[str, Any]]:
                 "avoid_repeating": ["challenge_failure", "comeback_growth"],
             },
         ]
-    if vertical == "ecommerce":
-        return [
-            {
-                "slot": 1,
-                "angle_type": "pain_point",
-                "purpose": "Test whether the audience recognizes the problem.",
-                "avoid_repeating": ["scenario_resonance", "value_offer"],
-            },
-            {
-                "slot": 2,
-                "angle_type": "scenario_resonance",
-                "purpose": "Test whether a daily-life scene creates self-recognition.",
-                "avoid_repeating": ["pain_point", "value_offer"],
-            },
-            {
-                "slot": 3,
-                "angle_type": "value_offer",
-                "purpose": "Test value, offer, or proof without unsupported claims.",
-                "avoid_repeating": ["pain_point", "scenario_resonance"],
-            },
-        ]
     return [
         {
             "slot": 1,
-            "angle_type": "scenario_resonance",
-            "purpose": "Test a practical daily-life use case.",
-            "avoid_repeating": ["benefit_demo", "trust_builder"],
+            "angle_type": "pain_point",
+            "purpose": "Test whether the audience recognizes the problem.",
+            "avoid_repeating": ["scenario_resonance", "value_offer"],
         },
         {
             "slot": 2,
-            "angle_type": "benefit_demo",
-            "purpose": "Test a clear product benefit demonstration.",
-            "avoid_repeating": ["scenario_resonance", "trust_builder"],
+            "angle_type": "scenario_resonance",
+            "purpose": "Test whether a daily-life scene creates self-recognition.",
+            "avoid_repeating": ["pain_point", "value_offer"],
         },
         {
             "slot": 3,
-            "angle_type": "trust_builder",
-            "purpose": "Test credibility and low-risk next step.",
-            "avoid_repeating": ["scenario_resonance", "benefit_demo"],
+            "angle_type": "value_offer",
+            "purpose": "Test value, offer, or proof without unsupported claims.",
+            "avoid_repeating": ["pain_point", "scenario_resonance"],
         },
     ]
 
@@ -411,9 +396,9 @@ def _copy_guidance(
         ]
     else:
         hooks = [
-            "Start from a familiar use case.",
-            "Show the practical benefit.",
-            "Offer a low-risk next step.",
+            "Show the daily problem first.",
+            "Connect the product to the routine.",
+            "Use clear value without guaranteed outcomes.",
         ]
     return {
         "language": market_context.get("language"),
@@ -438,8 +423,8 @@ def _image_guidance(vertical: str) -> dict[str, Any]:
             "avoid": ["medical before-after claims", "unverified proof", "overcrowded text"],
         }
     return {
-        "composition": "Show the product in a practical daily-use scenario.",
-        "avoid": ["unsupported claims", "sensitive identity targeting", "fake testimonials"],
+        "composition": "Show a realistic product scenario and one clear benefit cue.",
+        "avoid": ["medical before-after claims", "unverified proof", "overcrowded text"],
     }
 
 
@@ -460,20 +445,36 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
         }
     return {
         "duration_adaptive": True,
-        "opening": "Lead with a recognizable situation.",
-        "middle": "Demonstrate the product benefit.",
-        "ending": "Close on a clear low-risk action.",
+        "opening": "Lead with the audience problem or routine moment.",
+        "middle": "Show product use and visible value cue.",
+        "ending": "Close with offer, proof, or clear next step.",
     }
 
 
-def _compliance_guardrails() -> list[str]:
-    return [
+def _compliance_guardrails(vertical: str) -> list[str]:
+    guardrails = [
         "Do not claim guaranteed results.",
         "Do not invent local trending topics.",
         "Do not imply sensitive personal attributes.",
         "Avoid fake platform UI, fake endorsements, and unsupported proof.",
         "Keep claims aligned with provided landing page, brief, and work order context.",
     ]
+    if vertical == "game":
+        guardrails.extend(
+            [
+                (
+                    "For game ads, keep rewards as in-game progress, level-up, unlock, "
+                    "or next-action feedback only."
+                ),
+                (
+                    "Do not show or imply real-money gambling, deposit/recharge, "
+                    "withdrawal, payout, cash value, wallet or balance UI, casino props, "
+                    "slot machines, chips, roulette, dice, poker props, jackpot panels, "
+                    "guaranteed winning, or guaranteed outcome claims."
+                ),
+            ]
+        )
+    return guardrails
 
 
 def _context_text(context: Mapping[str, Any]) -> str:
@@ -495,6 +496,15 @@ def _context_text(context: Mapping[str, Any]) -> str:
     ):
         _collect_text(context.get(key), parts)
     return " ".join(parts).casefold()
+
+
+def _game_signals(context: Mapping[str, Any], text: str) -> list[str]:
+    signals = _keyword_hits(text, GAME_KEYWORDS)
+    landing_url = _string_value(context.get("landing_url"))
+    host = urlparse(landing_url).hostname or ""
+    if host.rsplit(".", 1)[-1].casefold() == "game":
+        signals.append("game_tld")
+    return list(dict.fromkeys(signals))
 
 
 def _nested_value(value: Any, target_key: str) -> Any:

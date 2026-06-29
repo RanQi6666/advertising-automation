@@ -5,6 +5,20 @@ from backend.app.services.landing_visual_reference import (
 )
 
 GAJA_URL = "https://www.gaja777.game/#/?invite=YBG71118&register=true"
+FIXED_CARD_STYLE_TERMS = (
+    "premium cards",
+    "game cards",
+    "card carousel",
+    "fast carousel",
+    "end card",
+    "hero card",
+    "jewel card",
+    "game-card",
+)
+
+
+def _reference_text(reference: dict) -> str:
+    return str(reference).casefold()
 
 
 def test_gaja_domain_returns_premium_visual_fallback() -> None:
@@ -16,7 +30,9 @@ def test_gaja_domain_returns_premium_visual_fallback() -> None:
     assert "near-black navy background" in reference["palette"]
     assert "dark premium mobile game lobby" in reference["surface_style"]
     assert "metallic GAJA logo styling" in reference["surface_style"]
-    assert "mythic fire warrior card" in reference["original_game_card_archetypes"]
+    assert "original_game_card_archetypes" not in reference
+    assert "visible challenge setup" in reference["gameplay_moment_archetypes"]
+    assert "failed attempt and retry moment" in reference["gameplay_moment_archetypes"]
     assert "metallic GAJA logo visible in the first frame" in reference["composition_cues"]
     assert "restricted_review_props" in reference["negative_style_cues"]
     assert "financial_prop_cues" in reference["negative_style_cues"]
@@ -24,6 +40,7 @@ def test_gaja_domain_returns_premium_visual_fallback() -> None:
     assert reference["video_recipe"]["duration_seconds"] == 12
     assert reference["video_recipe"]["beats"][0].startswith("0-2s")
     assert "GAJA lobby hook" in reference["video_recipe"]["beats"][0]
+    assert not any(term in _reference_text(reference) for term in FIXED_CARD_STYLE_TERMS)
     assert "777" not in str(reference)
 
 

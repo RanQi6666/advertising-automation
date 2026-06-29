@@ -41,6 +41,17 @@ from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
 
 VIDEO_STREAM_HEARTBEAT_SECONDS = 5.0
+FIXED_GAME_CARD_STYLE_TERMS = (
+    "premium cards",
+    "game cards",
+    "card carousel",
+    "fast carousel",
+    "end card",
+    "hero card",
+    "jewel card",
+    "game-card",
+    "card fan-out",
+)
 
 
 class VideoService:
@@ -678,14 +689,14 @@ def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
     ]
     if template_id == "mini_game_pool":
         lines.append(
-            "Mini-game-pool rule: open with gameplay-led curiosity and end on a low-text "
-            "metallic GAJA game hub with no numeric suffix and a Start or Play Now CTA."
+            "Mini-game-pool rule: open with gameplay-led curiosity and close on a "
+            "low-text metallic GAJA game hub CTA beat with no numeric suffix."
         )
     elif template_id == "gaja_brand":
         lines.append(
             "GAJA brand rule: use a metallic GAJA logo or GAJA wordmark from the first "
-            "frame, avoid visible numeric suffix or visible brand-number text, and end "
-            "on a Start or Play Now CTA."
+            "frame, avoid visible numeric suffix or visible brand-number text, and build "
+            "the video around challenge, retry, reward, and a Start or Play Now CTA."
         )
     country_block = _country_style_pack_summary(country_style_pack)
     if country_block:
@@ -705,24 +716,32 @@ def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
     if isinstance(video_recipe, dict):
         beats = video_recipe.get("beats")
         if isinstance(beats, list) and beats:
-            lines.append(f"12-second beats: {'; '.join(_brand_safe_prompt_list(beats[:4]))}")
+            safe_beats = _brand_safe_direction_list(beats[:4])
+            if safe_beats:
+                lines.append(f"12-second beats: {'; '.join(safe_beats)}")
     if isinstance(negative_style_cues, list) and negative_style_cues:
-        lines.append(
-            f"Avoid style cues: {'; '.join(_brand_safe_prompt_list(negative_style_cues[:6]))}"
-        )
+        safe_negative = _brand_safe_direction_list(negative_style_cues[:6])
+        if safe_negative:
+            lines.append(
+                f"Avoid style cues: {'; '.join(safe_negative)}"
+            )
     if isinstance(motion_direction, list) and motion_direction:
-        lines.append(
-            f"Motion direction: {'; '.join(_brand_safe_prompt_list(motion_direction[:4]))}"
-        )
+        safe_motion = _brand_safe_direction_list(motion_direction[:4])
+        if safe_motion:
+            lines.append(
+                f"Motion direction: {'; '.join(safe_motion)}"
+            )
     if isinstance(guardrails, list) and guardrails:
-        lines.append(
-            f"Compliance guardrails: {'; '.join(_brand_safe_prompt_list(guardrails[:4]))}"
-        )
+        safe_guardrails = _brand_safe_direction_list(guardrails[:4])
+        if safe_guardrails:
+            lines.append(
+                f"Compliance guardrails: {'; '.join(safe_guardrails)}"
+            )
     return "\n".join(lines)
 
 
 def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
-    vertical = _brand_safe_prompt_text(str(creative_strategy.get("vertical") or "unknown"))
+    vertical = _brand_safe_prompt_text(_strategy_vertical(creative_strategy))
     market = creative_strategy.get("market_context")
     audience = creative_strategy.get("audience_lens")
     video_guidance = creative_strategy.get("video_guidance")
@@ -795,6 +814,13 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
         if safe_guardrails:
             lines.append(f"Compliance guardrails: {'; '.join(safe_guardrails)}")
     return "\n".join(lines)
+
+
+def _strategy_vertical(creative_strategy: dict) -> str:
+    vertical = str(creative_strategy.get("vertical") or "").strip().casefold()
+    if vertical == "game":
+        return "game"
+    return "ecommerce"
 
 
 def _country_style_pack_summary(value: Any) -> str:
@@ -903,10 +929,10 @@ def _strategy_frame_summary(value: Any) -> str:
         if safe_role:
             parts.append(safe_role)
     if isinstance(visual_must_include, list):
-        parts.extend(_brand_safe_prompt_list(visual_must_include[:5]))
+        parts.extend(_brand_safe_direction_list(visual_must_include[:5]))
     composition = value.get("composition")
     if composition:
-        safe_composition = _brand_safe_prompt_text(str(composition))
+        safe_composition = _brand_safe_direction_text(str(composition))
         if safe_composition:
             parts.append(safe_composition)
     return "; ".join(parts) if parts else "follow the approved frame role."
@@ -919,12 +945,12 @@ def _landing_visual_reference_summary(value: Any) -> str:
     for key, label in (
         ("palette", "palette"),
         ("surface_style", "surface style"),
-        ("original_game_card_archetypes", "game-card archetypes"),
+        ("gameplay_moment_archetypes", "gameplay moments"),
         ("composition_cues", "composition cues"),
     ):
         item = value.get(key)
         if isinstance(item, list) and item:
-            safe_items = _brand_safe_prompt_list(item[:4])
+            safe_items = _brand_safe_direction_list(item[:4])
             if not safe_items:
                 continue
             parts.append(
@@ -934,7 +960,7 @@ def _landing_visual_reference_summary(value: Any) -> str:
     if isinstance(video_recipe, dict):
         beats = video_recipe.get("beats")
         if isinstance(beats, list) and beats:
-            safe_beats = _brand_safe_prompt_list(beats[:4])
+            safe_beats = _brand_safe_direction_list(beats[:4])
             if safe_beats:
                 parts.append(f"video beats: {'; '.join(safe_beats)}")
     return " | ".join(parts) if len(parts) > 1 else ""
@@ -975,6 +1001,28 @@ def _brand_safe_prompt_list(values: list[Any]) -> list[str]:
         for safe_item in [_brand_safe_prompt_text(str(item))]
         if safe_item
     ]
+
+
+def _brand_safe_direction_text(value: str) -> str:
+    safe_text = _brand_safe_prompt_text(value)
+    if not safe_text or _contains_fixed_game_card_style(safe_text):
+        return ""
+    return safe_text
+
+
+def _brand_safe_direction_list(values: list[Any]) -> list[str]:
+    return [
+        safe_item
+        for item in values
+        if str(item).strip()
+        for safe_item in [_brand_safe_direction_text(str(item))]
+        if safe_item
+    ]
+
+
+def _contains_fixed_game_card_style(value: str) -> bool:
+    text = str(value).casefold()
+    return any(term in text for term in FIXED_GAME_CARD_STYLE_TERMS)
 
 
 def _strategy_from_context(context: dict[str, Any]) -> dict | None:
