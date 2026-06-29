@@ -2456,17 +2456,7 @@ function App() {
             setAspectRatio={setVideoAspectRatio}
             durationSeconds={videoDurationSeconds}
             setDurationSeconds={setVideoDurationSeconds}
-            instructions={videoInstructions}
-            setInstructions={setVideoInstructions}
             storyboardText={videoStoryboardText}
-            setStoryboardText={(value) => {
-              setVideoStoryboardText(value);
-              setVideoStoryboardDirty(true);
-            }}
-            storyboardFeedback={videoStoryboardFeedback}
-            setStoryboardFeedback={setVideoStoryboardFeedback}
-            onGenerateStoryboard={() => void handleGenerateVideoStoryboard()}
-            onRewriteStoryboard={() => void handleRewriteVideoStoryboard()}
             onCreateVideo={() => void handleCreateVideo()}
             onStartGeneration={(id) => void handleStartVideoGeneration(id)}
             onReview={handleReview}
@@ -3275,7 +3265,7 @@ function TopicsView({
         {activeTopic ? (
           <article className="topic-detail-card">
             <div className="topic-detail-hero">
-              <span className="topic-kicker">Topic Direction</span>
+              <span className="topic-kicker">选题方向</span>
               <h3>{activeTopic.title}</h3>
               <p>{activeTopic.angle}</p>
             </div>
@@ -3466,7 +3456,7 @@ function CopyView({
 
                 <section className="copy-body-card">
                   <div className="copy-body-head">
-                    <span>Primary Text</span>
+                    <span>正文</span>
                     <strong>{copyLengthLabel(selectedDraft.primary_text || selectedDraft.body)}</strong>
                   </div>
                   <pre className="copy-body-main">{selectedDraft.primary_text || selectedDraft.body}</pre>
@@ -3480,11 +3470,11 @@ function CopyView({
 
                 <div className="copy-field-grid">
                   <div>
-                    <span>Headline</span>
+                    <span>标题</span>
                     <strong>{selectedDraft.headline || "-"}</strong>
                   </div>
                   <div>
-                    <span>Description</span>
+                    <span>描述</span>
                     <strong>{selectedDraft.description || "-"}</strong>
                   </div>
                   <div>
@@ -4352,14 +4342,7 @@ function VideosView({
   setAspectRatio,
   durationSeconds,
   setDurationSeconds,
-  instructions,
-  setInstructions,
   storyboardText,
-  setStoryboardText,
-  storyboardFeedback,
-  setStoryboardFeedback,
-  onGenerateStoryboard,
-  onRewriteStoryboard,
   onCreateVideo,
   onStartGeneration,
   onReview,
@@ -4378,14 +4361,7 @@ function VideosView({
   setAspectRatio: (value: string) => void;
   durationSeconds: number;
   setDurationSeconds: (value: number) => void;
-  instructions: string;
-  setInstructions: (value: string) => void;
   storyboardText: string;
-  setStoryboardText: (value: string) => void;
-  storyboardFeedback: string;
-  setStoryboardFeedback: (value: string) => void;
-  onGenerateStoryboard: () => void;
-  onRewriteStoryboard: () => void;
   onCreateVideo: () => void;
   onStartGeneration: (videoId: string) => void;
   onReview: (
@@ -4405,7 +4381,7 @@ function VideosView({
     draft?.primary_text ||
     draft?.body ||
     storyboardText.trim() ||
-    "确认脚本并生成视频后，这里会展示成片在广告里的样子。";
+    "生成视频后，这里会展示成片在广告里的样子。";
   const previewHeadline = draft?.headline || campaign?.product_name || campaign?.name || "Ad headline";
   const previewDescription = draft?.description || campaign?.audience_description || "Ad description";
   const previewCta = draft?.cta || "Learn More";
@@ -4430,27 +4406,156 @@ function VideosView({
     ? selectedVideo.status !== "failed" && selectedVideoPollWarning
       ? selectedVideoPollWarning.message
       : selectedVideo.status === "failed"
-      ? selectedVideo.error_message || "可以在右侧任务里重试生成。"
+      ? selectedVideo.error_message || "可以在任务卡片里重试生成。"
       : previewVideoGenerating
         ? `已等待 ${formatDuration(videoWaitSeconds(selectedVideo))}，完成后会自动切换为视频预览。`
-        : "确认脚本并生成视频后，会在这里看到完整广告预览。"
-    : "先确认脚本并生成视频，预览会跟随当前任务更新。";
+        : "生成视频后，会在这里看到完整广告预览。"
+    : "先在图片页准备脚本并生成视频，预览会跟随当前任务更新。";
+
+  const videoReviewPanel = (
+    <section className="video-review-panel video-review-inline-panel">
+      <div className="panel-header video-panel-header">
+        <div>
+          <span className="section-eyebrow">审核队列</span>
+          <h2>视频审核</h2>
+        </div>
+        <span className="panel-note">
+          {videos.length ? `${workingVideoCount} 个待处理 / ${approvedVideoCount} 个已通过` : "暂无任务"}
+        </span>
+      </div>
+      {videos.length ? (
+        <div className="video-task-stack">
+          {videos.map((video) => {
+            const selected = selectedVideo?.id === video.id;
+            const isStarting = loading === `video-generate-${video.id}`;
+            const isGenerating = isStarting || isVideoGeneratingStatus(video.status);
+            const canReview = video.status === "generated" && Boolean(video.url);
+            const canRetryGeneration = ["requested", "failed", "needs_revision"].includes(video.status);
+            const pollWarning = videoPollWarnings[video.id];
+            return (
+              <article className={`video-card ${selected ? "selected" : ""}`} key={video.id}>
+                <div className="video-card-head">
+                  <div>
+                    <span>视频任务 {shortId(video.id)}</span>
+                    <strong>{video.aspect_ratio} / {video.duration_seconds || "-"} 秒</strong>
+                  </div>
+                  <StatusPill status={video.status} />
+                </div>
+                {video.url ? (
+                  <VideoPreview url={video.url} />
+                ) : (
+                  <div className={`video-preview-placeholder ${isGenerating ? "generating" : video.status === "failed" ? "failed" : ""}`}>
+                    {isGenerating ? <Loader2 size={22} className="spin" /> : video.status === "failed" ? <X size={22} /> : <Film size={22} />}
+                    <strong>
+                      {isGenerating
+                        ? "正在生成成片"
+                        : video.status === "failed"
+                          ? "生成失败"
+                          : video.status === "requested"
+                            ? "任务待提交"
+                            : "等待生成成片"}
+                    </strong>
+                    <span>
+                      {isGenerating
+                        ? `已等待 ${formatDuration(videoWaitSeconds(video))}，完成后会自动显示预览`
+                        : video.provider_job_id
+                          ? `任务号 ${video.provider_job_id}`
+                          : video.status === "requested"
+                            ? "自动提交未完成，可重试生成"
+                            : "生成视频后会自动提交任务"}
+                    </span>
+                  </div>
+                )}
+                <div className="video-task-summary">
+                  <div>
+                    <span>比例</span>
+                    <strong>{video.aspect_ratio}</strong>
+                  </div>
+                  <div>
+                    <span>时长</span>
+                    <strong>{video.duration_seconds || "-"} 秒</strong>
+                  </div>
+                  <div>
+                    <span>来源图片</span>
+                    <strong>{video.source_asset_ids.length || "-"} 张</strong>
+                  </div>
+                </div>
+                {video.error_message && <p className="video-error-text">{video.error_message}</p>}
+                {pollWarning && video.status !== "failed" && (
+                  <p className="video-error-text">{pollWarning.message}</p>
+                )}
+                <div className="video-task-actions">
+                  {selected ? (
+                    <div className="video-selection-indicator">
+                      <Check size={16} />
+                      <span>当前预览</span>
+                    </div>
+                  ) : (
+                    <button className="secondary-button" type="button" onClick={() => setSelectedVideoId(video.id)}>
+                      <Check size={16} />
+                      <span>设为当前</span>
+                    </button>
+                  )}
+                  {isGenerating && (
+                    <button className="secondary-button" type="button" disabled>
+                      <Loader2 size={16} className="spin" />
+                      <span>生成中</span>
+                    </button>
+                  )}
+                  {!isGenerating && canRetryGeneration && (
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => onStartGeneration(video.id)}
+                      disabled={isStarting}
+                    >
+                      {isStarting ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+                      <span>重试生成</span>
+                    </button>
+                  )}
+                  {canReview && (
+                    <>
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => onReview("video_asset", video.id, "approved")}
+                      >
+                        <Check size={16} />
+                        <span>通过</span>
+                      </button>
+                      <button
+                        className="secondary-button danger"
+                        type="button"
+                        onClick={() => onReview("video_asset", video.id, "rejected")}
+                      >
+                        <X size={16} />
+                        <span>拒绝</span>
+                      </button>
+                    </>
+                  )}
+                  {video.status === "approved" && (
+                    <div className="review-complete video-review-complete">
+                      <Check size={16} />
+                      <span>视频已通过</span>
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="video-empty-state">
+          <Film size={26} />
+          <strong>暂无视频任务</strong>
+          <span>从上方生成视频后会出现在这里</span>
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <section className="video-workbench">
-      <div className="video-overview-strip">
-        <div>
-          <span className="section-eyebrow">VIDEO REVIEW</span>
-          <strong>{selectedVideo ? `当前任务 ${shortId(selectedVideo.id)}` : "等待创建视频任务"}</strong>
-        </div>
-        <div className="video-overview-metrics" aria-label="视频生产概览">
-          <span>{referenceOptions.length} 个已通过方案</span>
-          <span>{selectedReferenceOption?.label ?? "未选择方案"}</span>
-          <span>{workingVideoCount} 个待处理</span>
-          <span>{approvedVideoCount} 个已通过</span>
-        </div>
-      </div>
-
       <section className="video-layout">
         <section className="panel video-builder-panel">
           <div className="panel-header video-panel-header">
@@ -4527,27 +4632,10 @@ function VideosView({
                 <div className="video-inline-empty">暂无审核通过的图片</div>
               )}
             </div>
-            <div className="config-group full">
-              <label htmlFor="video-instructions">风格与镜头要求</label>
-              <textarea
-                id="video-instructions"
-                className="video-instructions"
-                value={instructions}
-                onChange={(event) => setInstructions(event.target.value)}
-                disabled={storyboardStreaming}
-                placeholder="视频风格或镜头要求"
-              />
-            </div>
             <div className="video-action-bar">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={onGenerateStoryboard}
-                disabled={loading === "video-storyboard" || loading === "video-storyboard-rewrite"}
-              >
-                {loading === "video-storyboard" ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                <span>生成创意脚本</span>
-              </button>
+              <span className="video-script-handoff">
+                {storyboardText.trim() ? "已沿用图片页视频创意脚本" : "请先在图片页生成或粘贴视频创意脚本"}
+              </span>
               <button
                 className="primary-button"
                 type="button"
@@ -4561,62 +4649,11 @@ function VideosView({
                 }
               >
                 <Film size={16} />
-                <span>确认脚本并生成视频</span>
+                <span>生成视频</span>
               </button>
             </div>
           </div>
-          <details className="storyboard-editor-details video-storyboard-editor" open>
-            <summary>
-              <span>创意脚本</span>
-              <small>
-                {loading === "video-storyboard"
-                  ? "生成中"
-                  : loading === "video-storyboard-rewrite"
-                    ? "改写中"
-                    : storyboardText.trim()
-                      ? "可编辑"
-                      : "未生成"}
-              </small>
-            </summary>
-            <textarea
-              className="storyboard-input"
-              value={storyboardText}
-              onChange={(event) => setStoryboardText(event.target.value)}
-              disabled={storyboardStreaming}
-              placeholder="暂无脚本内容"
-            />
-            <div className="storyboard-rewrite-box">
-              <label htmlFor="video-storyboard-feedback">脚本修改意见</label>
-              <textarea
-                id="video-storyboard-feedback"
-                className="storyboard-feedback-input"
-                value={storyboardFeedback}
-                onChange={(event) => setStoryboardFeedback(event.target.value)}
-                disabled={storyboardStreaming}
-                placeholder="例如：第一幕更强钩子，字幕更短，不要旁白，第三幕改成产品使用场景"
-              />
-              <div className="storyboard-rewrite-actions">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={onRewriteStoryboard}
-                  disabled={
-                    !storyboardText.trim() ||
-                    !storyboardFeedback.trim() ||
-                    loading === "video-storyboard" ||
-                    loading === "video-storyboard-rewrite"
-                  }
-                >
-                  {loading === "video-storyboard-rewrite" ? (
-                    <Loader2 size={16} className="spin" />
-                  ) : (
-                    <Sparkles size={16} />
-                  )}
-                  <span>按意见改写脚本</span>
-                </button>
-              </div>
-            </div>
-          </details>
+          {videoReviewPanel}
         </section>
 
         <section className="video-side-stack">
@@ -4682,144 +4719,6 @@ function VideosView({
                 </div>
               </div>
             </div>
-          </section>
-
-          <section className="panel wide video-review-panel">
-          <div className="panel-header video-panel-header">
-            <div>
-              <span className="section-eyebrow">QUEUE</span>
-              <h2>视频审核</h2>
-            </div>
-            <span className="panel-note">{videos.length ? `${videos.length} 个任务` : "暂无任务"}</span>
-          </div>
-          {videos.length ? (
-            <div className="video-task-stack">
-              {videos.map((video) => {
-                const selected = selectedVideo?.id === video.id;
-                const isStarting = loading === `video-generate-${video.id}`;
-                const isGenerating = isStarting || isVideoGeneratingStatus(video.status);
-                const canReview = video.status === "generated" && Boolean(video.url);
-                const canRetryGeneration = ["requested", "failed", "needs_revision"].includes(video.status);
-                const pollWarning = videoPollWarnings[video.id];
-                return (
-                  <article className={`video-card ${selected ? "selected" : ""}`} key={video.id}>
-                    <div className="video-card-head">
-                      <div>
-                        <span>视频任务 {shortId(video.id)}</span>
-                        <strong>{video.aspect_ratio} / {video.duration_seconds || "-"} 秒</strong>
-                      </div>
-                      <StatusPill status={video.status} />
-                    </div>
-                    {video.url ? (
-                      <VideoPreview url={video.url} />
-                    ) : (
-                      <div className={`video-preview-placeholder ${isGenerating ? "generating" : video.status === "failed" ? "failed" : ""}`}>
-                        {isGenerating ? <Loader2 size={22} className="spin" /> : video.status === "failed" ? <X size={22} /> : <Film size={22} />}
-                        <strong>
-                          {isGenerating
-                            ? "正在生成成片"
-                            : video.status === "failed"
-                              ? "生成失败"
-                              : video.status === "requested"
-                                ? "任务待提交"
-                                : "等待生成成片"}
-                        </strong>
-                        <span>
-                          {isGenerating
-                            ? `已等待 ${formatDuration(videoWaitSeconds(video))}，完成后会自动显示预览`
-                            : video.provider_job_id
-                              ? `任务号 ${video.provider_job_id}`
-                              : video.status === "requested"
-                                ? "自动提交未完成，可重试生成"
-                                : "确认脚本后会自动提交生成"}
-                        </span>
-                      </div>
-                    )}
-                    <div className="video-task-summary">
-                      <div>
-                        <span>比例</span>
-                        <strong>{video.aspect_ratio}</strong>
-                      </div>
-                      <div>
-                        <span>时长</span>
-                        <strong>{video.duration_seconds || "-"} 秒</strong>
-                      </div>
-                      <div>
-                        <span>来源图片</span>
-                        <strong>{video.source_asset_ids.length || "-"} 张</strong>
-                      </div>
-                    </div>
-                    {video.error_message && <p className="video-error-text">{video.error_message}</p>}
-                    {pollWarning && video.status !== "failed" && (
-                      <p className="video-error-text">{pollWarning.message}</p>
-                    )}
-                    <div className="video-task-actions">
-                      {selected ? (
-                        <div className="video-selection-indicator">
-                          <Check size={16} />
-                          <span>当前预览</span>
-                        </div>
-                      ) : (
-                        <button className="secondary-button" type="button" onClick={() => setSelectedVideoId(video.id)}>
-                          <Check size={16} />
-                          <span>设为当前</span>
-                        </button>
-                      )}
-                      {isGenerating && (
-                        <button className="secondary-button" type="button" disabled>
-                          <Loader2 size={16} className="spin" />
-                          <span>生成中</span>
-                        </button>
-                      )}
-                      {!isGenerating && canRetryGeneration && (
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          onClick={() => onStartGeneration(video.id)}
-                          disabled={isStarting}
-                        >
-                          {isStarting ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-                          <span>重试生成</span>
-                        </button>
-                      )}
-                      {canReview && (
-                        <>
-                          <button
-                            className="primary-button"
-                            type="button"
-                            onClick={() => onReview("video_asset", video.id, "approved")}
-                          >
-                            <Check size={16} />
-                            <span>通过</span>
-                          </button>
-                          <button
-                            className="secondary-button danger"
-                            type="button"
-                            onClick={() => onReview("video_asset", video.id, "rejected")}
-                          >
-                            <X size={16} />
-                            <span>拒绝</span>
-                          </button>
-                        </>
-                      )}
-                      {video.status === "approved" && (
-                        <div className="review-complete video-review-complete">
-                          <Check size={16} />
-                          <span>视频已通过</span>
-                        </div>
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="video-empty-state">
-              <Film size={26} />
-              <strong>暂无视频任务</strong>
-              <span>等待创建</span>
-            </div>
-          )}
           </section>
         </section>
       </section>
