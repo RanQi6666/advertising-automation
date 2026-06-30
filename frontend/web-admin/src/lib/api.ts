@@ -8,6 +8,7 @@ import type {
   CreativeAsset,
   LandingPageSnapshot,
   ModelOptions,
+  OperatorUser,
   ReviewTask,
   Topic,
   VideoAsset,
@@ -19,6 +20,7 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8001/api/v1";
 const ACCESS_TOKEN_STORAGE_KEY = "ai_ads_access_token";
+const OPERATOR_ID_STORAGE_KEY = "ai_ads_operator_id";
 const EXTERNAL_AI_TRANSIENT_MESSAGE =
   "外部 AI 服务短暂波动，任务可能仍在处理中，请稍后查看结果或重试。";
 
@@ -250,6 +252,7 @@ async function streamSse<TEvent>(
 export const api = {
   baseUrl: API_BASE_URL,
 
+  listOperators: () => request<OperatorUser[]>("/operators"),
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
   getModelOptions: () => request<ModelOptions>("/model-options"),
   listAdGenerationJobs: (limit = 50) =>
@@ -260,6 +263,8 @@ export const api = {
     post<AdPerformanceAnalysis>("/integrations/ad-performance/analyses", payload),
   getAdPerformanceAnalysis: (analysisId: string) =>
     request<AdPerformanceAnalysis>(`/integrations/ad-performance/analyses/${analysisId}`),
+  claimAdPerformanceAnalysis: (analysisId: string) =>
+    post<AdPerformanceAnalysis>(`/integrations/ad-performance/analyses/${analysisId}/claim`, {}),
   deleteAdPerformanceAnalysis: (analysisId: string) =>
     request<void>(`/integrations/ad-performance/analyses/${analysisId}`, {
       method: "DELETE",
@@ -275,6 +280,8 @@ export const api = {
     ),
   getAdGenerationJob: (jobId: string) =>
     request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}`),
+  claimAdGenerationJob: (jobId: string) =>
+    post<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}/claim`, {}),
   getAdGenerationResult: (jobId: string) =>
     request<Record<string, unknown>>(
       `/integrations/publishing/ad-generation/jobs/${jobId}/result`,
@@ -313,22 +320,26 @@ export const api = {
     jobId: string,
     resultPayload: Record<string, unknown>,
     reviewNotes?: string,
+    expectedUpdatedAt?: string | null,
   ) =>
     request<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}/review`, {
       method: "PATCH",
       body: JSON.stringify({
         result_payload: resultPayload,
         review_notes: reviewNotes ?? null,
+        expected_updated_at: expectedUpdatedAt ?? null,
       }),
     }),
   confirmAdGenerationReview: (
     jobId: string,
     resultPayload?: Record<string, unknown>,
     reviewNotes?: string,
+    expectedUpdatedAt?: string | null,
   ) =>
     post<AdGenerationJob>(`/integrations/publishing/ad-generation/jobs/${jobId}/confirm`, {
       result_payload: resultPayload ?? null,
       review_notes: reviewNotes ?? null,
+      expected_updated_at: expectedUpdatedAt ?? null,
     }),
   extractWorkOrderDeliveryFields: (rawContent: string) =>
     post<WorkOrderDeliveryExtraction>("/work-orders/extract-delivery-fields", {
@@ -613,9 +624,11 @@ export { ApiError, EXTERNAL_AI_TRANSIENT_MESSAGE, apiErrorMessage, isTransientAp
 
 function requestHeaders(headers: HeadersInit = {}): HeadersInit {
   const accessToken = getAccessToken();
+  const operatorId = getOperatorId();
   return {
     "Content-Type": "application/json",
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...(operatorId ? { "X-Operator-Id": operatorId } : {}),
     ...(headers as Record<string, string>),
   };
 }
@@ -632,4 +645,18 @@ export function getAccessToken(): string | null {
   }
 
   return window.sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+}
+
+export function getOperatorId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.sessionStorage.getItem(OPERATOR_ID_STORAGE_KEY);
+}
+
+export function setOperatorId(operatorId: string | null): void {
+  if (typeof window === "undefined") return;
+  if (operatorId) {
+    window.sessionStorage.setItem(OPERATOR_ID_STORAGE_KEY, operatorId);
+  } else {
+    window.sessionStorage.removeItem(OPERATOR_ID_STORAGE_KEY);
+  }
 }

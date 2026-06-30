@@ -21,6 +21,13 @@ export interface WorkOrder extends Timestamped {
   metadata_json: Record<string, unknown>;
 }
 
+export interface OperatorUser extends Timestamped {
+  email: string;
+  full_name: string | null;
+  role: "operator" | "admin" | string;
+  is_active: boolean;
+}
+
 export type DeliveryFieldStatus = "extracted" | "suggested" | "missing" | "conflict";
 
 export interface WorkOrderDeliveryField<T = unknown> {
@@ -98,6 +105,10 @@ export interface AdGenerationJob extends Timestamped {
   error_message: string | null;
   started_at: string | null;
   completed_at: string | null;
+  owner_user_id: string | null;
+  locked_by: string | null;
+  locked_at: string | null;
+  can_edit: boolean;
   metadata_json: Record<string, unknown>;
   review_url: string | null;
   return_url: string | null;
@@ -240,6 +251,10 @@ export interface AdPerformanceAnalysis extends Timestamped {
   metrics: Record<string, unknown>;
   analysis_result: AdPerformanceAnalysisResult;
   error_message: string | null;
+  owner_user_id: string | null;
+  locked_by: string | null;
+  locked_at: string | null;
+  can_edit: boolean;
 }
 
 export interface LandingPageSnapshot extends Timestamped {

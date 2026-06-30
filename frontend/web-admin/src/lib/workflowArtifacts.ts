@@ -1,4 +1,4 @@
-import type { CopyDraft, CreativeAsset, Topic, VideoAsset } from "../types/domain";
+import type { AdGenerationJob, CopyDraft, CreativeAsset, Topic, VideoAsset } from "../types/domain";
 
 const KEYFRAME_VARIANT_OPTIONS = [1, 2, 3] as const;
 const KEYFRAME_FRAMES_PER_VARIANT = 2;
@@ -29,6 +29,7 @@ export type CreativeReviewState<TSlot extends CreativeSlotLike = CreativeSlotLik
 };
 
 export type TopicScopedArtifacts = {
+  selectedCampaignId?: string | null;
   selectedTopic: Topic | null;
   drafts: CopyDraft[];
   creatives: CreativeAsset[];
@@ -44,18 +45,40 @@ export type VideoCreativeReferenceOption = {
 };
 
 export function filterWorkflowArtifactsForTopic({
+  selectedCampaignId,
   selectedTopic,
   drafts,
   creatives,
   videos,
 }: TopicScopedArtifacts): Omit<TopicScopedArtifacts, "selectedTopic"> {
-  if (!selectedTopic) return { drafts, creatives, videos };
+  const campaignDrafts =
+    selectedCampaignId === undefined
+      ? drafts
+      : selectedCampaignId
+        ? drafts.filter((draft) => draft.campaign_id === selectedCampaignId)
+        : [];
+  const campaignCreatives =
+    selectedCampaignId === undefined
+      ? creatives
+      : selectedCampaignId
+        ? creatives.filter((asset) => asset.campaign_id === selectedCampaignId)
+        : [];
+  const campaignVideos =
+    selectedCampaignId === undefined
+      ? videos
+      : selectedCampaignId
+        ? videos.filter((video) => video.campaign_id === selectedCampaignId)
+        : [];
 
-  const scopedDrafts = drafts.filter((draft) => draft.topic_id === selectedTopic.id);
+  if (!selectedTopic) {
+    return { drafts: campaignDrafts, creatives: campaignCreatives, videos: campaignVideos };
+  }
+
+  const scopedDrafts = campaignDrafts.filter((draft) => draft.topic_id === selectedTopic.id);
   const draftIds = new Set(scopedDrafts.map((draft) => draft.id));
-  const scopedCreatives = creatives.filter((asset) => draftIds.has(asset.draft_id));
+  const scopedCreatives = campaignCreatives.filter((asset) => draftIds.has(asset.draft_id));
   const creativeIds = new Set(scopedCreatives.map((asset) => asset.id));
-  const scopedVideos = videos.filter((video) => {
+  const scopedVideos = campaignVideos.filter((video) => {
     if (video.draft_id && draftIds.has(video.draft_id)) return true;
     return video.source_asset_ids.some((id) => creativeIds.has(id));
   });
@@ -158,6 +181,36 @@ export function adPreviewCreativeOptions(
         (!draftId || asset.draft_id === draftId),
     ),
   );
+}
+
+export function workflowRequiresVideo(job: AdGenerationJob | null, creatives: CreativeAsset[] = []): boolean {
+  if (creatives.some(isKeyframeVariantAsset)) return true;
+  if (!job) return false;
+
+  const request = job.request_payload ?? {};
+  const preferences = isRecord(request.preferences) ? request.preferences : {};
+  if (typeof preferences.video_required === "boolean") return preferences.video_required;
+
+  const result = job.result_payload ?? {};
+  const creativePayload = isRecord(result.creative_payload) ? result.creative_payload : {};
+  const creativeType = [preferences.creative_type, creativePayload.type, creativePayload.creative_type]
+    .map((value) => readText(value).toLowerCase())
+    .find(Boolean);
+  if (creativeType) return ["video", "motion", "short_video"].includes(creativeType);
+
+  return job.status === "video_review";
+}
+
+export function adGenerationJobNumber(job: AdGenerationJob, jobs: AdGenerationJob[]): string {
+  const ordered = jobs.slice().sort((left, right) => {
+    const leftTime = Date.parse(left.created_at);
+    const rightTime = Date.parse(right.created_at);
+    const timeDiff = (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
+    if (timeDiff !== 0) return timeDiff;
+    return left.id.localeCompare(right.id);
+  });
+  const index = ordered.findIndex((item) => item.id === job.id);
+  return String(index >= 0 ? index + 1 : 1).padStart(3, "0");
 }
 
 export function currentCreativeAssets(creatives: CreativeAsset[]): CreativeAsset[] {
@@ -329,4 +382,8 @@ function readText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

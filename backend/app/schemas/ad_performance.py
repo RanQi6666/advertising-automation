@@ -166,5 +166,9 @@ class AdPerformanceAnalysisRead(TimestampedRead):
     metrics: dict[str, Any] = Field(default_factory=dict)
     analysis_result: AdPerformanceAnalysisResult
     error_message: str | None = None
+    owner_user_id: str | None = None
+    locked_by: str | None = None
+    locked_at: datetime | None = None
+    can_edit: bool = False
     created_at: datetime
     updated_at: datetime

@@ -905,7 +905,7 @@ async def test_publishing_ad_generation_review_confirm_marks_job_reviewed() -> N
 
 
 @pytest.mark.asyncio
-async def test_confirm_review_records_brand_safety_risks_but_returns() -> None:
+async def test_confirm_review_returns_without_removed_review_gate_fields() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -916,109 +916,38 @@ async def test_confirm_review_records_brand_safety_risks_but_returns() -> None:
         job = await service.create_job(
             session,
             PublishingAdGenerationJobCreate(
-                external_order_id="order-brand-risk",
+                external_order_id="order-direct-return",
                 work_order=PublishingWorkOrderPayload(
                     raw_content=(
-                        "Project: brand risk\n"
+                        "Project: direct return\n"
                         "Country: US\n"
                         "Audience: age 25-45\n"
                         "Event: traffic\n"
-                        "Landing: https://example.com/brand-risk"
+                        "Landing: https://example.com/direct-return"
                     ),
                     structured_fields={
-                        "project_name": "Brand Risk",
+                        "project_name": "Direct Return",
                         "country": "US",
                         "age_min": 25,
                         "age_max": 45,
                         "event_name": "traffic",
-                        "landing_url": "https://example.com/brand-risk",
+                        "landing_url": "https://example.com/direct-return",
                     },
                 ),
                 preferences=PublishingAdGenerationPreferences(image_count=1),
             ),
         )
         generated = await service.process_job(session, job.id)
-        risky_payload = {
+        reviewed_payload = {
             **generated.result_payload,
             "status": "final_review",
             "creative_payload": {
-                "name": "Brand Risk - image",
-                "type": "image",
-                "message": "限时优惠，低价体验。",
-                "link": "https://example.com/brand-risk",
-                "ads_name": "低价优惠",
-                "description": "Free deal today",
-                "asset_url": "https://cdn.example/image.png",
-                "image_asset_url": "https://cdn.example/image.png",
-                "draft": 1,
-            },
-        }
-
-        returned = await service.confirm_review(
-            session,
-            generated.id,
-            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
-        )
-
-    assert returned.status == "returned"
-    assert returned.result_payload["status"] == "returned"
-    brand_safety = returned.result_payload["review"]["brand_safety"]
-    assert brand_safety["status"] == "blocked"
-    assert brand_safety["highest_severity"] == "high"
-    assert {item["category"] for item in brand_safety["findings"]} >= {"price_promotion"}
-
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_confirm_review_warns_but_returns_when_brand_safety_mode_is_warn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("BRAND_SAFETY_MODE", "warn")
-    get_settings.cache_clear()
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        service = AdGenerationService()
-        job = await service.create_job(
-            session,
-            PublishingAdGenerationJobCreate(
-                external_order_id="order-brand-warn",
-                work_order=PublishingWorkOrderPayload(
-                    raw_content=(
-                        "Project: brand warn\n"
-                        "Country: US\n"
-                        "Audience: age 25-45\n"
-                        "Event: traffic\n"
-                        "Landing: https://example.com/brand-warn"
-                    ),
-                    structured_fields={
-                        "project_name": "Brand Warn",
-                        "country": "US",
-                        "age_min": 25,
-                        "age_max": 45,
-                        "event_name": "traffic",
-                        "landing_url": "https://example.com/brand-warn",
-                    },
-                ),
-                preferences=PublishingAdGenerationPreferences(image_count=1),
-            ),
-        )
-        generated = await service.process_job(session, job.id)
-        risky_payload = {
-            **generated.result_payload,
-            "status": "final_review",
-            "creative_payload": {
-                "name": "Brand Warn - image",
+                "name": "Direct Return - image",
                 "type": "image",
                 "message": "Free deal today with cash and chips.",
-                "link": "https://example.com/brand-warn",
-                "ads_name": "Daily setup",
-                "description": "Simple setup guide",
+                "link": "https://example.com/direct-return",
+                "ads_name": "Operator approved headline",
+                "description": "Operator approved description",
                 "asset_url": "https://cdn.example/image.png",
                 "image_asset_url": "https://cdn.example/image.png",
                 "draft": 1,
@@ -1028,157 +957,16 @@ async def test_confirm_review_warns_but_returns_when_brand_safety_mode_is_warn(
         returned = await service.confirm_review(
             session,
             generated.id,
-            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
+            PublishingAdGenerationReviewConfirm(result_payload=reviewed_payload),
         )
 
     assert returned.status == "returned"
     assert returned.result_payload["status"] == "returned"
-    brand_safety = returned.result_payload["review"]["brand_safety"]
-    assert brand_safety["status"] == "blocked"
-    assert {item["category"] for item in brand_safety["findings"]} >= {
-        "gambling",
-        "money",
-        "price_promotion",
-    }
+    assert "brand_safety" not in returned.result_payload.get("review", {})
+    assert "brand_safety_mode" not in returned.metadata_json
+    assert "brand_safety_status" not in returned.metadata_json
 
     await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_confirm_review_skips_brand_safety_when_mode_is_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("BRAND_SAFETY_MODE", "off")
-    get_settings.cache_clear()
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        service = AdGenerationService()
-        job = await service.create_job(
-            session,
-            PublishingAdGenerationJobCreate(
-                external_order_id="order-brand-off",
-                work_order=PublishingWorkOrderPayload(
-                    raw_content=(
-                        "Project: brand off\n"
-                        "Country: US\n"
-                        "Audience: age 25-45\n"
-                        "Event: traffic\n"
-                        "Landing: https://example.com/brand-off"
-                    ),
-                    structured_fields={
-                        "project_name": "Brand Off",
-                        "country": "US",
-                        "age_min": 25,
-                        "age_max": 45,
-                        "event_name": "traffic",
-                        "landing_url": "https://example.com/brand-off",
-                    },
-                ),
-                preferences=PublishingAdGenerationPreferences(image_count=1),
-            ),
-        )
-        generated = await service.process_job(session, job.id)
-        risky_payload = {
-            **generated.result_payload,
-            "status": "final_review",
-            "creative_payload": {
-                "name": "Brand Off - image",
-                "type": "image",
-                "message": "Free deal today with cash and chips.",
-                "link": "https://example.com/brand-off",
-                "ads_name": "Daily setup",
-                "description": "Simple setup guide",
-                "asset_url": "https://cdn.example/image.png",
-                "image_asset_url": "https://cdn.example/image.png",
-                "draft": 1,
-            },
-        }
-
-        returned = await service.confirm_review(
-            session,
-            generated.id,
-            PublishingAdGenerationReviewConfirm(result_payload=risky_payload),
-        )
-
-    assert returned.status == "returned"
-    assert returned.result_payload["status"] == "returned"
-    assert returned.result_payload["review"]["brand_safety"] == {
-        "status": "skipped",
-        "highest_severity": None,
-        "findings": [],
-    }
-
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_confirm_review_records_passed_brand_safety_report() -> None:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        service = AdGenerationService()
-        job = await service.create_job(
-            session,
-            PublishingAdGenerationJobCreate(
-                external_order_id="order-brand-safe",
-                work_order=PublishingWorkOrderPayload(
-                    raw_content=(
-                        "Project: brand safe\n"
-                        "Country: US\n"
-                        "Audience: age 25-45\n"
-                        "Event: traffic\n"
-                        "Landing: https://example.com/brand-safe"
-                    ),
-                    structured_fields={
-                        "project_name": "Brand Safe",
-                        "country": "US",
-                        "age_min": 25,
-                        "age_max": 45,
-                        "event_name": "traffic",
-                        "landing_url": "https://example.com/brand-safe",
-                    },
-                ),
-                preferences=PublishingAdGenerationPreferences(image_count=1),
-            ),
-        )
-        generated = await service.process_job(session, job.id)
-        safe_payload = {
-            **generated.result_payload,
-            "status": "final_review",
-            "creative_payload": {
-                "name": "Brand Safe - image",
-                "type": "image",
-                "message": "Simple setup for a smoother daily experience.",
-                "link": "https://example.com/brand-safe",
-                "ads_name": "Start with a clear guide",
-                "description": "Learn more about daily use.",
-                "asset_url": "https://cdn.example/image.png",
-                "image_asset_url": "https://cdn.example/image.png",
-                "draft": 1,
-            },
-        }
-
-        returned = await service.confirm_review(
-            session,
-            generated.id,
-            PublishingAdGenerationReviewConfirm(result_payload=safe_payload),
-        )
-
-    assert returned.status == "returned"
-    assert returned.result_payload["status"] == "returned"
-    assert returned.result_payload["review"]["brand_safety"]["status"] == "passed"
-    assert returned.result_payload["review"]["brand_safety"]["findings"] == []
-
-    await engine.dispose()
-
 
 @pytest.mark.asyncio
 async def test_publishing_ad_generation_confirm_posts_callback(

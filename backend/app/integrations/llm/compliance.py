@@ -1,8 +1,6 @@
-from backend.app.services.brand_safety_policy import BRAND_SAFETY_PROMPT_GUARDRAILS
-
 META_AD_COMPLIANCE_PROMPT_VERSION = "meta_ad_compliance.v1"
 
-META_AD_COMPLIANCE_SYSTEM_PROMPT = f"""
+META_AD_COMPLIANCE_SYSTEM_PROMPT = """
 Meta/Facebook ad compliance guardrails:
 - Do not try to bypass, evade, or trick ad review. Generate compliant ads from the start.
 - Do not assert or imply sensitive or personal attributes about the viewer, including age,
@@ -23,8 +21,6 @@ Meta/Facebook ad compliance guardrails:
   language. Avoid asking the image or video model to render recognizable third-party marks.
 - If operator feedback contains risky wording, satisfy the business intent while rewriting
   the risky wording into compliant, neutral, and evidence-based language.
-
-{BRAND_SAFETY_PROMPT_GUARDRAILS}
 """.strip()
 
 

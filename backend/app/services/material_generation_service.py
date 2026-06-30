@@ -1,5 +1,3 @@
-from typing import Any
-
 from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,19 +10,16 @@ from backend.app.db.models.enums import VideoStatus
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.material_generation import (
-    MATERIAL_CODE_BRAND_SAFETY_ERROR,
     MATERIAL_CODE_PROCESSING,
     MATERIAL_CODE_PROVIDER_ERROR,
     MATERIAL_CODE_SUCCESS,
     MATERIAL_CODE_VALIDATION_ERROR,
     MaterialCopyGenerateRequest,
     MaterialGenerationAPIError,
-    MaterialGenerationBaseRequest,
     MaterialGenerationEnvelope,
     MaterialImageGenerateRequest,
     MaterialVideoGenerateRequest,
 )
-from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.creative_strategy_builder import build_creative_strategy
@@ -45,7 +40,6 @@ class MaterialGenerationService:
         payload: MaterialCopyGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
-        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
 
         existing = await self._find_existing_copy(session, payload.external_request_id)
         if existing:
@@ -83,9 +77,6 @@ class MaterialGenerationService:
             session.add(draft)
             await session.flush()
 
-            response = self._copy_response(draft, payload)
-            self._raise_if_brand_safety_blocked(response.data)
-
             await session.commit()
             await session.refresh(draft)
             return self._copy_response(draft, payload)
@@ -99,7 +90,6 @@ class MaterialGenerationService:
         payload: MaterialImageGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
-        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
 
         existing = await self._find_existing_images(session, payload.external_request_id)
         if existing:
@@ -124,9 +114,6 @@ class MaterialGenerationService:
 
         try:
             for asset in assets:
-                self._raise_if_brand_safety_blocked(
-                    {"prompt": asset.prompt, "alt_text": asset.alt_text}
-                )
                 session.add(asset)
             await session.commit()
             for asset in assets:
@@ -145,7 +132,6 @@ class MaterialGenerationService:
         payload: MaterialVideoGenerateRequest,
     ) -> MaterialGenerationEnvelope:
         _validate_base_payload(payload)
-        self._raise_if_brand_safety_blocked(_request_brand_safety_payload(payload))
         if not payload.image_urls:
             raise MaterialGenerationAPIError(
                 "image_urls is required",
@@ -467,18 +453,6 @@ class MaterialGenerationService:
             },
         )
 
-    def _raise_if_brand_safety_blocked(self, data: dict[str, Any]) -> None:
-        result = scan_brand_safety(data)
-        if result["status"] != "blocked":
-            return
-        raise MaterialGenerationAPIError(
-            "brand safety check failed",
-            code=MATERIAL_CODE_BRAND_SAFETY_ERROR,
-            status_code=status.HTTP_409_CONFLICT,
-            data={"brand_safety": result},
-        )
-
-
 def _validate_base_payload(payload: MaterialCopyGenerateRequest) -> None:
     if not (payload.product_name or "").strip():
         raise MaterialGenerationAPIError(
@@ -492,16 +466,6 @@ def _validate_base_payload(payload: MaterialCopyGenerateRequest) -> None:
             "brief or selling_points is required",
             code=MATERIAL_CODE_VALIDATION_ERROR,
         )
-
-
-def _request_brand_safety_payload(payload: MaterialGenerationBaseRequest) -> dict[str, Any]:
-    return {
-        "product_name": payload.product_name,
-        "brief": payload.brief,
-        "selling_points": payload.selling_points,
-        "constraints": payload.constraints,
-        "prompt": getattr(payload, "prompt", None),
-    }
 
 
 def _custom_event_type(event_name: str | None) -> str:

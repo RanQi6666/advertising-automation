@@ -218,7 +218,7 @@ async def test_material_generation_request_validation_error_uses_external_error_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("endpoint", "payload", "expected_status"),
+    ("endpoint", "payload", "expected_status", "expected_code"),
     (
         (
             "/api/v1/integrations/material-generation/copy",
@@ -226,7 +226,8 @@ async def test_material_generation_request_validation_error_uses_external_error_
                 "product_name": "Demo App",
                 "brief": "Create a free discount ad with low price language.",
             },
-            409,
+            200,
+            0,
         ),
         (
             "/api/v1/integrations/material-generation/images",
@@ -234,7 +235,8 @@ async def test_material_generation_request_validation_error_uses_external_error_
                 "product_name": "Demo App",
                 "brief": "Create a free discount visual with low price language.",
             },
-            409,
+            200,
+            0,
         ),
         (
             "/api/v1/integrations/material-generation/videos",
@@ -243,16 +245,18 @@ async def test_material_generation_request_validation_error_uses_external_error_
                 "brief": "Create a free discount video with low price language.",
                 "image_urls": ["https://ai.example.test/storage/images/source.svg"],
             },
-            409,
+            202,
+            1001,
         ),
     ),
 )
-async def test_material_generation_blocks_brand_safety_risky_input(
+async def test_material_generation_accepts_former_policy_risky_input(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     endpoint: str,
     payload: dict[str, object],
     expected_status: int,
+    expected_code: int,
 ) -> None:
     client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="material-token")
     try:
@@ -263,9 +267,8 @@ async def test_material_generation_blocks_brand_safety_risky_input(
         await engine.dispose()
 
     assert response.status_code == expected_status
-    assert response.json()["code"] == 4091
-    assert response.json()["message"] == "brand safety check failed"
-    assert response.json()["data"]["brand_safety"]["status"] == "blocked"
+    assert response.json()["code"] == expected_code
+    assert response.json()["data"]
 
 
 @pytest.mark.asyncio
@@ -508,7 +511,7 @@ async def test_material_copy_generation_reuses_successful_external_request_id(
 
 
 @pytest.mark.asyncio
-async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_output(
+async def test_material_copy_generation_stores_former_policy_risky_output(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -540,7 +543,7 @@ async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_outp
             "/api/v1/integrations/material-generation/copy",
             headers=_authorized_headers(),
             json={
-                "external_request_id": "copy-ext-blocked",
+                "external_request_id": "copy-ext-former-risky",
                 "product_name": "Demo App",
                 "brief": "Create a clear ad for daily use.",
             },
@@ -549,17 +552,18 @@ async def test_material_copy_generation_rolls_back_when_brand_safety_blocks_outp
         app.dependency_overrides.clear()
         client.close()
 
-    assert response.status_code == 409
-    assert response.json()["code"] == 4091
+    assert response.status_code == 200
+    assert response.json()["code"] == 0
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         campaigns = (await session.execute(select(Campaign))).scalars().all()
         topics = (await session.execute(select(ContentTopic))).scalars().all()
         drafts = (await session.execute(select(CopyDraft))).scalars().all()
 
-    assert campaigns == []
-    assert topics == []
-    assert drafts == []
+    assert len(campaigns) == 1
+    assert len(topics) == 1
+    assert len(drafts) == 1
+    assert drafts[0].primary_text == "Free cash casino jackpot"
     await engine.dispose()
 
 
@@ -719,7 +723,7 @@ async def test_material_image_generation_reuses_external_request_id(
 
 
 @pytest.mark.asyncio
-async def test_material_image_generation_rolls_back_when_brand_safety_blocks_asset(
+async def test_material_image_generation_stores_former_policy_risky_asset(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -742,7 +746,7 @@ async def test_material_image_generation_rolls_back_when_brand_safety_blocks_ass
             "/api/v1/integrations/material-generation/images",
             headers=_authorized_headers(),
             json={
-                "external_request_id": "image-ext-blocked",
+                "external_request_id": "image-ext-former-risky",
                 "product_name": "Demo App",
                 "brief": "Create a clean product visual for daily use.",
             },
@@ -751,14 +755,15 @@ async def test_material_image_generation_rolls_back_when_brand_safety_blocks_ass
         app.dependency_overrides.clear()
         client.close()
 
-    assert response.status_code == 409
-    assert response.json()["code"] == 4091
+    assert response.status_code == 200
+    assert response.json()["code"] == 0
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         assets = (await session.execute(select(CreativeAsset))).scalars().all()
         drafts = (await session.execute(select(CopyDraft))).scalars().all()
 
-    assert assets == []
+    assert len(assets) == 1
+    assert assets[0].prompt == "casino cash jackpot"
     assert len(drafts) == 1
     await engine.dispose()
 

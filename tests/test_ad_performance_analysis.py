@@ -562,11 +562,17 @@ async def test_ad_performance_analysis_api_create_get_and_list(tmp_path) -> None
             )
             assert create_response.status_code == 201
             created = create_response.json()
+            operators_response = client.get("/api/v1/operators")
+            operator_headers = {"X-Operator-Id": operators_response.json()[0]["id"]}
 
             get_response = client.get(
-                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}"
+                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}",
+                headers=operator_headers,
             )
-            list_response = client.get("/api/v1/integrations/ad-performance/analyses")
+            list_response = client.get(
+                "/api/v1/integrations/ad-performance/analyses",
+                headers=operator_headers,
+            )
     finally:
         app.dependency_overrides.clear()
 
@@ -605,14 +611,21 @@ async def test_ad_performance_analysis_api_delete(tmp_path) -> None:
             )
             assert create_response.status_code == 201
             created = create_response.json()
+            operators_response = client.get("/api/v1/operators")
+            operator_headers = {"X-Operator-Id": operators_response.json()[0]["id"]}
 
             delete_response = client.delete(
-                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}"
+                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}",
+                headers=operator_headers,
             )
             missing_response = client.get(
-                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}"
+                f"/api/v1/integrations/ad-performance/analyses/{created['analysis_id']}",
+                headers=operator_headers,
             )
-            list_response = client.get("/api/v1/integrations/ad-performance/analyses")
+            list_response = client.get(
+                "/api/v1/integrations/ad-performance/analyses",
+                headers=operator_headers,
+            )
     finally:
         app.dependency_overrides.clear()
 

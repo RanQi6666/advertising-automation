@@ -14,7 +14,6 @@ from backend.app.integrations.llm.openai_provider import (
     _creative_strategy_system_instruction,
 )
 from backend.app.schemas.ai import ImageBrief
-from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import (
     contains_creative_safety_risk,
     creative_safety_prompt_block,
@@ -119,7 +118,7 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert "点赞/评论/分享按钮" in prompt
     assert "二维码" in prompt
     assert "水印" in prompt
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+    assert "Brand safety" not in prompt
     assert "Creative safety hard rules" in prompt
     assert "Visible text hard ban" in prompt
     assert "Game creative safety" in prompt

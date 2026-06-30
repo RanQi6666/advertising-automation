@@ -58,11 +58,13 @@ class PublishingAdGenerationJobAccepted(BaseModel):
 class PublishingAdGenerationReviewUpdate(BaseModel):
     result_payload: dict = Field(default_factory=dict)
     review_notes: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class PublishingAdGenerationReviewConfirm(BaseModel):
     result_payload: dict | None = None
     review_notes: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class PublishingCampaignPayload(BaseModel):
@@ -173,6 +175,10 @@ class PublishingAdGenerationJobRead(TimestampedRead):
     error_message: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    owner_user_id: str | None = None
+    locked_by: str | None = None
+    locked_at: datetime | None = None
+    can_edit: bool = False
     metadata_json: dict = Field(default_factory=dict)
     review_url: str | None = None
     return_url: str | None = None

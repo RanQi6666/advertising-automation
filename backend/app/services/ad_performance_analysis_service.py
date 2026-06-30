@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
+from backend.app.db.base import utcnow
 from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.integrations.llm.factory import get_llm_provider
 from backend.app.schemas.ad_performance import (
@@ -19,6 +20,12 @@ from backend.app.schemas.ad_performance import (
     AdPerformanceOptimizationWorkOrder,
     AdPerformanceProblem,
     AdPerformanceRecommendation,
+)
+from backend.app.services.collaboration import (
+    OperatorContext,
+    claim_record,
+    filter_for_operator,
+    require_write_access,
 )
 from backend.app.services.custom_event_types import custom_event_type
 from backend.app.services.utils import get_required
@@ -39,6 +46,7 @@ class AdPerformanceAnalysisService:
         self,
         session: AsyncSession,
         payload: AdPerformanceAnalysisCreate,
+        operator: OperatorContext | None = None,
     ) -> AdPerformanceAnalysis:
         request_payload = payload.model_dump(mode="json")
         campaign = _record_from_payload(request_payload, "campaign", ("campaign_payload",))
@@ -121,6 +129,10 @@ class AdPerformanceAnalysisService:
             analysis_result=analysis_result,
             error_message=error_message,
         )
+        if operator is not None:
+            analysis.owner_user_id = operator.id
+            analysis.locked_by = operator.id
+            analysis.locked_at = utcnow()
         session.add(analysis)
         await session.commit()
         await session.refresh(analysis)
@@ -132,12 +144,15 @@ class AdPerformanceAnalysisService:
         limit: int,
         offset: int,
         creative_external_id: str | None = None,
+        operator: OperatorContext | None = None,
     ) -> list[AdPerformanceAnalysis]:
         statement = select(AdPerformanceAnalysis).order_by(AdPerformanceAnalysis.created_at.desc())
         if creative_external_id:
             statement = statement.where(
                 AdPerformanceAnalysis.creative_external_id == creative_external_id
             )
+        if operator is not None:
+            statement = filter_for_operator(statement, AdPerformanceAnalysis, operator)
         result = await session.execute(statement.limit(limit).offset(offset))
         return list(result.scalars().all())
 
@@ -148,8 +163,27 @@ class AdPerformanceAnalysisService:
     ) -> AdPerformanceAnalysis:
         return await get_required(session, AdPerformanceAnalysis, analysis_id)  # type: ignore[return-value]
 
-    async def delete_analysis(self, session: AsyncSession, analysis_id: str) -> None:
+    async def claim_analysis(
+        self,
+        session: AsyncSession,
+        analysis_id: str,
+        operator: OperatorContext,
+    ) -> AdPerformanceAnalysis:
         analysis = await self.get_analysis(session, analysis_id)
+        claim_record(analysis, operator)
+        await session.commit()
+        await session.refresh(analysis)
+        return analysis
+
+    async def delete_analysis(
+        self,
+        session: AsyncSession,
+        analysis_id: str,
+        operator: OperatorContext | None = None,
+    ) -> None:
+        analysis = await self.get_analysis(session, analysis_id)
+        if operator is not None:
+            require_write_access(analysis, operator)
         await session.delete(analysis)
         await session.commit()
 
@@ -157,8 +191,11 @@ class AdPerformanceAnalysisService:
         self,
         session: AsyncSession,
         analysis_id: str,
+        operator: OperatorContext | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         analysis = await self.get_analysis(session, analysis_id)
+        if operator is not None:
+            require_write_access(analysis, operator)
         request_payload = analysis.request_payload or {}
         campaign = _record_from_payload(request_payload, "campaign", ("campaign_payload",))
         adset = _record_from_payload(request_payload, "adset", ("ad_set", "adset_payload"))

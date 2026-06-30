@@ -15,7 +15,6 @@ from backend.app.schemas.ai import (
     VideoStoryboardCandidate,
     VideoStoryboardScene,
 )
-from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import (
     contains_creative_safety_risk,
     sanitize_creative_safety_text,
@@ -1100,8 +1099,6 @@ def _mock_safe_visual_reference_values(value: Any) -> list[str]:
         text = str(item).strip()
         if not text:
             continue
-        if scan_brand_safety({"value": text})["status"] != "passed":
-            continue
         safe_values.append(text)
         if len(safe_values) == 3:
             break
@@ -1195,12 +1192,6 @@ def _mock_text_layout_hint(creative_strategy: dict[str, Any] | None) -> str:
 def _mock_safe_strategy_text(value: Any) -> str:
     text = sanitize_creative_safety_text(str(value or "").strip())
     if not text:
-        return ""
-    normalized_text = text.replace("-", " ").replace("_", " ")
-    if (
-        scan_brand_safety({"value": text})["status"] != "passed"
-        or scan_brand_safety({"value": normalized_text})["status"] != "passed"
-    ):
         return ""
     return text
 

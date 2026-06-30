@@ -46,7 +46,7 @@ Authorization: Bearer <AI_ADS_ACCESS_TOKEN>
 | `creative_payload` | object/null | 广告创意层级字段。包含文案、标题、落地页、按钮、最终选中的素材 URL。 |
 | `assets.images` | array | 本次生成并可供选择的图片素材列表。外部通常优先使用 `creative_payload.image_url`，需要素材库时再读取这里。 |
 | `assets.videos` | array | 本次生成并可供选择的视频素材列表。外部通常优先使用 `creative_payload.video_url`。 |
-| `review` | object | 预审信息、缺失字段、警告、品牌安全检查结果和最终预审勾选状态。 |
+| `review` | object | 预审信息、缺失字段、警告和最终预审勾选状态。 |
 | `metadata_json` | object | AI 系统内部关联信息，例如 campaign、topic、draft、素材 ID 和最终预审时间。外部系统通常不需要直接投放这些字段。 |
 
 ## `campaign_payload`
@@ -197,7 +197,6 @@ Authorization: Bearer <AI_ADS_ACCESS_TOKEN>
 | `warnings` | array | 需要运营注意的问题，例如多国家只返回第一个国家、非图片创意需要人工确认等。 |
 | `low_confidence_fields` | array | AI 识别置信度较低的字段。 |
 | `final_precheck` | object | 最终预审勾选状态。 |
-| `brand_safety` | object | 品牌安全检查结果。确认回传时会写入。 |
 
 ### `review.final_precheck`
 
@@ -207,16 +206,6 @@ Authorization: Bearer <AI_ADS_ACCESS_TOKEN>
 | `copy_reviewed` | boolean | 文案已审核。 |
 | `image_reviewed` | boolean | 图片已审核。 |
 | `video_reviewed` | boolean | 视频已审核；如果该任务不需要视频，也会为 `true`。 |
-
-### `review.brand_safety`
-
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `status` | string | 品牌安全状态。常见为 `passed` 或 `blocked`。 |
-| `findings` | array | 命中的风险项。 |
-| `highest_severity` | string/null | 最高风险等级。 |
-
-当前品牌安全会拦截或提示与赌博、博彩、药品、货币、钱、折扣、低价等相关的内容。若 `status=blocked`，系统不会完成确认回传，需要运营修改或重新生成后再确认。
 
 ## `metadata_json`
 

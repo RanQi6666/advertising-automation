@@ -22,7 +22,6 @@ from backend.app.schemas.video import (
     VideoStoryboardRewriteRequest,
 )
 from backend.app.services import video_service
-from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.creative_safety_prompts import creative_safety_prompt_block
 from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.game_creative_strategy import build_game_creative_strategy
@@ -500,7 +499,7 @@ async def test_video_context_merges_latest_landing_visual_reference_snapshot() -
     await engine.dispose()
 
 
-def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() -> None:
+def test_video_storyboard_prompt_includes_creative_safety_visual_guidance() -> None:
     prompt = _storyboard_to_prompt(
         [
             {
@@ -513,8 +512,7 @@ def test_video_storyboard_prompt_includes_safe_brand_safety_visual_guidance() ->
         ]
     )
 
-    assert "Brand safety visual guidance" in prompt
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
+    assert "Brand safety visual guidance" not in prompt
     assert "Creative safety hard rules" in prompt
     assert "Visible text hard ban" in prompt
     assert "Game creative safety" in prompt
@@ -673,7 +671,6 @@ def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> Non
     assert "12-second first/last-frame workflow" not in prompt
     assert "challenge_failure" in prompt
     assert "One strong hook, one payoff, one CTA." in prompt
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 def test_video_storyboard_prompt_defaults_missing_v2_vertical_to_ecommerce() -> None:
@@ -781,7 +778,6 @@ def test_video_storyboard_prompt_includes_market_game_style_pack_gameplay_proces
     strategy_section = prompt.split("Market game style pack:", 1)[1]
     for banned in ("Ganesha", "Shiva", "Krishna", "casino", "slot", "jackpot", "cash"):
         assert banned not in strategy_section
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 @pytest.mark.asyncio
@@ -918,7 +914,6 @@ def test_video_storyboard_prompt_includes_country_concepts_and_text_layout_rules
     assert "india_mythic_neon_lobby" not in prompt
     assert "Text layout rules:" not in prompt
     assert "premium neon" not in prompt.casefold()
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
@@ -966,7 +961,6 @@ def test_video_storyboard_prompt_includes_landing_visual_reference() -> None:
     assert "premium cards" not in prompt_text
     assert "card carousel" not in prompt_text
     assert "end card" not in prompt_text
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> None:
@@ -1011,7 +1005,6 @@ def test_video_storyboard_prompt_sanitizes_landing_visual_reference_lists() -> N
     assert "cash" not in strategy_section
     assert "treatment" not in strategy_section
     assert "styling" in strategy_section
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 def test_video_storyboard_prompt_sanitizes_strategy_list_fields() -> None:
@@ -1060,7 +1053,6 @@ def test_video_storyboard_prompt_sanitizes_strategy_list_fields() -> None:
     assert "treatment-like" not in prompt
     assert "title styling" in prompt
     assert "clinical styling" in prompt
-    assert scan_brand_safety({"prompt": prompt})["status"] == "passed"
 
 
 @pytest.mark.parametrize("revision", [False, True])

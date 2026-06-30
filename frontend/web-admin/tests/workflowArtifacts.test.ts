@@ -3,12 +3,14 @@ import { test } from "node:test";
 
 import {
   adPreviewCreativeOptions,
+  adGenerationJobNumber,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
   videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
+  workflowRequiresVideo,
 } from "../src/lib/workflowArtifacts.ts";
-import type { CopyDraft, CreativeAsset, Topic, VideoAsset } from "../src/types/domain.ts";
+import type { AdGenerationJob, CopyDraft, CreativeAsset, Topic, VideoAsset } from "../src/types/domain.ts";
 
 function topic(overrides: Partial<Topic>): Topic {
   return {
@@ -116,6 +118,31 @@ function video(overrides: Partial<VideoAsset>): VideoAsset {
   };
 }
 
+function adGenerationJob(overrides: Partial<AdGenerationJob>): AdGenerationJob {
+  return {
+    id: "job-1",
+    external_order_id: "order-1",
+    status: "image_review",
+    callback_url: null,
+    request_payload: {
+      preferences: {
+        creative_type: "image",
+        video_required: false,
+      },
+    },
+    result_payload: {},
+    error_message: null,
+    started_at: null,
+    completed_at: null,
+    metadata_json: {},
+    review_url: null,
+    return_url: null,
+    created_at: "2026-06-27T00:00:00.000Z",
+    updated_at: "2026-06-27T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 test("keeps only the newest two images in a keyframe scheme and moves older versions to history", () => {
   const olderFirst = keyframeCreative("scheme-2-first-v1", 2, 1, 1, "approved");
   const olderLast = keyframeCreative("scheme-2-last-v1", 2, 2, 1, "approved");
@@ -164,6 +191,46 @@ test("filters drafts creatives and videos to the selected topic only", () => {
   assert.deepEqual(result.drafts.map((item) => item.id), ["draft-selected"]);
   assert.deepEqual(result.creatives.map((item) => item.id), ["creative-selected"]);
   assert.deepEqual(result.videos.map((item) => item.id), ["video-selected"]);
+});
+
+test("filters workflow artifacts to the selected campaign before topic scoping", () => {
+  const currentDraft = draft({ id: "draft-current", campaign_id: "campaign-current" });
+  const otherDraft = draft({ id: "draft-other", campaign_id: "campaign-other" });
+  const currentCreative = creative({
+    id: "creative-current",
+    campaign_id: "campaign-current",
+    draft_id: currentDraft.id,
+  });
+  const otherCreative = creative({
+    id: "creative-other",
+    campaign_id: "campaign-other",
+    draft_id: otherDraft.id,
+  });
+  const currentVideo = video({
+    id: "video-current",
+    campaign_id: "campaign-current",
+    draft_id: currentDraft.id,
+    status: "generated",
+  });
+  const otherVideo = video({
+    id: "video-other-approved",
+    campaign_id: "campaign-other",
+    draft_id: otherDraft.id,
+    source_asset_ids: [otherCreative.id],
+    status: "approved",
+  });
+
+  const result = filterWorkflowArtifactsForTopic({
+    selectedCampaignId: "campaign-current",
+    selectedTopic: null,
+    drafts: [currentDraft, otherDraft],
+    creatives: [currentCreative, otherCreative],
+    videos: [otherVideo, currentVideo],
+  });
+
+  assert.deepEqual(result.drafts.map((item) => item.id), ["draft-current"]);
+  assert.deepEqual(result.creatives.map((item) => item.id), ["creative-current"]);
+  assert.deepEqual(result.videos.map((item) => item.id), ["video-current"]);
 });
 
 test("builds video reference options as approved keyframe schemes", () => {
@@ -219,4 +286,35 @@ test("ad preview options include approved normal images and exclude keyframe ass
   const options = adPreviewCreativeOptions([keyframe, generatedNormal, approvedNormal], selectedDraft);
 
   assert.deepEqual(options.map((asset) => asset.id), ["approved-normal"]);
+});
+
+test("video keyframe assets keep the workflow in the video step even when job preferences default to image", () => {
+  const firstFrame = keyframeCreative("group-1-first", 1, 1, 1, "approved");
+  const lastFrame = keyframeCreative("group-1-last", 1, 2, 1, "approved");
+
+  assert.equal(workflowRequiresVideo(adGenerationJob({}), [firstFrame, lastFrame]), true);
+});
+
+test("normal image-only jobs can still skip the video step", () => {
+  const approvedImage = creative({
+    id: "approved-normal",
+    status: "approved",
+    metadata_json: { image_index: 1 },
+  });
+
+  assert.equal(workflowRequiresVideo(adGenerationJob({}), [approvedImage]), false);
+});
+
+test("formats work order numbers as chronological three digit serials", () => {
+  const first = adGenerationJob({
+    id: "abc0bc6e-0000",
+    created_at: "2026-06-27T00:00:00.000Z",
+  });
+  const second = adGenerationJob({
+    id: "7cfd301c-0000",
+    created_at: "2026-06-27T00:01:00.000Z",
+  });
+
+  assert.equal(adGenerationJobNumber(first, [second, first]), "001");
+  assert.equal(adGenerationJobNumber(second, [second, first]), "002");
 });

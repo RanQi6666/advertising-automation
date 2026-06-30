@@ -3,13 +3,18 @@ import json
 from fastapi import APIRouter, Query, status
 from starlette.responses import StreamingResponse
 
-from backend.app.api.deps import DbSession
+from backend.app.api.deps import CurrentOperator, DbSession, OptionalOperator
 from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.schemas.ad_performance import (
     AdPerformanceAnalysisCreate,
     AdPerformanceAnalysisRead,
 )
 from backend.app.services.ad_performance_analysis_service import AdPerformanceAnalysisService
+from backend.app.services.collaboration import (
+    OperatorContext,
+    record_can_edit,
+    require_read_access,
+)
 
 router = APIRouter()
 service = AdPerformanceAnalysisService()
@@ -23,8 +28,12 @@ service = AdPerformanceAnalysisService()
 async def create_ad_performance_analysis(
     payload: AdPerformanceAnalysisCreate,
     session: DbSession,
+    operator: OptionalOperator,
 ):
-    return _analysis_read(await service.create_analysis(session, payload))
+    return _analysis_read(
+        await service.create_analysis(session, payload, operator=operator),
+        operator,
+    )
 
 
 @router.get(
@@ -33,6 +42,7 @@ async def create_ad_performance_analysis(
 )
 async def list_ad_performance_analyses(
     session: DbSession,
+    operator: CurrentOperator,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     creative_external_id: str | None = Query(default=None),
@@ -42,30 +52,64 @@ async def list_ad_performance_analyses(
         limit=limit,
         offset=offset,
         creative_external_id=creative_external_id,
+        operator=operator,
     )
-    return [_analysis_read(analysis) for analysis in analyses]
+    return [_analysis_read(analysis, operator) for analysis in analyses]
 
 
 @router.get(
     "/integrations/ad-performance/analyses/{analysis_id}",
     response_model=AdPerformanceAnalysisRead,
 )
-async def get_ad_performance_analysis(analysis_id: str, session: DbSession):
-    return _analysis_read(await service.get_analysis(session, analysis_id))
+async def get_ad_performance_analysis(
+    analysis_id: str,
+    session: DbSession,
+    operator: CurrentOperator,
+):
+    analysis = await service.get_analysis(session, analysis_id)
+    require_read_access(analysis, operator)
+    return _analysis_read(analysis, operator)
 
 
 @router.delete(
     "/integrations/ad-performance/analyses/{analysis_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_ad_performance_analysis(analysis_id: str, session: DbSession):
-    await service.delete_analysis(session, analysis_id)
+async def delete_ad_performance_analysis(
+    analysis_id: str,
+    session: DbSession,
+    operator: CurrentOperator,
+):
+    await service.delete_analysis(session, analysis_id, operator=operator)
+
+
+@router.post(
+    "/integrations/ad-performance/analyses/{analysis_id}/claim",
+    response_model=AdPerformanceAnalysisRead,
+)
+async def claim_ad_performance_analysis(
+    analysis_id: str,
+    session: DbSession,
+    operator: CurrentOperator,
+):
+    return _analysis_read(
+        await service.claim_analysis(session, analysis_id, operator),
+        operator,
+    )
 
 
 @router.post("/integrations/ad-performance/analyses/{analysis_id}/ai-analysis/stream")
-async def stream_ad_performance_ai_analysis(analysis_id: str, session: DbSession):
+async def stream_ad_performance_ai_analysis(
+    analysis_id: str,
+    session: DbSession,
+    operator: CurrentOperator,
+):
     async def event_stream():
-        async for event in service.stream_ai_analysis(session, analysis_id):
+        async for event in service.stream_ai_analysis(
+            session,
+            analysis_id,
+            operator=operator,
+        ):
             yield _sse_event(event.get("type", "message"), event)
 
     return StreamingResponse(
@@ -75,7 +119,10 @@ async def stream_ad_performance_ai_analysis(analysis_id: str, session: DbSession
     )
 
 
-def _analysis_read(analysis: AdPerformanceAnalysis) -> AdPerformanceAnalysisRead:
+def _analysis_read(
+    analysis: AdPerformanceAnalysis,
+    operator: OperatorContext | None = None,
+) -> AdPerformanceAnalysisRead:
     return AdPerformanceAnalysisRead(
         id=analysis.id,
         analysis_id=analysis.id,
@@ -96,6 +143,10 @@ def _analysis_read(analysis: AdPerformanceAnalysis) -> AdPerformanceAnalysisRead
         metrics=analysis.metrics or {},
         analysis_result=analysis.analysis_result or {},
         error_message=analysis.error_message,
+        owner_user_id=analysis.owner_user_id,
+        locked_by=analysis.locked_by,
+        locked_at=analysis.locked_at,
+        can_edit=record_can_edit(analysis, operator),
     )
 
 

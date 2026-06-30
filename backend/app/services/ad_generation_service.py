@@ -35,8 +35,14 @@ from backend.app.schemas.work_order import (
     CampaignFromWorkOrderRequest,
     WorkOrderCreate,
 )
-from backend.app.services.brand_safety_policy import scan_brand_safety
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.collaboration import (
+    OperatorContext,
+    claim_record,
+    filter_for_operator,
+    require_fresh_timestamp,
+    require_write_access,
+)
 from backend.app.services.creative_strategy_builder import build_creative_strategy
 from backend.app.services.custom_event_types import custom_event_key, custom_event_type
 from backend.app.services.utils import get_required
@@ -153,6 +159,7 @@ class AdGenerationService:
         self,
         session: AsyncSession,
         payload: PublishingAdGenerationJobCreate,
+        operator: OperatorContext | None = None,
     ) -> AdGenerationJob:
         job = AdGenerationJob(
             external_order_id=payload.external_order_id,
@@ -165,6 +172,10 @@ class AdGenerationService:
                 "return_url": str(payload.return_url) if payload.return_url else None,
             },
         )
+        if operator is not None:
+            job.owner_user_id = operator.id
+            job.locked_by = operator.id
+            job.locked_at = utcnow()
         session.add(job)
         await session.commit()
         await session.refresh(job)
@@ -176,18 +187,40 @@ class AdGenerationService:
         limit: int,
         offset: int,
         status: str | None = None,
+        operator: OperatorContext | None = None,
     ) -> list[AdGenerationJob]:
         statement = select(AdGenerationJob).order_by(AdGenerationJob.created_at.desc())
         if status:
             statement = statement.where(AdGenerationJob.status == status)
+        if operator is not None:
+            statement = filter_for_operator(statement, AdGenerationJob, operator)
         result = await session.execute(statement.limit(limit).offset(offset))
         return list(result.scalars().all())
 
     async def get_job(self, session: AsyncSession, job_id: str) -> AdGenerationJob:
         return await get_required(session, AdGenerationJob, job_id)  # type: ignore[return-value]
 
-    async def delete_job(self, session: AsyncSession, job_id: str) -> None:
+    async def claim_job(
+        self,
+        session: AsyncSession,
+        job_id: str,
+        operator: OperatorContext,
+    ) -> AdGenerationJob:
         job = await self.get_job(session, job_id)
+        claim_record(job, operator)
+        await session.commit()
+        await session.refresh(job)
+        return job
+
+    async def delete_job(
+        self,
+        session: AsyncSession,
+        job_id: str,
+        operator: OperatorContext | None = None,
+    ) -> None:
+        job = await self.get_job(session, job_id)
+        if operator is not None:
+            require_write_access(job, operator)
         storage_keys = await self._delete_generated_records(session, job)
         await session.delete(job)
         await session.commit()
@@ -367,8 +400,12 @@ class AdGenerationService:
         session: AsyncSession,
         job_id: str,
         payload: PublishingAdGenerationReviewUpdate,
+        operator: OperatorContext | None = None,
     ) -> AdGenerationJob:
         job = await self.get_job(session, job_id)
+        if operator is not None:
+            require_write_access(job, operator)
+            require_fresh_timestamp(job, payload.expected_updated_at)
         result_payload = _merge_result_payload(job.result_payload or {}, payload.result_payload)
         if job.status == "returned":
             next_status = "returned"
@@ -392,18 +429,15 @@ class AdGenerationService:
         session: AsyncSession,
         job_id: str,
         payload: PublishingAdGenerationReviewConfirm,
+        operator: OperatorContext | None = None,
     ) -> AdGenerationJob:
         job = await self.get_job(session, job_id)
+        if operator is not None:
+            require_write_access(job, operator)
+            require_fresh_timestamp(job, payload.expected_updated_at)
         result_payload = job.result_payload or {}
         if payload.result_payload is not None:
             result_payload = _merge_result_payload(result_payload, payload.result_payload)
-        brand_safety_mode = get_settings().brand_safety_mode
-        brand_safety_report = (
-            _skipped_brand_safety_report()
-            if brand_safety_mode == "off"
-            else scan_brand_safety(result_payload)
-        )
-        result_payload = _with_brand_safety_report(result_payload, brand_safety_report)
         result_payload["status"] = "returned"
         job.result_payload = result_payload
         job.status = "returned"
@@ -411,8 +445,6 @@ class AdGenerationService:
         job.metadata_json = {
             **(job.metadata_json or {}),
             "review_notes": payload.review_notes,
-            "brand_safety_mode": brand_safety_mode,
-            "brand_safety_status": brand_safety_report["status"],
             "review_confirmed_at": utcnow().isoformat(),
             "workflow_stage": "returned",
         }
@@ -749,23 +781,6 @@ def _merge_result_payload(current: dict, updates: dict) -> dict:
         else:
             merged[key] = value
     return merged
-
-
-def _with_brand_safety_report(payload: dict, report: dict[str, Any]) -> dict:
-    next_payload = dict(payload)
-    review = next_payload.get("review")
-    if not isinstance(review, dict):
-        review = {}
-    next_payload["review"] = {**review, "brand_safety": report}
-    return next_payload
-
-
-def _skipped_brand_safety_report() -> dict[str, Any]:
-    return {
-        "status": "skipped",
-        "highest_severity": None,
-        "findings": [],
-    }
 
 
 def _with_access_token(url: str, access_token: str | None) -> str:

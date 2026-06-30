@@ -1,4 +1,6 @@
-from sqlalchemy import JSON, String, Text
+from datetime import datetime
+
+from sqlalchemy import JSON, DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, json_default
@@ -26,3 +28,6 @@ class AdPerformanceAnalysis(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     metrics: Mapped[dict] = mapped_column(JSON, default=json_default)
     analysis_result: Mapped[dict] = mapped_column(JSON, default=json_default)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

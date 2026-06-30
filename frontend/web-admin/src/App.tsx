@@ -1,4 +1,5 @@
 import {
+  Bell,
   BarChart3,
   Check,
   ClipboardList,
@@ -13,20 +14,22 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { ApiError, api, apiErrorMessage, getAccessToken, isTransientApiError } from "./lib/api";
+import {
+  ApiError,
+  api,
+  apiErrorMessage,
+  getAccessToken,
+  getOperatorId,
+  isTransientApiError,
+  setOperatorId,
+} from "./lib/api";
 import {
   formatManualAdPerformanceJson,
   parseManualAdPerformanceJson,
   type ManualAdPerformancePayload,
 } from "./lib/adPerformanceManualJson";
-import {
-  brandSafetyAllowsReturn,
-  brandSafetyBlocksReturn,
-  brandSafetyReportFromPayload,
-  brandSafetySummaryLabel,
-} from "./lib/brandSafety";
 import {
   DEFAULT_KEYFRAME_VARIANT_COUNT,
   KEYFRAME_FRAMES_PER_VARIANT,
@@ -40,11 +43,13 @@ import {
   type KeyframeVariantCount,
 } from "./lib/creativeKeyframes";
 import {
+  adGenerationJobNumber,
   adPreviewCreativeOptions,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
   videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
+  workflowRequiresVideo,
   type CreativeReviewKeyframeGroup,
 } from "./lib/workflowArtifacts";
 import { displayAssetUrl } from "./lib/assetUrls";
@@ -66,6 +71,7 @@ import type {
   CreativeAsset,
   ModelOption,
   ModelOptions,
+  OperatorUser,
   ReviewedDeliveryFields,
   Topic,
   VideoAsset,
@@ -95,6 +101,7 @@ type ErrorScope =
   | "final";
 type ReviewEntityType = "topic" | "copy_draft" | "creative_asset" | "video_asset";
 type ReviewDecision = "approved" | "rejected" | "needs_revision";
+type PerformanceQueueStatus = "pending" | "completed" | "exception";
 type ScopedAppError = {
   scope: ErrorScope;
   message: string;
@@ -112,13 +119,14 @@ type WorkflowArtifactSnapshot = {
   creatives: CreativeAsset[];
   videos: VideoAsset[];
 };
-type WorkflowStepStatus = "done" | "active" | "blocked";
+type WorkflowStepStatus = "done" | "active" | "blocked" | "skipped";
 type DeliveryExtractionCacheEntry = {
   key: string;
   extraction: WorkOrderDeliveryExtraction;
   savedAt: string;
 };
 type TopicGenerationSlot = {
+  campaignId: string;
   index: number;
   status: "loading" | "done" | "error";
   topic?: Topic;
@@ -194,17 +202,6 @@ const navItems: Array<{ key: ViewKey; label: string; icon: typeof BarChart3 }> =
   { key: "videos", label: "视频", icon: Film },
   { key: "performance", label: "投放分析", icon: BarChart3 },
 ];
-
-const viewSubtitles: Record<ViewKey, string> = {
-  performance: "查看外部系统回传的广告效果分析和 AI 优化建议",
-  dashboard: "查看 AI 工单、生产阶段和回传状态",
-  "work-orders": "接收投放系统跳转，创建 AI 工单并确认投放参数",
-  workflow: "按参数确认、选题、文案、图片、视频和最终预审推进任务",
-  topics: "根据投放链接和工单生成选题，并由运营选择一个方向",
-  copy: "根据已选题生成广告文案，并完成人工审核",
-  creatives: "根据已审核文案生成图片，并完成人工审核",
-  videos: "根据已审核图片生成视频，并完成人工审核",
-};
 
 const sampleWorkOrders = [
   {
@@ -309,6 +306,8 @@ function App() {
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [videoPollWarnings, setVideoPollWarnings] = useState<Record<string, VideoPollWarning>>({});
   const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null);
+  const [operators, setOperators] = useState<OperatorUser[]>([]);
+  const [currentOperatorId, setCurrentOperatorId] = useState<string | null>(() => getOperatorId());
   const [selectedTopicModelId, setSelectedTopicModelId] = useState("");
   const [selectedCopyModelId, setSelectedCopyModelId] = useState("");
   const [selectedImageModelId, setSelectedImageModelId] = useState("");
@@ -336,11 +335,13 @@ function App() {
   const [videoStoryboardCacheReadyCampaignId, setVideoStoryboardCacheReadyCampaignId] = useState<string | null>(null);
 
   const [finalPayloadDraft, setFinalPayloadDraft] = useState("");
-  const [finalReviewNotes, setFinalReviewNotes] = useState("");
+  const [finalPackageOpen, setFinalPackageOpen] = useState(false);
   const [loading, setLoading] = useState<string | null>(null);
   const [operationElapsedSeconds, setOperationElapsedSeconds] = useState(0);
   const [error, setErrorState] = useState<ScopedAppError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [messageCenterOpen, setMessageCenterOpen] = useState(false);
+  const selectedCampaignIdRef = useRef<string | null>(null);
 
   const selectedJob = useMemo(
     () => jobs.find((item) => item.id === selectedJobId) ?? (!selectedJobId ? jobs[0] : null) ?? null,
@@ -353,21 +354,47 @@ function App() {
       null,
     [performanceAnalyses, selectedPerformanceAnalysisId],
   );
+  const currentOperator = useMemo(
+    () => operators.find((item) => item.id === currentOperatorId) ?? null,
+    [currentOperatorId, operators],
+  );
+  const selectedJobCampaignId = useMemo(
+    () => (selectedJob ? adGenerationCampaignId(selectedJob) : null),
+    [selectedJob],
+  );
   const selectedCampaign = useMemo(
-    () => campaigns.find((item) => item.id === selectedCampaignId) ?? campaigns[0] ?? null,
-    [campaigns, selectedCampaignId],
+    () => {
+      if (selectedJob) {
+        return selectedJobCampaignId ? campaigns.find((item) => item.id === selectedJobCampaignId) ?? null : null;
+      }
+      return campaigns.find((item) => item.id === selectedCampaignId) ?? campaigns[0] ?? null;
+    },
+    [campaigns, selectedCampaignId, selectedJob, selectedJobCampaignId],
+  );
+  const selectedTopicGenerationSlots = useMemo(
+    () =>
+      selectedCampaign
+        ? topicGenerationSlots.filter((slot) => slot.campaignId === selectedCampaign.id)
+        : [],
+    [selectedCampaign?.id, topicGenerationSlots],
   );
   const selectedTopic = useMemo(
-    () =>
-      topics.find((item) => item.id === selectedTopicId) ??
-      topics.find((item) => item.status === "selected") ??
-      topics[0] ??
-      null,
-    [selectedTopicId, topics],
+    () => {
+      if (!selectedCampaign) return null;
+      const campaignTopics = topics.filter((item) => item.campaign_id === selectedCampaign.id);
+      return (
+        campaignTopics.find((item) => item.id === selectedTopicId) ??
+        campaignTopics.find((item) => item.status === "selected") ??
+        campaignTopics[0] ??
+        null
+      );
+    },
+    [selectedCampaign?.id, selectedTopicId, topics],
   );
   const topicScopedArtifacts = useMemo(
     () =>
       filterWorkflowArtifactsForTopic({
+        selectedCampaignId: selectedCampaign?.id ?? null,
         selectedTopic,
         drafts,
         creatives,
@@ -416,12 +443,21 @@ function App() {
   );
 
   useEffect(() => {
+    selectedCampaignIdRef.current = selectedCampaign?.id ?? null;
+  }, [selectedCampaign?.id]);
+
+  useEffect(() => {
+    void loadOperators();
+  }, []);
+
+  useEffect(() => {
+    if (!currentOperatorId) return;
     void refreshBaseData();
     const reviewJobId = adGenerationJobIdFromUrl();
     if (reviewJobId) {
-      void refreshJob(reviewJobId);
+      void claimAndSelectJob(reviewJobId, "workflow");
     }
-  }, []);
+  }, [currentOperatorId]);
 
   useEffect(() => {
     setDeliveryExtractionCache(loadDeliveryExtractionCache(rawWorkOrder));
@@ -742,6 +778,82 @@ function App() {
     }
   }
 
+  async function loadOperators() {
+    const nextOperators = await run("operators", () => api.listOperators());
+    if (!nextOperators) return;
+    setOperators(nextOperators);
+    if (currentOperatorId && !nextOperators.some((operator) => operator.id === currentOperatorId)) {
+      setOperatorId(null);
+      setCurrentOperatorId(null);
+      resetWorkbenchSelection();
+    }
+  }
+
+  function handleSelectOperator(operatorId: string) {
+    setOperatorId(operatorId);
+    setCurrentOperatorId(operatorId);
+    resetWorkbenchSelection();
+    clearError();
+  }
+
+  function handleSwitchOperator() {
+    setOperatorId(null);
+    setCurrentOperatorId(null);
+    resetWorkbenchSelection();
+    setNotice(null);
+  }
+
+  function resetWorkbenchSelection() {
+    setJobs([]);
+    setSelectedJobId(null);
+    setPerformanceAnalyses([]);
+    setSelectedPerformanceAnalysisId(null);
+    setCampaigns([]);
+    setSelectedCampaignId(null);
+    clearCampaignWorkflowState();
+  }
+
+  async function claimAndSelectJob(jobId: string, targetView?: ViewKey): Promise<AdGenerationJob | null> {
+    const job = await run(
+      `claim-job-${jobId}`,
+      () => api.claimAdGenerationJob(jobId),
+      "工单已领取",
+    );
+    if (!job) {
+      void refreshBaseData();
+      return null;
+    }
+    setJobs((current) => upsertById(current, job));
+    setSelectedJobId(job.id);
+    if (targetView) setActiveView(targetView);
+    const campaignId = adGenerationCampaignId(job);
+    if (campaignId) {
+      try {
+        const campaign = await api.getCampaign(campaignId);
+        setCampaigns((current) => upsertById(current, campaign));
+        setSelectedCampaignId(campaign.id);
+        await refreshCampaignData(campaign.id);
+      } catch {
+        // The background task may still be linking the campaign.
+      }
+    }
+    return job;
+  }
+
+  async function claimAndSelectPerformanceAnalysis(analysisId: string) {
+    const analysis = await run(
+      `claim-performance-${analysisId}`,
+      () => api.claimAdPerformanceAnalysis(analysisId),
+    );
+    if (!analysis) {
+      void refreshPerformanceAnalyses();
+      return null;
+    }
+    setPerformanceAnalyses((current) => upsertById(current, analysis));
+    setSelectedPerformanceAnalysisId(analysis.id);
+    return analysis;
+  }
+
   function clearCampaignWorkflowState() {
     setTopics([]);
     setTopicGenerationSlots([]);
@@ -762,10 +874,11 @@ function App() {
     setVideoStoryboardFeedback("");
     setVideoStoryboardCacheReadyCampaignId(null);
     setFinalPayloadDraft("");
-    setFinalReviewNotes("");
+    setFinalPackageOpen(false);
   }
 
   async function refreshBaseData() {
+    if (!currentOperatorId) return;
     await run("refresh", async () => {
       const [nextJobs, nextCampaigns, nextPerformanceAnalyses, nextModelOptions] = await Promise.all([
         api.listAdGenerationJobs(100),
@@ -828,6 +941,7 @@ function App() {
   }
 
   async function refreshPerformanceAnalyses() {
+    if (!currentOperatorId) return;
     const analyses = await run("performance-refresh", () => api.listAdPerformanceAnalyses(100));
     if (!analyses) return;
     setPerformanceAnalyses(analyses);
@@ -853,6 +967,10 @@ function App() {
 
   async function handleDeletePerformanceAnalysis(analysisId: string) {
     const analysis = performanceAnalyses.find((item) => item.id === analysisId);
+    if (analysis && !analysis.can_edit) {
+      setError("只有负责人或管理员可以删除投放分析记录", "performance");
+      return;
+    }
     const title = analysis ? performanceAnalysisTitle(analysis) : shortId(analysisId);
     const confirmed = window.confirm(
       `确认删除投放分析记录「${title}」吗？删除后该条效果数据和分析结果会从本系统移除。`,
@@ -1019,7 +1137,11 @@ function App() {
 
   async function handleDeleteJob(jobId: string) {
     const job = jobs.find((item) => item.id === jobId);
-    const title = job ? adGenerationJobTitle(job) : shortId(jobId);
+    if (job && !job.can_edit) {
+      setError("只有负责人或管理员可以删除工单", "work-order");
+      return;
+    }
+    const title = job ? adGenerationJobTitle(job) : "该工单";
     const confirmed = window.confirm(
       `确认删除 AI 工单「${title}」吗？删除后将同时清理该工单生成的活动、文案、图片、视频和生产记录。`,
     );
@@ -1068,33 +1190,74 @@ function App() {
     return signals;
   }
 
-  function updateTopicGenerationSlot(index: number, update: Partial<TopicGenerationSlot>) {
+  function replaceTopicGenerationSlots(campaignId: string, limit: number) {
+    setTopicGenerationSlots((current) => [
+      ...current.filter((slot) => slot.campaignId !== campaignId),
+      ...initialTopicSlots(limit, campaignId),
+    ]);
+  }
+
+  function updateTopicGenerationSlot(campaignId: string, index: number, update: Partial<TopicGenerationSlot>) {
     setTopicGenerationSlots((current) => {
-      const slots = current.length ? current : initialTopicSlots(TOPIC_GENERATION_LIMIT);
-      return slots.map((slot) => (slot.index === index ? { ...slot, ...update } : slot));
+      const slots = current.some((slot) => slot.campaignId === campaignId)
+        ? current
+        : [...current, ...initialTopicSlots(TOPIC_GENERATION_LIMIT, campaignId)];
+      return slots.map((slot) =>
+        slot.campaignId === campaignId && slot.index === index ? { ...slot, ...update } : slot,
+      );
     });
   }
 
-  function markLoadingTopicSlotsFailed(message: string, targetIndex?: number) {
+  function markLoadingTopicSlotsFailed(campaignId: string, message: string, targetIndex?: number) {
     setTopicGenerationSlots((current) =>
       current.map((slot) =>
-        slot.status === "loading" && (targetIndex === undefined || slot.index === targetIndex)
+        slot.campaignId === campaignId &&
+        slot.status === "loading" &&
+        (targetIndex === undefined || slot.index === targetIndex)
           ? { ...slot, status: "error", message }
           : slot,
       ),
     );
   }
 
+  function finalizeTopicGenerationSlots(campaignId: string, missingMessage: string) {
+    setTopicGenerationSlots((current) => {
+      const next = current.map((slot) =>
+        slot.campaignId === campaignId && slot.status === "loading"
+          ? { ...slot, status: "error" as const, message: missingMessage }
+          : slot,
+      );
+      const campaignSlots = next.filter((slot) => slot.campaignId === campaignId);
+      return campaignSlots.length && campaignSlots.every((slot) => slot.status === "done")
+        ? next.filter((slot) => slot.campaignId !== campaignId)
+        : next;
+    });
+  }
+
+  function clearCompletedTopicGenerationSlots(campaignId: string) {
+    setTopicGenerationSlots((current) => {
+      const campaignSlots = current.filter((slot) => slot.campaignId === campaignId);
+      return campaignSlots.length && campaignSlots.every((slot) => slot.status === "done")
+        ? current.filter((slot) => slot.campaignId !== campaignId)
+        : current;
+    });
+  }
+
+  function isSelectedCampaign(campaignId: string) {
+    return selectedCampaignIdRef.current === campaignId;
+  }
+
   async function handleGenerateTopics(feedback?: string) {
     if (!selectedCampaign) return;
-    if (topicGenerationSlots.some((slot) => slot.status === "loading")) return;
+    const campaignId = selectedCampaign.id;
+    if (topicGenerationSlots.some((slot) => slot.campaignId === campaignId && slot.status === "loading")) return;
     setActiveView("topics");
     setLoading("topics");
     clearError("topic");
     setNotice(null);
     setTopics([]);
     setSelectedTopicId(null);
-    setTopicGenerationSlots(initialTopicSlots(TOPIC_GENERATION_LIMIT));
+    replaceTopicGenerationSlots(campaignId, TOPIC_GENERATION_LIMIT);
 
     const revisionFeedback = feedback?.trim();
     const signals = buildTopicGenerationSignals(revisionFeedback);
@@ -1102,16 +1265,16 @@ function App() {
 
     try {
       await api.generateTopicsStream(
-        selectedCampaign.id,
+        campaignId,
         TOPIC_GENERATION_LIMIT,
         signals,
         (event: TopicStreamEvent) => {
           if (event.type === "start") {
-            setTopicGenerationSlots(initialTopicSlots(event.limit));
+            replaceTopicGenerationSlots(campaignId, event.limit);
             return;
           }
           if (event.type === "slot") {
-            updateTopicGenerationSlot(event.index, {
+            updateTopicGenerationSlot(campaignId, event.index, {
               status: "loading",
               topic: undefined,
               message: undefined,
@@ -1120,10 +1283,12 @@ function App() {
           }
           if (event.type === "topic") {
             streamedTopics.push(event.topic);
-            clearError("topic");
-            setTopics((current) => appendOrReplaceById(current, event.topic));
-            setSelectedTopicId((current) => current ?? event.topic.id);
-            updateTopicGenerationSlot(event.index, {
+            if (isSelectedCampaign(campaignId)) {
+              clearError("topic");
+              setTopics((current) => appendOrReplaceById(current, event.topic));
+              setSelectedTopicId((current) => current ?? event.topic.id);
+            }
+            updateTopicGenerationSlot(campaignId, event.index, {
               status: "done",
               topic: event.topic,
               message: undefined,
@@ -1131,48 +1296,51 @@ function App() {
             return;
           }
           if (event.type === "error") {
-            markLoadingTopicSlotsFailed(apiErrorMessage(event.message, "此候选生成失败，请重试。"), event.index);
+            markLoadingTopicSlotsFailed(
+              campaignId,
+              apiErrorMessage(event.message, "此候选生成失败，请重试。"),
+              event.index,
+            );
             return;
           }
           if (event.type === "done") {
-            setTopicGenerationSlots((current) => {
-              const next = current.map((slot) =>
-                slot.status === "loading"
-                  ? { ...slot, status: "error" as const, message: "模型未返回此候选，请重试此候选。" }
-                  : slot,
-              );
-              return next.every((slot) => slot.status === "done") ? [] : next;
-            });
+            finalizeTopicGenerationSlots(campaignId, "模型未返回此候选，请重试此候选。");
           }
         },
         selectedTopicModelId,
       );
 
       if (!streamedTopics.length) {
-        setError("选题生成失败，请稍后重试。", "topic");
-        markLoadingTopicSlotsFailed("模型未返回候选，请重新生成。");
+        if (isSelectedCampaign(campaignId)) {
+          setError("选题生成失败，请稍后重试。", "topic");
+        }
+        markLoadingTopicSlotsFailed(campaignId, "模型未返回候选，请重新生成。");
         return;
       }
 
-      if (revisionFeedback) setTopicFeedback("");
-      clearError("topic");
-      setNotice(
-        streamedTopics.length === TOPIC_GENERATION_LIMIT
-          ? revisionFeedback
-            ? "已按修改意见重新生成选题"
-            : "选题已生成"
-          : `已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`,
-      );
-      void saveWorkflowStage("topic_review");
+      if (isSelectedCampaign(campaignId)) {
+        if (revisionFeedback) setTopicFeedback("");
+        clearError("topic");
+        setNotice(
+          streamedTopics.length === TOPIC_GENERATION_LIMIT
+            ? revisionFeedback
+              ? "已按修改意见重新生成选题"
+              : "选题已生成"
+            : `已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`,
+        );
+        void saveWorkflowStage("topic_review");
+      }
     } catch (caught) {
       const message = apiErrorMessage(caught, "选题生成失败");
-      if (streamedTopics.length) {
-        clearError("topic");
-      } else {
-        setCaughtError("topic", caught, "选题生成失败");
+      if (isSelectedCampaign(campaignId)) {
+        if (streamedTopics.length) {
+          clearError("topic");
+        } else {
+          setCaughtError("topic", caught, "选题生成失败");
+        }
       }
-      markLoadingTopicSlotsFailed(message || "选题生成中断，请重试。");
-      if (streamedTopics.length) {
+      markLoadingTopicSlotsFailed(campaignId, message || "选题生成中断，请重试。");
+      if (streamedTopics.length && isSelectedCampaign(campaignId)) {
         setNotice(`已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`);
         void saveWorkflowStage("topic_review");
       }
@@ -1183,12 +1351,13 @@ function App() {
 
   async function handleRetryTopicSlot(slotIndex: number) {
     if (!selectedCampaign) return;
+    const campaignId = selectedCampaign.id;
     if (loading?.startsWith("topic-retry-")) return;
     const revisionFeedback = topicFeedback.trim();
     setLoading(`topic-retry-${slotIndex}`);
     clearError("topic");
     setNotice(null);
-    updateTopicGenerationSlot(slotIndex, {
+    updateTopicGenerationSlot(campaignId, slotIndex, {
       status: "loading",
       topic: undefined,
       message: undefined,
@@ -1197,15 +1366,17 @@ function App() {
     let retriedTopic: Topic | null = null;
     try {
       await api.generateTopicsStream(
-        selectedCampaign.id,
+        campaignId,
         1,
         buildTopicGenerationSignals(revisionFeedback, "retry_failed_topic_slot"),
         (event: TopicStreamEvent) => {
           if (event.type === "topic") {
             retriedTopic = event.topic;
-            setTopics((current) => appendOrReplaceById(current, event.topic));
-            setSelectedTopicId((current) => current ?? event.topic.id);
-            updateTopicGenerationSlot(slotIndex, {
+            if (isSelectedCampaign(campaignId)) {
+              setTopics((current) => appendOrReplaceById(current, event.topic));
+              setSelectedTopicId((current) => current ?? event.topic.id);
+            }
+            updateTopicGenerationSlot(campaignId, slotIndex, {
               status: "done",
               topic: event.topic,
               message: undefined,
@@ -1213,7 +1384,7 @@ function App() {
             return;
           }
           if (event.type === "error") {
-            updateTopicGenerationSlot(slotIndex, {
+            updateTopicGenerationSlot(campaignId, slotIndex, {
               status: "error",
               message: apiErrorMessage(event.message, "此候选生成失败，请重试。"),
             });
@@ -1223,24 +1394,24 @@ function App() {
       );
 
       if (!retriedTopic) {
-        updateTopicGenerationSlot(slotIndex, {
+        updateTopicGenerationSlot(campaignId, slotIndex, {
           status: "error",
           message: "模型未返回此候选，请再试一次。",
         });
         return;
       }
 
-      setNotice(`候选 ${slotIndex} 已重新生成`);
-      clearError("topic");
-      setTopicGenerationSlots((current) =>
-        current.length && current.every((slot) => slot.status === "done") ? [] : current,
-      );
+      if (isSelectedCampaign(campaignId)) {
+        setNotice(`候选 ${slotIndex} 已重新生成`);
+        clearError("topic");
+      }
+      clearCompletedTopicGenerationSlots(campaignId);
     } catch (caught) {
       const message = apiErrorMessage(caught, "此候选生成失败");
-      if (isAuthApiError(caught)) {
+      if (isAuthApiError(caught) && isSelectedCampaign(campaignId)) {
         setCaughtError("topic", caught, "此候选生成失败");
       }
-      updateTopicGenerationSlot(slotIndex, {
+      updateTopicGenerationSlot(campaignId, slotIndex, {
         status: "error",
         message,
       });
@@ -1316,7 +1487,14 @@ function App() {
       void refreshCampaignData(selectedCampaign.id, { silent: true });
       if (entityType === "copy_draft" && decision === "approved") void saveWorkflowStage("image_review");
       if (entityType === "creative_asset" && decision === "approved") {
-        void saveWorkflowStage(adGenerationRequiresVideo(selectedJob) ? "video_review" : "final_review");
+        const nextApprovedCreatives = creatives
+          .map((item) =>
+            item.id === entityId ? { ...item, status: reviewStatusFromDecision(entityType, decision) } : item,
+          )
+          .filter((item) => item.status === "approved");
+        void saveWorkflowStage(
+          workflowRequiresVideo(selectedJob, nextApprovedCreatives) ? "video_review" : "final_review",
+        );
       }
       if (entityType === "video_asset" && decision === "approved") void saveWorkflowStage("final_review");
     }
@@ -2132,6 +2310,7 @@ function App() {
       return null;
     }
     setFinalPayloadDraft(JSON.stringify(result.value, null, 2));
+    setFinalPackageOpen(true);
     clearError("final");
     setNotice("最终预审包已生成，请检查后确认回传。");
     return result.value;
@@ -2143,10 +2322,14 @@ function App() {
     if (!parsed) return;
     const job = await run(
       "save-final-payload",
-      () => api.updateAdGenerationReview(selectedJob.id, parsed, finalReviewNotes),
+      () => api.updateAdGenerationReview(selectedJob.id, parsed, "", selectedJob.updated_at),
       "最终预审包已保存",
     );
-    if (job) setJobs((current) => upsertById(current, job));
+    if (!job) {
+      void refreshJob(selectedJob.id);
+      return;
+    }
+    setJobs((current) => upsertById(current, job));
   }
 
   async function handleConfirmReturn() {
@@ -2155,7 +2338,7 @@ function App() {
     if (!parsed) return;
     const job = await run(
       "confirm-return",
-      () => api.confirmAdGenerationReview(selectedJob.id, parsed, finalReviewNotes),
+      () => api.confirmAdGenerationReview(selectedJob.id, parsed, "", selectedJob.updated_at),
       "已确认回传",
     );
     if (!job) {
@@ -2195,12 +2378,22 @@ function App() {
     if (!selectedJob) return;
     const current = selectedJob.result_payload ?? {};
     const metadata = isRecord(current.metadata_json) ? current.metadata_json : {};
-    const job = await api.updateAdGenerationReview(selectedJob.id, {
-      ...current,
-      status: stage,
-      metadata_json: { ...metadata, workflow_stage: stage },
-    });
-    setJobs((items) => upsertById(items, job));
+    try {
+      const job = await api.updateAdGenerationReview(
+        selectedJob.id,
+        {
+          ...current,
+          status: stage,
+          metadata_json: { ...metadata, workflow_stage: stage },
+        },
+        "",
+        selectedJob.updated_at,
+      );
+      setJobs((items) => upsertById(items, job));
+    } catch (caught) {
+      setCaughtError("work-order", caught, "工单已被更新，请刷新后再操作");
+      void refreshJob(selectedJob.id);
+    }
   }
 
   const workflowSummary = buildWorkflowSummary({
@@ -2212,7 +2405,19 @@ function App() {
     videos: approvedVideos,
   });
   const visibleError = error && shouldShowErrorBanner(error, activeView) ? error : null;
-  const bannerTone = visibleError ? (visibleError.transient ? "warning" : "error") : "success";
+
+  if (!currentOperator) {
+    return (
+      <OperatorGate
+        operators={operators}
+        loading={loading === "operators"}
+        selectedOperatorId={currentOperatorId}
+        error={visibleError?.message ?? null}
+        onSelect={handleSelectOperator}
+        onRefresh={() => void loadOperators()}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -2250,38 +2455,33 @@ function App() {
       <main className="main-area">
         <header className="topbar">
           <div className="topbar-title">
-            <span className="topbar-eyebrow">Operations Console</span>
             <h1>{viewTitle(activeView)}</h1>
-            <p>{viewSubtitles[activeView]}</p>
           </div>
           <div className="topbar-actions">
+            <OperatorBadge operator={currentOperator} onSwitch={handleSwitchOperator} />
+            <MessageCenter
+              error={visibleError}
+              notice={notice}
+              open={messageCenterOpen}
+              onToggle={() => setMessageCenterOpen((current) => !current)}
+              onClear={() => {
+                if (visibleError) clearError(visibleError.scope);
+                if (notice) setNotice(null);
+                setMessageCenterOpen(false);
+              }}
+            />
             <button className="icon-button" onClick={() => void refreshBaseData()} title="刷新">
               {loading === "refresh" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
             </button>
           </div>
         </header>
 
-        {(visibleError || notice) && (
-          <div className={`banner ${bannerTone}`}>
-            {visibleError ? (
-              visibleError.transient ? (
-                <Clock3 size={18} />
-              ) : (
-                <X size={18} />
-              )
-            ) : (
-              <Check size={18} />
-            )}
-            <span>{visibleError?.message || notice}</span>
-          </div>
-        )}
-
         {activeView === "dashboard" && (
           <DashboardView
             jobs={jobs}
             selectedJob={selectedJob}
             summary={workflowSummary}
-            setSelectedJobId={setSelectedJobId}
+            onSelectJob={(jobId, targetView) => void claimAndSelectJob(jobId, targetView)}
             setActiveView={setActiveView}
           />
         )}
@@ -2290,7 +2490,7 @@ function App() {
           <PerformanceAnalysisView
             analyses={performanceAnalyses}
             selectedAnalysis={selectedPerformanceAnalysis}
-            setSelectedAnalysisId={setSelectedPerformanceAnalysisId}
+            onSelectAnalysis={(analysisId) => void claimAndSelectPerformanceAnalysis(analysisId)}
             onCreateAnalysis={(payload) => handleCreatePerformanceAnalysis(payload)}
             onDeleteAnalysis={(analysisId) => void handleDeletePerformanceAnalysis(analysisId)}
             onRefresh={() => void refreshPerformanceAnalyses()}
@@ -2307,10 +2507,12 @@ function App() {
             onSelectSampleWorkOrder={handleSelectSampleWorkOrder}
             jobs={jobs}
             selectedJob={selectedJob}
-            setSelectedJobId={setSelectedJobId}
+            onSelectJob={(jobId) => void claimAndSelectJob(jobId)}
             onCreateWorkOrder={handleCreateWorkOrder}
             onDeleteJob={(jobId) => void handleDeleteJob(jobId)}
-            onOpenWorkflow={() => setActiveView("workflow")}
+            onOpenWorkflow={() =>
+              selectedJob ? void claimAndSelectJob(selectedJob.id, "workflow") : setActiveView("workflow")
+            }
             loading={loading}
             hasCachedDeliveryExtraction={
               Boolean(deliveryExtractionCache) ||
@@ -2323,7 +2525,7 @@ function App() {
           <WorkflowView
             jobs={jobs}
             selectedJob={selectedJob}
-            setSelectedJobId={setSelectedJobId}
+            onSelectJob={(jobId) => void claimAndSelectJob(jobId)}
             campaign={selectedCampaign}
             summary={workflowSummary}
             topics={topics}
@@ -2332,8 +2534,8 @@ function App() {
             videos={topicVideos}
             finalPayloadDraft={finalPayloadDraft}
             setFinalPayloadDraft={setFinalPayloadDraft}
-            finalReviewNotes={finalReviewNotes}
-            setFinalReviewNotes={setFinalReviewNotes}
+            finalPackageOpen={finalPackageOpen}
+            setFinalPackageOpen={setFinalPackageOpen}
             onRefresh={() => (selectedJob ? void refreshJob(selectedJob.id) : void refreshBaseData())}
             onGenerateTopics={() => void handleGenerateTopics()}
             onGenerateCopy={() => void handleGenerateCopy()}
@@ -2350,7 +2552,7 @@ function App() {
         {activeView === "topics" && (
           <TopicsView
             topics={topics}
-            topicGenerationSlots={topicGenerationSlots}
+            topicGenerationSlots={selectedTopicGenerationSlots}
             selectedTopic={selectedTopic}
             setSelectedTopicId={setSelectedTopicId}
             topicFeedback={topicFeedback}
@@ -2468,17 +2670,83 @@ function App() {
   );
 }
 
+function OperatorGate({
+  operators,
+  loading,
+  selectedOperatorId,
+  error,
+  onSelect,
+  onRefresh,
+}: {
+  operators: OperatorUser[];
+  loading: boolean;
+  selectedOperatorId: string | null;
+  error: string | null;
+  onSelect: (operatorId: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <main className="operator-gate">
+      <section className="operator-gate-panel">
+        <div className="operator-gate-head">
+          <span className="section-eyebrow">Workbench</span>
+          <h1>选择工作台操作员</h1>
+        </div>
+        <div className="operator-list">
+          {operators.map((operator) => (
+            <button
+              className={`operator-option ${operator.id === selectedOperatorId ? "active" : ""}`}
+              key={operator.id}
+              onClick={() => onSelect(operator.id)}
+            >
+              <span>{operator.full_name || operator.email}</span>
+              <em>{operator.role === "admin" ? "管理员" : "操作员"}</em>
+            </button>
+          ))}
+        </div>
+        {!operators.length && (
+          <div className="operator-empty">
+            {loading ? <Loader2 size={18} className="spin" /> : <Clock3 size={18} />}
+            <span>{loading ? "正在读取操作员" : "暂无可用操作员"}</span>
+          </div>
+        )}
+        {error && <div className="operator-error">{error}</div>}
+        <button className="secondary-button" onClick={onRefresh} disabled={loading}>
+          {loading ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+          <span>刷新</span>
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function OperatorBadge({
+  operator,
+  onSwitch,
+}: {
+  operator: OperatorUser;
+  onSwitch: () => void;
+}) {
+  return (
+    <button className="operator-badge" onClick={onSwitch} title="切换操作员">
+      <span>当前用户</span>
+      <strong>{operator.full_name || operator.email}</strong>
+      <em>{operator.role === "admin" ? "管理员" : "操作员"}</em>
+    </button>
+  );
+}
+
 function DashboardView({
   jobs,
   selectedJob,
   summary,
-  setSelectedJobId,
+  onSelectJob,
   setActiveView,
 }: {
   jobs: AdGenerationJob[];
   selectedJob: AdGenerationJob | null;
   summary: WorkflowSummary;
-  setSelectedJobId: (id: string) => void;
+  onSelectJob: (id: string, targetView?: ViewKey) => void;
   setActiveView: (view: ViewKey) => void;
 }) {
   const pending = jobs.filter((item) => ["queued", "processing"].includes(item.status)).length;
@@ -2489,9 +2757,10 @@ function DashboardView({
   ).length;
   const returned = jobs.filter((item) => item.status === "returned").length;
   const summarySteps = workflowSummarySteps(summary);
+  const progressSteps = workflowProgressSteps(summary);
   const currentStep = currentWorkflowStep(summary);
   const currentStepIndex = summarySteps.findIndex((step) => step.key === currentStep.key);
-  const completedCount = summarySteps.filter((step) => step.done).length;
+  const completedCount = progressSteps.filter((step) => step.done).length;
   const progressPercent = workflowProgressPercent(summary);
   const activeJob = selectedJob ?? jobs[0] ?? null;
   const reviewQueue = jobs
@@ -2516,7 +2785,7 @@ function DashboardView({
           <div className="dashboard-command-actions">
             <button
               className="primary-button"
-              onClick={() => setActiveView(activeJob ? "workflow" : "work-orders")}
+              onClick={() => (activeJob ? onSelectJob(activeJob.id, "workflow") : setActiveView("work-orders"))}
             >
               <Check size={16} />
               <span>{activeJob ? "继续生产" : "创建工单"}</span>
@@ -2524,10 +2793,7 @@ function DashboardView({
             {activeJob && (
               <button
                 className="secondary-button"
-                onClick={() => {
-                  setSelectedJobId(activeJob.id);
-                  setActiveView("workflow");
-                }}
+                onClick={() => onSelectJob(activeJob.id, "workflow")}
               >
                 <RefreshCw size={16} />
                 <span>查看任务</span>
@@ -2544,7 +2810,7 @@ function DashboardView({
           <div className="stage-meter-copy">
             <span>生产轨道</span>
             <strong>{currentStepIndex + 1}. {currentStep.title}</strong>
-            <p>{completedCount} / {summarySteps.length} 个步骤已完成</p>
+            <p>{completedCount} / {progressSteps.length} 个步骤已完成</p>
           </div>
         </div>
       </section>
@@ -2581,14 +2847,11 @@ function DashboardView({
               <button
                 className="list-row-button dashboard-job-row"
                 key={job.id}
-                onClick={() => {
-                  setSelectedJobId(job.id);
-                  setActiveView("workflow");
-                }}
+                onClick={() => onSelectJob(job.id, "workflow")}
               >
                 <div>
                   <strong>{adGenerationJobTitle(job)}</strong>
-                  <span>{formatDate(job.created_at)} / {job.external_order_id || shortId(job.id)}</span>
+                  <span>{formatDate(job.created_at)} / 工单编号 {adGenerationJobNumber(job, jobs)}</span>
                 </div>
                 <StatusPill status={job.status} />
               </button>
@@ -2600,6 +2863,90 @@ function DashboardView({
   );
 }
 
+function MessageCenter({
+  error,
+  notice,
+  open,
+  onToggle,
+  onClear,
+}: {
+  error: ScopedAppError | null;
+  notice: string | null;
+  open: boolean;
+  onToggle: () => void;
+  onClear: () => void;
+}) {
+  const items = [
+    error
+      ? {
+          id: "error",
+          tone: error.transient ? "warning" : "error",
+          title: error.transient ? "系统提醒" : "需要处理",
+          message: error.message,
+        }
+      : null,
+    notice
+      ? {
+          id: "notice",
+          tone: "success",
+          title: "操作通知",
+          message: notice,
+        }
+      : null,
+  ].filter((item): item is { id: string; tone: string; title: string; message: string } => Boolean(item));
+  const noticeCount = items.length;
+
+  return (
+    <div className="message-center">
+      <button
+        className={`icon-button message-center-button ${noticeCount ? "has-message" : ""}`}
+        onClick={onToggle}
+        title="消息"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+      >
+        <Bell size={18} />
+        {noticeCount > 0 && <span className="message-count">{noticeCount}</span>}
+      </button>
+      {open && (
+        <div className="message-center-popover" role="dialog" aria-label="消息中心">
+          <div className="message-center-tabs">
+            <button className="active" type="button">
+              通知({noticeCount})
+            </button>
+          </div>
+          <div className="message-list">
+            {items.length ? (
+              items.map((item) => {
+                const Icon = item.tone === "error" ? X : item.tone === "warning" ? Clock3 : Check;
+                return (
+                  <div className={`message-item ${item.tone}`} key={item.id}>
+                    <div className="message-icon">
+                      <Icon size={16} />
+                    </div>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <p>{item.message}</p>
+                      <span>刚刚</span>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="message-empty">暂无通知</div>
+            )}
+          </div>
+          <div className="message-center-footer">
+            <button className="secondary-button" type="button" onClick={onClear} disabled={!noticeCount}>
+              清空
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkOrdersView({
   rawWorkOrder,
   setRawWorkOrder,
@@ -2608,7 +2955,7 @@ function WorkOrdersView({
   onSelectSampleWorkOrder,
   jobs,
   selectedJob,
-  setSelectedJobId,
+  onSelectJob,
   onCreateWorkOrder,
   onDeleteJob,
   onOpenWorkflow,
@@ -2622,7 +2969,7 @@ function WorkOrdersView({
   onSelectSampleWorkOrder: (sampleId: string) => void;
   jobs: AdGenerationJob[];
   selectedJob: AdGenerationJob | null;
-  setSelectedJobId: (id: string | null) => void;
+  onSelectJob: (id: string) => void;
   onCreateWorkOrder: () => void;
   onDeleteJob: (jobId: string) => void;
   onOpenWorkflow: () => void;
@@ -2684,14 +3031,15 @@ function WorkOrdersView({
         <DataList emptyText="暂无 AI 工单">
           {jobs.map((job) => (
             <div className={`job-list-row ${selectedJob?.id === job.id ? "active" : ""}`} key={job.id}>
-              <button className="list-button job-select-button" onClick={() => setSelectedJobId(job.id)}>
+              <button className="list-button job-select-button" onClick={() => onSelectJob(job.id)}>
                 <strong>{adGenerationJobTitle(job)}</strong>
-                <span>{job.external_order_id || shortId(job.id)}</span>
+                <span>工单编号 {adGenerationJobNumber(job, jobs)}</span>
                 <StatusPill status={job.status} />
               </button>
               <button
                 className="icon-button danger job-delete-button"
                 onClick={() => onDeleteJob(job.id)}
+                disabled={!job.can_edit}
                 title="删除 AI 工单及关联素材"
               >
                 <Trash2 size={16} />
@@ -2707,7 +3055,7 @@ function WorkOrdersView({
 function WorkflowView({
   jobs,
   selectedJob,
-  setSelectedJobId,
+  onSelectJob,
   campaign,
   summary,
   topics,
@@ -2716,8 +3064,8 @@ function WorkflowView({
   videos,
   finalPayloadDraft,
   setFinalPayloadDraft,
-  finalReviewNotes,
-  setFinalReviewNotes,
+  finalPackageOpen,
+  setFinalPackageOpen,
   onRefresh,
   onGenerateTopics,
   onGenerateCopy,
@@ -2731,7 +3079,7 @@ function WorkflowView({
 }: {
   jobs: AdGenerationJob[];
   selectedJob: AdGenerationJob | null;
-  setSelectedJobId: (id: string) => void;
+  onSelectJob: (id: string) => void;
   campaign: Campaign | null;
   summary: WorkflowSummary;
   topics: Topic[];
@@ -2740,8 +3088,8 @@ function WorkflowView({
   videos: VideoAsset[];
   finalPayloadDraft: string;
   setFinalPayloadDraft: (value: string) => void;
-  finalReviewNotes: string;
-  setFinalReviewNotes: (value: string) => void;
+  finalPackageOpen: boolean;
+  setFinalPackageOpen: (value: boolean) => void;
   onRefresh: () => void;
   onGenerateTopics: () => void;
   onGenerateCopy: () => void;
@@ -2757,19 +3105,10 @@ function WorkflowView({
   const review = isRecord(result.review) ? result.review : {};
   const warnings = Array.isArray(review.warnings) ? review.warnings.map(String) : [];
   const missingFields = Array.isArray(review.missing_fields) ? review.missing_fields.map(String) : [];
-  const finalPayloadForBrandSafety = finalPayloadDraft.trim() ? parseJsonRecord(finalPayloadDraft) : result;
-  const brandSafetyReport = brandSafetyReportFromPayload(finalPayloadForBrandSafety);
-  const brandSafetyBlocked = brandSafetyBlocksReturn(brandSafetyReport);
-  const brandSafetyLabel = brandSafetySummaryLabel(brandSafetyReport);
   const hasRisks = warnings.length > 0 || missingFields.length > 0;
   const approvedImageCount = creatives.filter((item) => item.status === "approved").length;
   const approvedVideoCount = videos.filter((item) => item.status === "approved").length;
-  const productionOverview = [
-    { label: "选题", value: summary.topic.label, status: workflowStepStatusLabel(summary.topic.status) },
-    { label: "文案", value: summary.copy.label, status: workflowStepStatusLabel(summary.copy.status) },
-    { label: "图片", value: approvedImageCount ? `${approvedImageCount} 张已通过` : "未通过图片", status: workflowStepStatusLabel(summary.image.status) },
-    { label: "视频", value: approvedVideoCount ? `${approvedVideoCount} 个已通过` : "未通过视频", status: workflowStepStatusLabel(summary.video.status) },
-  ];
+  const jobEditable = selectedJob?.can_edit ?? false;
 
   const steps = [
     {
@@ -2790,7 +3129,7 @@ function WorkflowView({
       action: topics.length ? "进入选题" : "生成选题",
       loadingKey: topics.length ? null : "topics",
       onAction: topics.length ? () => onGoToView("topics") : onGenerateTopics,
-      disabled: !summary.fields.done,
+      disabled: !jobEditable || !summary.fields.done,
     },
     {
       key: "copy",
@@ -2800,7 +3139,7 @@ function WorkflowView({
       action: drafts.length ? "进入文案" : "生成文案",
       loadingKey: drafts.length ? null : "copy",
       onAction: drafts.length ? () => onGoToView("copy") : onGenerateCopy,
-      disabled: !summary.topic.done,
+      disabled: !jobEditable || !summary.topic.done,
     },
     {
       key: "image",
@@ -2810,27 +3149,34 @@ function WorkflowView({
       action: creatives.length ? "进入图片" : "生成图片",
       loadingKey: creatives.length ? null : "creatives",
       onAction: creatives.length ? () => onGoToView("creatives") : onGenerateCreatives,
-      disabled: !summary.copy.done,
+      disabled: !jobEditable || !summary.copy.done,
     },
     {
       key: "video",
       label: "审核视频",
-      detail: summary.video.done ? "视频已通过" : videos.length ? "请审核视频" : "根据图片创建视频",
+      detail:
+        summary.video.status === "skipped"
+          ? "无需视频"
+          : summary.video.done
+            ? "视频已通过"
+            : videos.length
+              ? "请审核视频"
+              : "根据图片创建视频",
       status: summary.video.status,
-      action: "进入视频",
+      action: summary.video.status === "skipped" ? "无需操作" : "进入视频",
       loadingKey: null,
       onAction: () => onGoToView("videos"),
-      disabled: !summary.image.done,
+      disabled: !jobEditable || summary.video.status === "skipped" || !summary.image.done,
     },
     {
       key: "final",
       label: "最终预审",
       detail: summary.final.done ? "可回传投放系统" : "完成前面步骤后生成最终包",
       status: summary.final.status,
-      action: "生成预审包",
+      action: "生成预览包",
       loadingKey: null,
       onAction: onPrepareFinal,
-      disabled: !summary.final.done,
+      disabled: !jobEditable || !summary.final.done,
     },
   ];
   const activeStepIndex = steps.findIndex((step) => step.status === "active");
@@ -2839,7 +3185,7 @@ function WorkflowView({
   const currentStepLoading = Boolean(loading) && currentStep.loadingKey === loading;
   const activeOperation = operationProgressText(loading, operationElapsedSeconds);
   const progressPercent = workflowProgressPercent(summary);
-  const completedCount = workflowSummarySteps(summary).filter((step) => step.done).length;
+  const completedCount = workflowProgressSteps(summary).filter((step) => step.done).length;
 
   return (
     <section className="review-layout workflow-command-layout">
@@ -2855,10 +3201,10 @@ function WorkflowView({
             <button
               className={`list-button ${selectedJob?.id === job.id ? "active" : ""}`}
               key={job.id}
-              onClick={() => setSelectedJobId(job.id)}
+              onClick={() => onSelectJob(job.id)}
             >
               <strong>{adGenerationJobTitle(job)}</strong>
-              <span>{job.external_order_id || shortId(job.id)}</span>
+              <span>工单编号 {adGenerationJobNumber(job, jobs)}</span>
               <StatusPill status={job.status} />
             </button>
           ))}
@@ -2876,7 +3222,7 @@ function WorkflowView({
               <div>
                 <span className="section-eyebrow">Production brief</span>
                 <h3>{adGenerationJobTitle(selectedJob)}</h3>
-                <p>{campaign?.name || selectedJob.external_order_id || shortId(selectedJob.id)}</p>
+                <p>工单编号 {adGenerationJobNumber(selectedJob, jobs)}</p>
               </div>
               <div className="workflow-brief-stat">
                 <strong>{progressPercent}%</strong>
@@ -2972,7 +3318,11 @@ function WorkflowView({
               ))}
             </div>
 
-            <details className="final-package-panel" open={summary.final.done || Boolean(finalPayloadDraft.trim())}>
+            <details
+              className="final-package-panel"
+              open={finalPackageOpen}
+              onToggle={(event) => setFinalPackageOpen(event.currentTarget.open)}
+            >
               <summary>
                 <span>最终预审包</span>
                 <em>{finalPayloadDraft.trim() ? "已生成" : "待生成"}</em>
@@ -2987,49 +3337,19 @@ function WorkflowView({
                 onChange={(event) => setFinalPayloadDraft(event.target.value)}
                 spellCheck={false}
               />
-              <div className={`brand-safety-card ${brandSafetyBlocked ? "blocked" : brandSafetyReport ? "passed" : "pending"}`}>
-                <div className="brand-safety-card-head">
-                  <strong>{brandSafetyLabel}</strong>
-                  <span>{brandSafetyReport ? `${brandSafetyReport.findings.length} 项命中` : "确认回传时后端会重新检查"}</span>
-                </div>
-                {brandSafetyReport?.findings.length ? (
-                  <ul>
-                    {brandSafetyReport.findings.slice(0, 6).map((finding, index) => (
-                      <li key={`${finding.field_path}-${finding.matched_text}-${index}`}>
-                        <span>{finding.category}</span>
-                        <strong>{finding.matched_text}</strong>
-                        <em>{finding.field_path}</em>
-                        {finding.suggestion && <p>{finding.suggestion}</p>}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p>{brandSafetyReport ? "未发现赌博、博彩、药品、金钱或价格优势表达。" : "生成或确认后会显示品牌安全检查结果。"}</p>
-                )}
-              </div>
-              <label className="editor-label" htmlFor="final-notes">
-                预审备注
-              </label>
-              <textarea
-                id="final-notes"
-                className="review-notes-input"
-                value={finalReviewNotes}
-                onChange={(event) => setFinalReviewNotes(event.target.value)}
-                placeholder="记录人工审核意见、素材选择和需要投放系统注意的事项"
-              />
               <div className="button-row">
-                <button className="secondary-button" onClick={onPrepareFinal} disabled={!summary.final.done}>
-                  <Sparkles size={16} />
-                  <span>生成预审包</span>
-                </button>
-                <button className="secondary-button" onClick={onSaveFinal} disabled={!finalPayloadDraft.trim()}>
+                <button
+                  className="secondary-button"
+                  onClick={onSaveFinal}
+                  disabled={!jobEditable || !finalPayloadDraft.trim()}
+                >
                   <Check size={16} />
                   <span>保存预审包</span>
                 </button>
                 <button
                   className="primary-button"
                   onClick={onConfirmReturn}
-                  disabled={!summary.final.done || !brandSafetyAllowsReturn(brandSafetyReport)}
+                  disabled={!jobEditable || !summary.final.done}
                 >
                   <Send size={16} />
                   <span>确认并回传</span>
@@ -3051,18 +3371,6 @@ function WorkflowView({
             <section className="context-section">
               <h3>投放参数</h3>
               <KeyValueTable data={adGenerationJobFields(selectedJob, campaign)} />
-            </section>
-            <section className="context-section">
-              <h3>生产结果</h3>
-              <div className="production-overview-list">
-                {productionOverview.map((item) => (
-                  <div className="production-overview-row" key={item.label}>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                    <em>{item.status}</em>
-                  </div>
-                ))}
-              </div>
             </section>
             <details className="raw-work-order-details">
               <summary>工单原文</summary>
@@ -3120,7 +3428,7 @@ function TopicsView({
     : -1;
   const generatedSlotCount = visibleSlots.filter((slot) => slot.status === "done").length;
   const hasGeneratingSlots = topicGenerationSlots.some((slot) => slot.status === "loading");
-  const isGeneratingTopics = loading === "topics" || hasGeneratingSlots;
+  const isGeneratingTopics = hasGeneratingSlots;
   const canRegenerateWithFeedback = topicFeedback.trim().length > 0 && !isGeneratingTopics;
   const panelNote = visibleSlots.length
     ? isGeneratingTopics
@@ -3166,7 +3474,6 @@ function TopicsView({
               value={topicFeedback}
               onChange={(event) => setTopicFeedback(event.target.value)}
               disabled={isGeneratingTopics}
-              placeholder="例如：减少价格卖点，突出印度家庭客厅观影和上门安装，不要体育赛事素材。"
             />
             <div className="topic-feedback-actions">
               <button
@@ -3358,10 +3665,6 @@ function CopyView({
     previewCreatives[0] ??
     null;
   const selectedPreviewAspectClass = mediaPreviewAspectClass(selectedPreviewCreative?.size);
-  const feedbackTags = ["更短", "更本地化", "少用符号", "突出使用场景", "更合规"];
-  const appendFeedback = (value: string) => {
-    setFeedback(feedback.trim() ? `${feedback.trim()}，${value}` : value);
-  };
 
   useEffect(() => {
     if (!previewCreatives.length) {
@@ -3475,21 +3778,12 @@ function CopyView({
 
                 <section className="copy-feedback-card">
                   <div className="copy-section-title">
-                    <strong>不满意？写修改意见再生成</strong>
                     <span>会基于当前版本重写，并保留新旧版本供比较</span>
-                  </div>
-                  <div className="copy-feedback-tags">
-                    {feedbackTags.map((tag) => (
-                      <button className="copy-feedback-tag" key={tag} onClick={() => appendFeedback(tag)}>
-                        {tag}
-                      </button>
-                    ))}
                   </div>
                   <textarea
                     className="feedback-input copy-feedback-input"
                     value={feedback}
                     onChange={(event) => setFeedback(event.target.value)}
-                    placeholder="例如：文案更短一些，少用符号，更像印度本地用户会看到的广告。"
                   />
                   <div className="copy-actions">
                     {!approved ? (
@@ -3958,14 +4252,14 @@ function CreativesView({
                   <div className="keyframe-variant-head">
                     <div>
                       <strong>方案 {group.group}</strong>
-                      <span>
+                      <span className="keyframe-variant-summary">
                         {group.complete
                           ? "首帧 + 尾帧"
                           : `${group.assets.length}/${KEYFRAME_FRAMES_PER_VARIANT} 张已生成`}
                       </span>
                     </div>
                     <button
-                      className={groupSelected ? "primary-button" : "secondary-button"}
+                      className={`${groupSelected ? "primary-button" : "secondary-button"} keyframe-variant-select-button`}
                       type="button"
                       disabled={!group.complete || Boolean(loading)}
                       onClick={() => setSelectedCreativeIds(groupIds)}
@@ -4030,7 +4324,6 @@ function CreativesView({
                       id={`keyframe-feedback-${group.group}`}
                       value={groupFeedback}
                       onChange={(event) => setKeyframeRewriteFeedback(group.group, event.target.value)}
-                      placeholder="例如：增强动感和金属质感，减少画面文字，首尾帧保持同一套视觉。"
                       disabled={Boolean(loading)}
                     />
                     <button
@@ -4186,7 +4479,7 @@ function CreativeSlotCard({
           {showStatusPill && <StatusPill status={asset.status} />}
         </div>
         <div className="creative-version-row">
-          <span>候选 {creativeImageIndex(asset, slot.index)}</span>
+          <span>{creativeSlotFrameLabel(asset, slot.index)}</span>
           <span>版本 {asset.version}</span>
         </div>
         {slot.status === "error" && <p className="creative-error-text">{slot.message}</p>}
@@ -4861,13 +5154,17 @@ function workflowSummarySteps(summary: WorkflowSummary): WorkflowSummary["fields
   return [summary.fields, summary.topic, summary.copy, summary.image, summary.video, summary.final];
 }
 
+function workflowProgressSteps(summary: WorkflowSummary): WorkflowSummary["fields"][] {
+  return workflowSummarySteps(summary).filter((step) => step.status !== "skipped");
+}
+
 function currentWorkflowStep(summary: WorkflowSummary): WorkflowSummary["fields"] {
   const steps = workflowSummarySteps(summary);
   return steps.find((step) => step.status === "active") ?? steps.find((step) => step.key === "final") ?? steps[0];
 }
 
 function workflowProgressPercent(summary: WorkflowSummary): number {
-  const steps = workflowSummarySteps(summary);
+  const steps = workflowProgressSteps(summary);
   if (!steps.length) return 0;
   return Math.round((steps.filter((step) => step.done).length / steps.length) * 100);
 }
@@ -4956,7 +5253,7 @@ function JsonBlock({ value }: { value: unknown }) {
 function PerformanceAnalysisView({
   analyses,
   selectedAnalysis,
-  setSelectedAnalysisId,
+  onSelectAnalysis,
   onCreateAnalysis,
   onDeleteAnalysis,
   onRefresh,
@@ -4964,7 +5261,7 @@ function PerformanceAnalysisView({
 }: {
   analyses: AdPerformanceAnalysis[];
   selectedAnalysis: AdPerformanceAnalysis | null;
-  setSelectedAnalysisId: (id: string) => void;
+  onSelectAnalysis: (id: string) => void;
   onCreateAnalysis: (payload: ManualAdPerformancePayload) => Promise<AdPerformanceAnalysis | null>;
   onDeleteAnalysis: (analysisId: string) => void;
   onRefresh: () => void;
@@ -4988,6 +5285,15 @@ function PerformanceAnalysisView({
     selectedAnalysis && performanceStreamAnalysisId === selectedAnalysis.id,
   );
   const isCreatingManualAnalysis = loading === "performance-create";
+  const selectedOptimizationRows = selectedAnalysis ? performanceOptimizationRows(selectedAnalysis) : [];
+  const selectedActionableCount = selectedOptimizationRows.filter(optimizationIsActionable).length;
+  const selectedKeptCount = selectedOptimizationRows.filter(optimizationIsKept).length;
+  const selectedWatchCount = optimizationWorkOrder?.modules_to_watch.length ?? 0;
+  const otherAnalyses = analyses.filter((analysis) => analysis.id !== selectedAnalysis?.id);
+  const pendingAnalyses = otherAnalyses.filter((analysis) => performanceQueueStatus(analysis) === "pending");
+  const completedAnalyses = otherAnalyses.filter((analysis) => performanceQueueStatus(analysis) === "completed");
+  const exceptionAnalyses = otherAnalyses.filter((analysis) => performanceQueueStatus(analysis) === "exception");
+  const currentQueueStatus = selectedAnalysis ? performanceQueueStatus(selectedAnalysis) : null;
 
   function handleFormatManualJson() {
     try {
@@ -5055,103 +5361,206 @@ function PerformanceAnalysisView({
     }
   }
 
+  function renderAnalysisQueue(items: AdPerformanceAnalysis[], emptyText: string) {
+    return (
+      <DataList emptyText={emptyText}>
+        {items.map((analysis) => (
+          <div
+            className={`list-button performance-list-item ${selectedAnalysis?.id === analysis.id ? "active" : ""}`}
+            key={analysis.id}
+            onClick={() => onSelectAnalysis(analysis.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelectAnalysis(analysis.id);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="performance-list-item-main">
+              <strong>{performanceAnalysisTitle(analysis)}</strong>
+              <span>{performanceAnalysisMeta(analysis)}</span>
+              <span>{formatDate(analysis.created_at)}</span>
+            </div>
+            <button
+              aria-label="删除投放分析记录"
+              className="icon-button danger performance-delete-button"
+              disabled={!analysis.can_edit || loading === `delete-performance-${analysis.id}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDeleteAnalysis(analysis.id);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+              title="删除投放分析记录"
+            >
+              {loading === `delete-performance-${analysis.id}` ? (
+                <Loader2 size={16} className="spin" />
+              ) : (
+                <Trash2 size={16} />
+              )}
+            </button>
+          </div>
+        ))}
+      </DataList>
+    );
+  }
+
   return (
     <section className="performance-layout two-column">
-      <section className="panel performance-list-panel">
+      <section className="panel performance-current-panel">
         <div className="panel-header">
           <div>
             <span className="section-eyebrow">PERFORMANCE</span>
-            <h2>投放分析记录</h2>
-            <span className="panel-note">{analyses.length ? `${analyses.length} 条分析` : "等待外部系统回传数据"}</span>
+            <h2>当前优化工单</h2>
+            <span className="panel-note">
+              {selectedAnalysis ? performanceAnalysisMeta(selectedAnalysis) : "等待外部系统回传数据"}
+            </span>
           </div>
           <button className="icon-button" onClick={onRefresh} title="刷新分析">
             {loading === "performance-refresh" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
           </button>
         </div>
-        <form className="performance-manual-form" onSubmit={(event) => void handleSubmitManualJson(event)}>
-          <div className="performance-manual-head">
-            <div>
-              <h3>手动创建分析</h3>
-              <p>粘贴外部投放系统回传 JSON，立即生成一条 AI 分析记录。</p>
-            </div>
-            <div className="performance-manual-tools">
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => {
-                  setManualJsonText(manualAdPerformanceJsonExample);
-                  setManualJsonError(null);
-                }}
-                title="填入示例 JSON"
-              >
-                <FileText size={16} />
-              </button>
-              <button
-                type="button"
-                className="icon-button"
-                onClick={handleFormatManualJson}
-                title="格式化 JSON"
-              >
-                <Check size={16} />
-              </button>
-            </div>
-          </div>
-          <textarea
-            className="performance-manual-textarea"
-            value={manualJsonText}
-            onChange={(event) => {
-              setManualJsonText(event.target.value);
-              if (manualJsonError) setManualJsonError(null);
-            }}
-            placeholder='{"creative":{"name":"new12"},"insight":{"clicks":"83"}}'
-            spellCheck={false}
-          />
-          {manualJsonError && <p className="performance-manual-error">{manualJsonError}</p>}
-          <button className="primary-button" type="submit" disabled={isCreatingManualAnalysis}>
-            {isCreatingManualAnalysis ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-            {isCreatingManualAnalysis ? "创建中" : "创建分析"}
-          </button>
-        </form>
-        <DataList emptyText="还没有收到广告效果数据">
-          {analyses.map((analysis) => (
-            <div
-              className={`list-button performance-list-item ${selectedAnalysis?.id === analysis.id ? "active" : ""}`}
-              key={analysis.id}
-              onClick={() => setSelectedAnalysisId(analysis.id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setSelectedAnalysisId(analysis.id);
-                }
-              }}
-              role="button"
-              tabIndex={0}
-            >
-              <div className="performance-list-item-main">
-                <strong>{performanceAnalysisTitle(analysis)}</strong>
-                <span>{performanceAnalysisMeta(analysis)}</span>
-                <span>{formatDate(analysis.created_at)}</span>
+
+        {selectedAnalysis ? (
+          <article className="performance-current-card">
+            <div className="performance-current-card-head">
+              <div>
+                <span>当前处理</span>
+                <strong>{performanceAnalysisTitle(selectedAnalysis)}</strong>
+                <p>{formatDate(selectedAnalysis.created_at)}</p>
               </div>
-              <button
-                aria-label="删除投放分析记录"
-                className="icon-button danger performance-delete-button"
-                disabled={loading === `delete-performance-${analysis.id}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDeleteAnalysis(analysis.id);
-                }}
-                onKeyDown={(event) => event.stopPropagation()}
-                title="删除投放分析记录"
-              >
-                {loading === `delete-performance-${analysis.id}` ? (
-                  <Loader2 size={16} className="spin" />
-                ) : (
-                  <Trash2 size={16} />
-                )}
-              </button>
+              {currentQueueStatus && (
+                <span className={`status ${performanceQueueStatusClass(currentQueueStatus)}`}>
+                  {performanceQueueStatusLabel(currentQueueStatus)}
+                </span>
+              )}
             </div>
-          ))}
-        </DataList>
+
+            <div className="performance-current-stats">
+              <article>
+                <strong>{selectedActionableCount}</strong>
+                <span>待处理建议</span>
+              </article>
+              <article>
+                <strong>{selectedKeptCount}</strong>
+                <span>建议保留</span>
+              </article>
+              <article>
+                <strong>{selectedWatchCount}</strong>
+                <span>继续观察</span>
+              </article>
+            </div>
+
+            <div className="performance-current-next">
+              <span>{optimizationWorkOrder ? priorityLabel(optimizationWorkOrder.priority) : "待生成建议"}</span>
+              <p>
+                {optimizationWorkOrder?.next_step ||
+                  optimizationWorkOrder?.operator_summary ||
+                  result?.summary ||
+                  "请选择一条分析记录查看优化建议。"}
+              </p>
+            </div>
+          </article>
+        ) : (
+          <EmptyState text="暂无当前优化工单，请先创建分析或等待外部系统回传。" />
+        )}
+
+        <details className="performance-manual-details">
+          <summary>
+            <div>
+              <strong>新建分析</strong>
+              <span>需要手动粘贴回传 JSON 时再展开。</span>
+            </div>
+            <em>手动创建</em>
+          </summary>
+          <form className="performance-manual-form" onSubmit={(event) => void handleSubmitManualJson(event)}>
+            <div className="performance-manual-head">
+              <div>
+                <h3>手动创建分析</h3>
+                <p>粘贴外部投放系统回传 JSON，立即生成一条 AI 分析记录。</p>
+              </div>
+              <div className="performance-manual-tools">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => {
+                    setManualJsonText(manualAdPerformanceJsonExample);
+                    setManualJsonError(null);
+                  }}
+                  title="填入示例 JSON"
+                >
+                  <FileText size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={handleFormatManualJson}
+                  title="格式化 JSON"
+                >
+                  <Check size={16} />
+                </button>
+              </div>
+            </div>
+            <textarea
+              className="performance-manual-textarea"
+              value={manualJsonText}
+              onChange={(event) => {
+                setManualJsonText(event.target.value);
+                if (manualJsonError) setManualJsonError(null);
+              }}
+              placeholder='{"creative":{"name":"new12"},"insight":{"clicks":"83"}}'
+              spellCheck={false}
+            />
+            {manualJsonError && <p className="performance-manual-error">{manualJsonError}</p>}
+            <button className="primary-button" type="submit" disabled={isCreatingManualAnalysis}>
+              {isCreatingManualAnalysis ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
+              {isCreatingManualAnalysis ? "创建中" : "创建分析"}
+            </button>
+          </form>
+        </details>
+
+        <details className="performance-queue-details">
+          <summary>
+            <div>
+              <strong>其他工单</strong>
+              <span>{otherAnalyses.length ? `${otherAnalyses.length} 条可切换` : "暂无其他工单"}</span>
+            </div>
+            <div className="performance-queue-badges">
+              <span>待处理 {pendingAnalyses.length}</span>
+              <span>已完成 {completedAnalyses.length}</span>
+              <span>异常 {exceptionAnalyses.length}</span>
+            </div>
+          </summary>
+          <div className="performance-queue-body">
+            <div className="performance-queue-summary">
+              <article>
+                <strong>{pendingAnalyses.length}</strong>
+                <span>待处理</span>
+              </article>
+              <article>
+                <strong>{completedAnalyses.length}</strong>
+                <span>已完成</span>
+              </article>
+              <article>
+                <strong>{exceptionAnalyses.length}</strong>
+                <span>异常/失败</span>
+              </article>
+            </div>
+            <section className="performance-queue-section">
+              <h3>待处理</h3>
+              {renderAnalysisQueue(pendingAnalyses, "暂无待处理工单")}
+            </section>
+            <section className="performance-queue-section">
+              <h3>异常</h3>
+              {renderAnalysisQueue(exceptionAnalyses, "暂无异常工单")}
+            </section>
+            <section className="performance-queue-section">
+              <h3>已完成</h3>
+              {renderAnalysisQueue(completedAnalyses, "暂无已完成工单")}
+            </section>
+          </div>
+        </details>
       </section>
 
       <section className="panel wide performance-detail-panel">
@@ -5598,6 +6007,41 @@ function performanceAnalysisMeta(analysis: AdPerformanceAnalysis): string {
     .join(" / ") || shortId(analysis.id);
 }
 
+function performanceOptimizationRows(analysis: AdPerformanceAnalysis): AdPerformanceOptimizationFieldAdvice[] {
+  const order = analysis.analysis_result?.optimization_work_order;
+  if (!order) return [];
+  return [...order.campaign, ...order.adset, ...order.creative];
+}
+
+function performanceQueueStatus(analysis: AdPerformanceAnalysis): PerformanceQueueStatus {
+  const normalizedStatus = analysis.status.toLowerCase();
+  if (
+    analysis.error_message ||
+    analysis.analysis_result?.llm_error ||
+    normalizedStatus === "failed" ||
+    normalizedStatus === "error"
+  ) {
+    return "exception";
+  }
+  const actionable = performanceOptimizationRows(analysis).some((field) => optimizationIsActionable(field));
+  return actionable ? "pending" : "completed";
+}
+
+function performanceQueueStatusLabel(status: PerformanceQueueStatus): string {
+  const labels: Record<PerformanceQueueStatus, string> = {
+    pending: "待处理",
+    completed: "已完成",
+    exception: "异常",
+  };
+  return labels[status];
+}
+
+function performanceQueueStatusClass(status: PerformanceQueueStatus): string {
+  if (status === "pending") return "needs_revision";
+  if (status === "exception") return "failed";
+  return "approved";
+}
+
 function confidenceLabel(value: string): string {
   const labels: Record<string, string> = {
     low: "低置信度",
@@ -5762,21 +6206,24 @@ function buildWorkflowSummary({
   const topicDone = Boolean(topic && topic.status === "selected");
   const copyDone = Boolean(draft && draft.status === "approved");
   const imageDone = creatives.length > 0;
-  const videoRequired = adGenerationRequiresVideo(job);
-  const videoDone = !videoRequired || videos.length > 0;
+  const videoRequired = workflowRequiresVideo(job, creatives);
+  const videoDone = videoRequired && videos.length > 0;
+  const finalReady = fieldsDone && topicDone && copyDone && imageDone && (!videoRequired || videoDone);
   return {
     fields: stepSummary("fields", "参数确认", fieldsDone, fieldsDone ? "参数已确认" : "等待识别", Boolean(job)),
     topic: stepSummary("topic", "人工选题", topicDone, topic?.title || "未选择选题", fieldsDone),
     copy: stepSummary("copy", "审核文案", copyDone, draft?.headline || "未通过文案", topicDone),
     image: stepSummary("image", "审核图片", imageDone, imageDone ? `${creatives.length} 张已通过` : "无通过图片", copyDone),
-    video: stepSummary(
-      "video",
-      "审核视频",
-      videoDone,
-      videoRequired ? (videos.length ? `${videos.length} 个已通过` : "无通过视频") : "无需视频",
-      imageDone && videoRequired,
-    ),
-    final: stepSummary("final", "最终预审", fieldsDone && topicDone && copyDone && imageDone && videoDone, "确认后回传投放系统", videoDone),
+    video: videoRequired
+      ? stepSummary(
+          "video",
+          "审核视频",
+          videoDone,
+          videos.length ? `${videos.length} 个已通过` : "无通过视频",
+          imageDone,
+        )
+      : skippedStepSummary("video", "审核视频", "无需视频"),
+    final: stepSummary("final", "最终预审", finalReady, "确认后回传投放系统", finalReady),
   };
 }
 
@@ -5793,6 +6240,16 @@ function stepSummary(
     label,
     done,
     status: done ? "done" : available ? "active" : "blocked",
+  };
+}
+
+function skippedStepSummary(key: string, title: string, label: string): WorkflowSummary["fields"] {
+  return {
+    key,
+    title,
+    label,
+    done: false,
+    status: "skipped",
   };
 }
 
@@ -5820,7 +6277,7 @@ function buildFinalPayload({
   if (!topic || topic.status !== "selected") return { ok: false, message: "请先选择选题。" };
   if (!draft || draft.status !== "approved") return { ok: false, message: "请先审核通过文案。" };
   if (!creatives.length) return { ok: false, message: "请先审核通过图片。" };
-  const videoRequired = adGenerationRequiresVideo(job);
+  const videoRequired = workflowRequiresVideo(job, creatives);
   if (videoRequired && !videos.length) return { ok: false, message: "请先审核通过视频。" };
 
   const result = job.result_payload ?? {};
@@ -5926,14 +6383,6 @@ function buildFinalPayload({
       },
     },
   };
-}
-
-function adGenerationRequiresVideo(job: AdGenerationJob | null): boolean {
-  if (!job) return false;
-  const request = job.request_payload ?? {};
-  const preferences = isRecord(request.preferences) ? request.preferences : {};
-  if (typeof preferences.video_required === "boolean") return preferences.video_required;
-  return readText(preferences.creative_type).toLowerCase() === "video";
 }
 
 function loadDeliveryExtractionCache(rawContent: string): DeliveryExtractionCacheEntry | null {
@@ -6297,8 +6746,9 @@ function artifactTimestamp(item: WorkflowArtifact): number {
   return timestamps.length ? Math.max(...timestamps) : 0;
 }
 
-function initialTopicSlots(limit: number): TopicGenerationSlot[] {
+function initialTopicSlots(limit: number, campaignId: string): TopicGenerationSlot[] {
   return Array.from({ length: limit }, (_, index) => ({
+    campaignId,
     index: index + 1,
     status: "loading" as const,
   }));
@@ -6428,6 +6878,14 @@ function creativeImageIndex(asset: CreativeAsset, fallback: number): number {
   return Number.isFinite(index) && index > 0 ? index : fallback;
 }
 
+function creativeSlotFrameLabel(asset: CreativeAsset, fallbackIndex: number): string {
+  if (!isKeyframeVariantAsset(asset)) {
+    return `候选 ${creativeImageIndex(asset, fallbackIndex)}`;
+  }
+  const position = creativeKeyframePosition(asset);
+  return position === 1 ? "首帧图" : position === 2 ? "尾帧图" : `关键帧 ${position || fallbackIndex}`;
+}
+
 function isKeyframeVariantAsset(asset: CreativeAsset): boolean {
   const metadata = isRecord(asset.metadata_json) ? asset.metadata_json : {};
   return metadata.generation_mode === "video_keyframe_variants";
@@ -6471,7 +6929,7 @@ function adGenerationJobTitle(job: AdGenerationJob): string {
     readText(structuredFields.project_name) ||
     readText(structuredFields.product_name) ||
     job.external_order_id ||
-    `AI 工单 ${shortId(job.id)}`
+    "未命名工单"
   );
 }
 
@@ -6485,12 +6943,10 @@ function adGenerationJobFields(job: AdGenerationJob, campaign: Campaign | null):
   const creativePayload = isRecord(result.creative_payload) ? result.creative_payload : {};
   return {
     任务状态: statusLabel(job.status),
-    外部工单: job.external_order_id,
     项目: campaign?.name || adGenerationJobTitle(job),
     国家: adsetPayload.countries || adsetPayload.country_code,
     年龄: adsetPayload.age_min && adsetPayload.age_max ? `${adsetPayload.age_min}-${adsetPayload.age_max}` : null,
     投放链接: creativePayload.link || campaignLandingUrl(campaign),
-    标题: creativePayload.ads_name,
     创建时间: formatDate(job.created_at),
   };
 }
@@ -6683,6 +7139,7 @@ function workflowStepStatusLabel(status: WorkflowStepStatus): string {
     done: "已完成",
     active: "进行中",
     blocked: "未开始",
+    skipped: "无需",
   };
   return labels[status];
 }

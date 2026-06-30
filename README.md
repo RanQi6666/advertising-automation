@@ -120,12 +120,9 @@ AI_ADS_ACCESS_TOKEN=
 AI_ADS_RETURN_URL=
 PUBLIC_BASE_URL=http://127.0.0.1:8001
 AD_GENERATION_REVIEW_BASE_URL=http://127.0.0.1:5173
-BRAND_SAFETY_MODE=block
 ```
 
 `PUBLIC_BASE_URL` 用于生成素材 URL 和结果查询 URL。`AD_GENERATION_REVIEW_BASE_URL` 用于生成给外部系统或运营人员打开的审核链接。
-
-`BRAND_SAFETY_MODE` 可选 `block` / `warn` / `off`。`block` 会在确认回传前拦截风险内容；`warn` 只记录品牌安全命中但允许回传；`off` 跳过品牌安全扫描。测试对接时建议用 `warn`。
 
 本地安全模式：
 
