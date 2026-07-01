@@ -50,6 +50,12 @@ import {
   type GenerationAttempt,
 } from "./lib/generationAttempts";
 import {
+  generationTaskIsFinal,
+  generationTaskIsSuccessful,
+  generationTaskSummary,
+  type GenerationTask,
+} from "./lib/generationTasks";
+import {
   adGenerationJobNumber,
   adPreviewCreativeOptions,
   buildCreativeReviewState,
@@ -182,6 +188,8 @@ const KEYFRAME_MAX_TOTAL_IMAGES = KEYFRAME_VARIANT_OPTIONS.length * KEYFRAME_FRA
 const MESSAGE_HISTORY_LIMIT = 50;
 const GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS = 90_000;
 const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
+const GENERATION_TASK_CONFIRM_TIMEOUT_MS = 240_000;
+const GENERATION_TASK_CONFIRM_INTERVAL_MS = 2_000;
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -876,6 +884,44 @@ function App() {
     return latest;
   }
 
+  async function waitForGenerationTask(
+    taskId: string,
+    label: string,
+    scope: ErrorScope,
+  ): Promise<GenerationTask | null> {
+    const deadline = Date.now() + GENERATION_TASK_CONFIRM_TIMEOUT_MS;
+    let latest: GenerationTask | null = null;
+    let lastSummary = "";
+    while (Date.now() <= deadline) {
+      try {
+        latest = await api.getGenerationTask(taskId);
+        const summary = generationTaskSummary(latest, label);
+        if (summary !== lastSummary) {
+          lastSummary = summary;
+          if (latest.status === "failed") setError(summary, scope);
+          else setNotice(summary);
+        }
+        if (generationTaskIsFinal(latest)) return latest;
+      } catch (caught) {
+        if (!isTransientApiError(caught)) throw caught;
+      }
+      await sleep(GENERATION_TASK_CONFIRM_INTERVAL_MS);
+    }
+    return latest;
+  }
+
+  function topicsFromGenerationTask(task: GenerationTask): Topic[] {
+    const topics = task.result?.topics;
+    return Array.isArray(topics)
+      ? topics.filter((item): item is Topic => isRecord(item) && typeof item.id === "string")
+      : [];
+  }
+
+  function draftFromGenerationTask(task: GenerationTask): CopyDraft | null {
+    const draft = task.result?.draft;
+    return isRecord(draft) && typeof draft.id === "string" ? (draft as unknown as CopyDraft) : null;
+  }
+
   async function recoverTopicGenerationFromAttempt(
     campaignId: string,
     attempt: GenerationAttempt,
@@ -1453,101 +1499,65 @@ function App() {
 
     const revisionFeedback = feedback?.trim();
     const signals = buildTopicGenerationSignals(revisionFeedback);
-    const streamedTopics: Topic[] = [];
-    let attemptId: string | null = null;
 
     try {
-      await api.generateTopicsStream(
+      const task = await api.generateTopicsTask(
         campaignId,
         TOPIC_GENERATION_LIMIT,
         signals,
-        (event: TopicStreamEvent) => {
-          if (event.type === "start") {
-            attemptId = event.attempt_id ?? attemptId;
-            replaceTopicGenerationSlots(campaignId, event.limit);
-            return;
-          }
-          if (event.type === "slot") {
-            updateTopicGenerationSlot(campaignId, event.index, {
-              status: "loading",
-              topic: undefined,
-              message: undefined,
-            });
-            return;
-          }
-          if (event.type === "topic") {
-            streamedTopics.push(event.topic);
-            if (isSelectedCampaign(campaignId)) {
-              clearError("topic");
-              setTopics((current) => appendOrReplaceById(current, event.topic));
-              setSelectedTopicId((current) => current ?? event.topic.id);
-            }
-            updateTopicGenerationSlot(campaignId, event.index, {
-              status: "done",
-              topic: event.topic,
-              message: undefined,
-            });
-            return;
-          }
-          if (event.type === "error") {
-            markLoadingTopicSlotsFailed(
-              campaignId,
-              apiErrorMessage(event.message, "此候选生成失败，请重试。"),
-              event.index,
-            );
-            return;
-          }
-          if (event.type === "done") {
-            finalizeTopicGenerationSlots(campaignId, "模型未返回此候选，请重试此候选。");
-          }
-        },
         selectedTopicModelId,
       );
-
-      if (!streamedTopics.length) {
-        const attempt = await confirmGenerationAttempt(attemptId, "选题", "topic");
-        if (attempt && generationAttemptIsRecoverable(attempt)) {
-          const recovered = await recoverTopicGenerationFromAttempt(campaignId, attempt);
-          if (recovered) return;
-        }
+      const completedTask = await waitForGenerationTask(task.id, "选题", "topic");
+      if (!completedTask || !generationTaskIsSuccessful(completedTask)) {
         if (isSelectedCampaign(campaignId)) {
-          setError("选题生成失败，请稍后重试。", "topic");
+          setError(
+            completedTask ? generationTaskSummary(completedTask, "选题") : "选题仍在文本队列处理中，请稍后刷新查看。",
+            "topic",
+          );
         }
-        markLoadingTopicSlotsFailed(campaignId, "模型未返回候选，请重新生成。");
+        markLoadingTopicSlotsFailed(campaignId, "选题未完成，请稍后重试。");
         return;
       }
 
+      const queuedTopics = topicsFromGenerationTask(completedTask);
+      if (!queuedTopics.length) {
+        setError("选题生成完成，但后台未返回候选，请重试。", "topic");
+        markLoadingTopicSlotsFailed(campaignId, "后台未返回候选，请重新生成。");
+        return;
+      }
       if (isSelectedCampaign(campaignId)) {
+        setTopics(queuedTopics);
+        setSelectedTopicId(queuedTopics[0]?.id ?? null);
         if (revisionFeedback) setTopicFeedback("");
         clearError("topic");
         setNotice(
-          streamedTopics.length === TOPIC_GENERATION_LIMIT
+          queuedTopics.length === TOPIC_GENERATION_LIMIT
             ? revisionFeedback
               ? "已按修改意见重新生成选题"
               : "选题已生成"
-            : `已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`,
+            : `已生成 ${queuedTopics.length} 个选题，剩余候选可单独重试`,
         );
         void saveWorkflowStage("topic_review");
       }
-    } catch (caught) {
-      const attempt = await confirmGenerationAttempt(attemptId, "选题", "topic");
-      if (attempt && generationAttemptIsRecoverable(attempt)) {
-        const recovered = await recoverTopicGenerationFromAttempt(campaignId, attempt);
-        if (recovered) return;
+      if (queuedTopics.length >= TOPIC_GENERATION_LIMIT) {
+        setTopicGenerationSlots((current) => current.filter((slot) => slot.campaignId !== campaignId));
+      } else {
+        setTopicGenerationSlots((current) => [
+          ...current.filter((slot) => slot.campaignId !== campaignId),
+          ...initialTopicSlots(TOPIC_GENERATION_LIMIT, campaignId).map((slot) => {
+            const topic = queuedTopics[slot.index - 1];
+            return topic
+              ? { ...slot, status: "done" as const, topic }
+              : { ...slot, status: "error" as const, message: "后台未返回此候选，请重试。" };
+          }),
+        ]);
       }
+    } catch (caught) {
       const message = apiErrorMessage(caught, "选题生成失败");
       if (isSelectedCampaign(campaignId)) {
-        if (streamedTopics.length) {
-          clearError("topic");
-        } else {
-          setCaughtError("topic", caught, "选题生成失败");
-        }
+        setCaughtError("topic", caught, "选题生成失败");
       }
       markLoadingTopicSlotsFailed(campaignId, message || "选题生成中断，请重试。");
-      if (streamedTopics.length && isSelectedCampaign(campaignId)) {
-        setNotice(`已生成 ${streamedTopics.length} 个选题，剩余候选可单独重试`);
-        void saveWorkflowStage("topic_review");
-      }
     } finally {
       setLoading((current) => (current === "topics" ? null : current));
     }
@@ -1648,30 +1658,66 @@ function App() {
       setError("请先选择一个选题。", "copy");
       return;
     }
-    const draft = await run(
-      "copy",
-      () => api.generateCopy(topic.id, "Learn More", selectedCopyModelId),
-      "文案已生成",
-    );
-    if (draft) {
+    setLoading("copy");
+    clearError("copy");
+    setNotice(null);
+    try {
+      const task = await api.generateCopyTask(topic.id, "Learn More", selectedCopyModelId);
+      const completedTask = await waitForGenerationTask(task.id, "文案", "copy");
+      if (!completedTask || !generationTaskIsSuccessful(completedTask)) {
+        setError(
+          completedTask ? generationTaskSummary(completedTask, "文案") : "文案仍在文本队列处理中，请稍后刷新查看。",
+          "copy",
+        );
+        return;
+      }
+      const draft = draftFromGenerationTask(completedTask);
+      if (!draft) {
+        setError("文案生成完成，但后台未返回文案，请重试。", "copy");
+        return;
+      }
       setDrafts((current) => [draft, ...current]);
       setSelectedDraftId(draft.id);
       setActiveView("copy");
+      setNotice("文案已生成");
       void saveWorkflowStage("copy_review");
+    } catch (caught) {
+      setCaughtError("copy", caught, "文案生成失败");
+    } finally {
+      setLoading((current) => (current === "copy" ? null : current));
     }
   }
 
   async function handleReviseCopy() {
     if (!selectedDraft || !copyFeedback.trim()) return;
-    const draft = await run(
-      "revise-copy",
-      () => api.reviseCopy(selectedDraft.id, copyFeedback, selectedCopyModelId),
-      "新版本文案已生成",
-    );
-    if (draft) {
+    setLoading("revise-copy");
+    clearError("copy");
+    setNotice(null);
+    try {
+      const task = await api.reviseCopyTask(selectedDraft.id, copyFeedback, selectedCopyModelId);
+      const completedTask = await waitForGenerationTask(task.id, "文案改写", "copy");
+      if (!completedTask || !generationTaskIsSuccessful(completedTask)) {
+        setError(
+          completedTask
+            ? generationTaskSummary(completedTask, "文案改写")
+            : "文案改写仍在文本队列处理中，请稍后刷新查看。",
+          "copy",
+        );
+        return;
+      }
+      const draft = draftFromGenerationTask(completedTask);
+      if (!draft) {
+        setError("文案改写完成，但后台未返回新版本，请重试。", "copy");
+        return;
+      }
       setDrafts((current) => [draft, ...current]);
       setSelectedDraftId(draft.id);
       setCopyFeedback("");
+      setNotice("新版本文案已生成");
+    } catch (caught) {
+      setCaughtError("copy", caught, "文案改写失败");
+    } finally {
+      setLoading((current) => (current === "revise-copy" ? null : current));
     }
   }
 

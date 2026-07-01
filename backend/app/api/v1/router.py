@@ -8,6 +8,7 @@ from backend.app.api.v1.endpoints import (
     copywriting,
     creatives,
     generation_attempts,
+    generation_tasks,
     health,
     landing_pages,
     legal,
@@ -63,6 +64,11 @@ api_router.include_router(
 api_router.include_router(
     generation_attempts.router,
     tags=["generation-attempts"],
+    dependencies=protected_dependencies,
+)
+api_router.include_router(
+    generation_tasks.router,
+    tags=["generation-tasks"],
     dependencies=protected_dependencies,
 )
 api_router.include_router(videos.router, tags=["videos"], dependencies=protected_dependencies)

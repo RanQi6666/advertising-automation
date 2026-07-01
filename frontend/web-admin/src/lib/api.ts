@@ -2,6 +2,9 @@ import type {
   GenerationAttempt,
 } from "./generationAttempts";
 import type {
+  GenerationTask,
+} from "./generationTasks";
+import type {
   AdGenerationJob,
   AdGenerationJobAccepted,
   AdPerformanceAIAnalysis,
@@ -393,6 +396,18 @@ export const api = {
       signals,
       ...(modelId ? { model_id: modelId } : {}),
     }),
+  generateTopicsTask: (
+    campaignId: string,
+    limit = 3,
+    signals: Record<string, unknown> = {},
+    modelId?: string | null,
+  ) =>
+    post<GenerationTask>("/topics/generate/task", {
+      campaign_id: campaignId,
+      limit,
+      signals,
+      ...(modelId ? { model_id: modelId } : {}),
+    }),
   generateTopicsStream: (
     campaignId: string,
     limit = 3,
@@ -420,13 +435,27 @@ export const api = {
       constraints: { cta },
       ...(modelId ? { model_id: modelId } : {}),
     }),
+  generateCopyTask: (topicId: string, cta = "Learn More", modelId?: string | null) =>
+    post<GenerationTask>("/copywriting/generate/task", {
+      topic_id: topicId,
+      constraints: { cta },
+      ...(modelId ? { model_id: modelId } : {}),
+    }),
   reviseCopy: (draftId: string, feedback: string, modelId?: string | null) =>
     post<CopyDraft>(`/copywriting/${draftId}/revise`, {
       feedback,
       constraints: {},
       ...(modelId ? { model_id: modelId } : {}),
     }),
+  reviseCopyTask: (draftId: string, feedback: string, modelId?: string | null) =>
+    post<GenerationTask>(`/copywriting/${draftId}/revise/task`, {
+      feedback,
+      constraints: {},
+      ...(modelId ? { model_id: modelId } : {}),
+    }),
   listDrafts: (campaignId: string) => request<CopyDraft[]>(`/campaigns/${campaignId}/drafts?limit=20`),
+  getGenerationTask: (taskId: string) => request<GenerationTask>(`/generation-tasks/${taskId}`),
+  retryGenerationTask: (taskId: string) => post<GenerationTask>(`/generation-tasks/${taskId}/retry`),
 
   generateCreatives: (
     draftId: string,

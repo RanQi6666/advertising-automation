@@ -15,6 +15,7 @@ from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.services.creative_asset_urls import repair_creative_asset_urls
+from backend.app.services.generation_task_service import GenerationTaskService
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.model_selection import effective_image_model, settings_for_image_model
 from backend.app.services.utils import get_required
@@ -28,6 +29,7 @@ class CreativeService:
         self.llm = get_llm_provider(self.settings)
         self.image_provider = get_image_provider(self.settings)
         self.image_storage = ImageStorageService(self.settings)
+        self.text_tasks = GenerationTaskService()
 
     async def generate_creatives(
         self,
@@ -75,11 +77,12 @@ class CreativeService:
             keyframe_plan,
             creative_strategy,
         )
-        briefs = await self.llm.generate_image_briefs(
+        briefs = await self._generate_image_briefs_via_text_queue(
             draft=draft,  # type: ignore[arg-type]
             count=count,
             size=size,
             storyboard_context=storyboard_context,
+            streamed=False,
         )
         slot_indices = [target_index] if target_index is not None else list(range(1, count + 1))
         briefs = _briefs_for_slots(briefs, slot_indices)
@@ -126,11 +129,12 @@ class CreativeService:
 
         try:
             brief_task = asyncio.create_task(
-                self.llm.generate_image_briefs(
+                self._generate_image_briefs_via_text_queue(
                     draft=draft,  # type: ignore[arg-type]
                     count=len(slot_indices),
                     size=payload.size,
                     storyboard_context=storyboard_context,
+                    streamed=True,
                 )
             )
             while True:
@@ -207,6 +211,28 @@ class CreativeService:
             yield {"type": "error", "index": index, "message": "模型未返回此图片 brief，请重试。"}
         yield {"type": "done", "generated": generated_count}
 
+    async def _generate_image_briefs_via_text_queue(
+        self,
+        *,
+        draft: CopyDraft,
+        count: int,
+        size: str,
+        streamed: bool,
+        feedback: str | None = None,
+        source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
+    ) -> list[ImageBrief]:
+        return await self.text_tasks.run_in_text_queue(
+            operation=lambda: self.llm.generate_image_briefs(
+                draft=draft,
+                count=count,
+                size=size,
+                feedback=feedback,
+                source_asset=source_asset,
+                storyboard_context=storyboard_context,
+            ),
+        )
+
     async def regenerate_creative(
         self,
         session: AsyncSession,
@@ -219,12 +245,13 @@ class CreativeService:
         draft = await get_required(session, CopyDraft, source_asset.draft_id)
         slot_index = _asset_image_index(source_asset, default=1)
         target_size = size or source_asset.size
-        briefs = await self.llm.generate_image_briefs(
+        briefs = await self._generate_image_briefs_via_text_queue(
             draft=draft,  # type: ignore[arg-type]
             count=1,
             size=target_size,
             feedback=feedback,
             source_asset=source_asset,  # type: ignore[arg-type]
+            streamed=False,
         )
         briefs = _briefs_for_slots(briefs, [slot_index])
         if not briefs:

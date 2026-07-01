@@ -8,6 +8,7 @@ from backend.app.db.models.client import Client
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.generation_attempt import GenerationAttempt
+from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.db.models.prompt_version import PromptVersion
 from backend.app.db.models.review import ReviewTask
@@ -28,6 +29,7 @@ __all__ = [
     "CopyDraft",
     "CreativeAsset",
     "GenerationAttempt",
+    "GenerationTask",
     "LandingPageSnapshot",
     "PromptVersion",
     "ReviewTask",

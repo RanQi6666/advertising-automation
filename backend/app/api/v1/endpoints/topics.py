@@ -1,16 +1,19 @@
 import json
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
+from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
 from backend.app.services.generation_attempt_service import GenerationAttemptService
+from backend.app.services.generation_task_service import TEXT_QUEUE_NAME, GenerationTaskService
 from backend.app.services.topic_service import TopicService
 
 router = APIRouter()
 service = TopicService()
 attempt_service = GenerationAttemptService()
+task_service = GenerationTaskService()
 
 
 @router.post(
@@ -18,6 +21,28 @@ attempt_service = GenerationAttemptService()
 )
 async def generate_topics(payload: TopicGenerateRequest, session: DbSession):
     return await service.generate_topics(session, payload)
+
+
+@router.post(
+    "/topics/generate/task", response_model=GenerationTaskRead, status_code=status.HTTP_202_ACCEPTED
+)
+async def queue_generate_topics(
+    payload: TopicGenerateRequest,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    task = await task_service.create_task(
+        session,
+        queue_name=TEXT_QUEUE_NAME,
+        task_type="topic_generate",
+        business_type="campaign",
+        business_id=payload.campaign_id,
+        campaign_id=payload.campaign_id,
+        payload=payload.model_dump(mode="json"),
+        metadata={"limit": payload.limit},
+    )
+    background_tasks.add_task(task_service.process_task, task.id)
+    return GenerationTaskRead.from_model(task)
 
 
 @router.post("/topics/generate/stream")
