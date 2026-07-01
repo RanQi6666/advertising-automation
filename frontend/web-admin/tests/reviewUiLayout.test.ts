@@ -78,6 +78,24 @@ test("video script generation does not depend on selected reference images", () 
   assert.match(createVideoSource, /creativeAssetIds:\s*sourceIds/);
 });
 
+test("video generation uses task polling and restore cache", () => {
+  const createVideoSource = asyncFunctionSource("handleCreateVideo", "handleStartVideoGeneration");
+  const startVideoSource = asyncFunctionSource("handleStartVideoGeneration", "selectedCreativeIdsForVideo");
+
+  assert.match(apiSource, /startVideoGenerationTask:\s*\(videoId:\s*string\)\s*=>\s*post<GenerationTask>/);
+  assert.match(apiSource, /\/videos\/\$\{videoId\}\/generate\/task/);
+  assert.match(appSource, /ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY/);
+  assert.match(appSource, /loadActiveVideoGenerationTaskCache/);
+  assert.match(appSource, /saveActiveVideoGenerationTaskCache/);
+  assert.match(appSource, /clearActiveVideoGenerationTaskCache/);
+  assert.match(createVideoSource, /api\.startVideoGenerationTask\(created\.id\)/);
+  assert.match(createVideoSource, /waitForGenerationTask\(\s*task\.id,\s*"视频"/s);
+  assert.match(startVideoSource, /api\.startVideoGenerationTask\(videoId\)/);
+  assert.match(startVideoSource, /applyVideoGenerationTask/);
+  assert.doesNotMatch(createVideoSource, /api\.startVideoGeneration\(created\.id\)/);
+  assert.doesNotMatch(startVideoSource, /api\.startVideoGeneration\(videoId\)/);
+});
+
 test("image-page script console textareas are readable on a light editing surface", () => {
   assert.match(
     stylesSource,

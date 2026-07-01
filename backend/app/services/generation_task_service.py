@@ -19,8 +19,12 @@ from backend.app.services.utils import get_required
 
 TEXT_QUEUE_NAME = "text_queue"
 IMAGE_QUEUE_NAME = "image_queue"
+VIDEO_QUEUE_NAME = "video_queue"
+CALLBACK_QUEUE_NAME = "callback_queue"
 TEXT_TASK_TYPES = {"topic_generate", "copy_generate", "copy_revise"}
 IMAGE_TASK_TYPES = {"image_generate"}
+VIDEO_TASK_TYPES = {"video_generate"}
+CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 RETRYABLE_TASK_ERROR_CODES = {
     "provider_timeout",
     "provider_429",
@@ -34,6 +38,10 @@ _text_queue_semaphore: asyncio.Semaphore | None = None
 _text_queue_limit: int | None = None
 _image_queue_semaphore: asyncio.Semaphore | None = None
 _image_queue_limit: int | None = None
+_video_queue_semaphore: asyncio.Semaphore | None = None
+_video_queue_limit: int | None = None
+_callback_queue_semaphore: asyncio.Semaphore | None = None
+_callback_queue_limit: int | None = None
 
 
 class GenerationTaskService:
@@ -99,6 +107,14 @@ class GenerationTaskService:
         queue_name = await self._task_queue_name(task_id)
         if queue_name == TEXT_QUEUE_NAME:
             async with _text_queue_capacity():
+                await self._process_task_body(task_id)
+            return
+        if queue_name == VIDEO_QUEUE_NAME:
+            async with _video_queue_capacity():
+                await self._process_task_body(task_id)
+            return
+        if queue_name == CALLBACK_QUEUE_NAME:
+            async with _callback_queue_capacity():
                 await self._process_task_body(task_id)
             return
         await self._process_task_body(task_id)
@@ -170,11 +186,23 @@ class GenerationTaskService:
         async with _image_queue_capacity():
             return await operation()
 
+    async def run_in_video_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
+        async with _video_queue_capacity():
+            return await operation()
+
+    async def run_in_callback_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
+        async with _callback_queue_capacity():
+            return await operation()
+
     async def _run_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
         if task.queue_name == TEXT_QUEUE_NAME and task.task_type in TEXT_TASK_TYPES:
             return await self._run_text_task(session, task)
         if task.queue_name == IMAGE_QUEUE_NAME and task.task_type in IMAGE_TASK_TYPES:
             return await self._run_image_task(session, task)
+        if task.queue_name == VIDEO_QUEUE_NAME and task.task_type in VIDEO_TASK_TYPES:
+            return await self._run_video_task(session, task)
+        if task.queue_name == CALLBACK_QUEUE_NAME and task.task_type in CALLBACK_TASK_TYPES:
+            return await self._run_callback_task(session, task)
         raise AppError(f"Unsupported generation task: {task.queue_name}/{task.task_type}")
 
     async def _run_text_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
@@ -269,6 +297,52 @@ class GenerationTaskService:
             raise AppError(first_error or "Image generation failed.")
         return result
 
+    async def _run_video_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
+        from backend.app.schemas.video import VideoAssetRead
+        from backend.app.services.video_service import VideoService
+
+        payload = task.payload_json or {}
+        video_id = str(payload.get("video_id") or task.business_id or "")
+        if not video_id:
+            raise AppError("video_id is required for video generation tasks.")
+
+        video = await VideoService().start_video_generation(session, video_id)
+        serialized_video = VideoAssetRead.model_validate(video).model_dump(mode="json")
+        return {
+            "video_id": video.id,
+            "status": video.status,
+            "provider_job_id": video.provider_job_id,
+            "video": serialized_video,
+        }
+
+    async def _run_callback_task(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+    ) -> dict[str, Any]:
+        from backend.app.db.models.ad_generation_job import AdGenerationJob
+        from backend.app.services.ad_generation_service import AdGenerationService
+
+        payload = task.payload_json or {}
+        job_id = str(payload.get("job_id") or task.business_id or "")
+        if not job_id:
+            raise AppError("job_id is required for callback tasks.")
+
+        job = await get_required(session, AdGenerationJob, job_id)
+        callback_result = await AdGenerationService().deliver_callback(session, job)
+        if callback_result is None:
+            return {
+                "job_id": job_id,
+                "status": "skipped",
+                "reason": "callback_url_missing",
+            }
+
+        result = {"job_id": job_id, **callback_result}
+        if callback_result.get("status") != "succeeded":
+            await self._update_task_result(session, task, result)
+            raise AppError(str(callback_result.get("error") or "Callback delivery failed."))
+        return result
+
     async def _mark_running(self, session: AsyncSession, task: GenerationTask) -> None:
         task.status = "running"
         task.attempt_count += 1
@@ -343,6 +417,24 @@ def _image_queue_capacity() -> asyncio.Semaphore:
         _image_queue_semaphore = asyncio.Semaphore(limit)
         _image_queue_limit = limit
     return _image_queue_semaphore
+
+
+def _video_queue_capacity() -> asyncio.Semaphore:
+    global _video_queue_limit, _video_queue_semaphore
+    limit = get_settings().video_queue_concurrency
+    if _video_queue_semaphore is None or _video_queue_limit != limit:
+        _video_queue_semaphore = asyncio.Semaphore(limit)
+        _video_queue_limit = limit
+    return _video_queue_semaphore
+
+
+def _callback_queue_capacity() -> asyncio.Semaphore:
+    global _callback_queue_limit, _callback_queue_semaphore
+    limit = get_settings().callback_queue_concurrency
+    if _callback_queue_semaphore is None or _callback_queue_limit != limit:
+        _callback_queue_semaphore = asyncio.Semaphore(limit)
+        _callback_queue_limit = limit
+    return _callback_queue_semaphore
 
 
 def _initial_image_task_result(

@@ -450,18 +450,61 @@ class AdGenerationService:
         }
         await session.commit()
         await session.refresh(job)
-        await self._notify_callback(session, job)
+        await self.queue_callback_delivery(session, job)
         await session.refresh(job)
         return job
 
-    async def _notify_callback(self, session: AsyncSession, job: AdGenerationJob) -> None:
+    async def queue_callback_delivery(
+        self,
+        session: AsyncSession,
+        job: AdGenerationJob,
+    ) -> str | None:
         if not job.callback_url:
-            return
+            return None
 
+        from backend.app.services.generation_task_service import (
+            CALLBACK_QUEUE_NAME,
+            GenerationTaskService,
+        )
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=CALLBACK_QUEUE_NAME,
+            task_type="ad_generation_callback",
+            business_type="ad_generation_job",
+            business_id=job.id,
+            payload={"job_id": job.id},
+            max_attempts=3,
+            metadata={
+                "callback_url": job.callback_url,
+                "event": "ad_generation.returned",
+            },
+        )
+        job.metadata_json = _with_callback_queued(
+            job.metadata_json,
+            task_id=task.id,
+            callback_url=job.callback_url,
+        )
+        await session.commit()
+        await session.refresh(job)
+        return task.id
+
+    async def deliver_callback(
+        self,
+        session: AsyncSession,
+        job: AdGenerationJob,
+    ) -> dict[str, Any] | None:
+        if not job.callback_url:
+            return None
         payload = self._callback_payload(job)
         callback_result = await self._post_callback(job.callback_url, payload)
         job.metadata_json = _with_callback_result(job.metadata_json, callback_result)
         await session.commit()
+        await session.refresh(job)
+        return callback_result
+
+    async def _notify_callback(self, session: AsyncSession, job: AdGenerationJob) -> None:
+        await self.deliver_callback(session, job)
 
     def _callback_payload(self, job: AdGenerationJob) -> dict[str, Any]:
         return {
@@ -999,14 +1042,50 @@ def _with_callback_result(metadata: dict | None, callback_result: dict[str, Any]
     history = [item for item in history if isinstance(item, dict)]
     history = [*history, last_result][-CALLBACK_HISTORY_LIMIT:]
 
+    delivery = {
+        "status": callback_result.get("status"),
+        "attempts": attempts,
+        "last_status_code": callback_result.get("status_code"),
+        "last_attempted_at": callback_result.get("started_at"),
+        "last_result": last_result,
+        "history": history,
+    }
+    for key in ("task_id", "queue_name", "url", "queued_at"):
+        if previous.get(key) is not None:
+            delivery[key] = previous[key]
+
+    return {
+        **current,
+        "callback_delivery": delivery,
+    }
+
+
+def _with_callback_queued(
+    metadata: dict | None,
+    *,
+    task_id: str,
+    callback_url: str,
+) -> dict:
+    current = dict(metadata or {})
+    previous = current.get("callback_delivery")
+    previous = previous if isinstance(previous, dict) else {}
+    history = previous.get("history") if isinstance(previous.get("history"), list) else []
+    history = [item for item in history if isinstance(item, dict)]
+    try:
+        attempts = int(previous.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+
     return {
         **current,
         "callback_delivery": {
-            "status": callback_result.get("status"),
+            **previous,
+            "status": "queued",
+            "task_id": task_id,
+            "queue_name": "callback_queue",
+            "url": callback_url,
+            "queued_at": utcnow().isoformat(),
             "attempts": attempts,
-            "last_status_code": callback_result.get("status_code"),
-            "last_attempted_at": callback_result.get("started_at"),
-            "last_result": last_result,
             "history": history,
         },
     }

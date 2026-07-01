@@ -7,12 +7,18 @@ from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.enums import VideoStatus
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
-from backend.app.services import creative_service
+from backend.app.services import creative_service, video_service
 from backend.app.services import generation_task_service as task_module
-from backend.app.services.generation_task_service import TEXT_QUEUE_NAME, GenerationTaskService
+from backend.app.services.generation_task_service import (
+    TEXT_QUEUE_NAME,
+    VIDEO_QUEUE_NAME,
+    GenerationTaskService,
+)
 
 
 class FakeImageTaskLLMProvider:
@@ -51,6 +57,23 @@ class PartiallyFailingImageProvider:
                 metadata={"provider": "fake", "image_index": brief.image_index},
             )
         ]
+
+
+class FakeVideoTaskService:
+    async def start_video_generation(self, session, video_id: str) -> VideoAsset:
+        video = await session.get(VideoAsset, video_id)
+        assert video is not None
+        video.status = VideoStatus.GENERATING.value
+        video.provider_job_id = "provider-video-job-1"
+        video.error_message = None
+        video.metadata_json = {
+            **(video.metadata_json or {}),
+            "video_provider": "fake",
+            "provider_status": "queued",
+        }
+        await session.commit()
+        await session.refresh(video)
+        return video
 
 
 @pytest.mark.asyncio
@@ -116,6 +139,21 @@ async def test_run_in_text_queue_does_not_require_database_session(monkeypatch) 
     monkeypatch.setattr(task_module, "AsyncSessionLocal", fail_session_factory)
 
     result = await GenerationTaskService().run_in_text_queue(operation)
+
+    assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_in_video_queue_does_not_require_database_session(monkeypatch) -> None:
+    def fail_session_factory():
+        raise AssertionError("inline video queue capacity should not open a database session")
+
+    async def operation() -> str:
+        return "ok"
+
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", fail_session_factory)
+
+    result = await GenerationTaskService().run_in_video_queue(operation)
 
     assert result == "ok"
 
@@ -197,5 +235,67 @@ async def test_generation_task_processes_image_generation_with_partial_success(
     assert stored.result_json["slots"][1]["message"] == "provider failed for slot 2"
     assert len(stored.result_json["assets"]) == 2
     assert {asset.metadata_json["image_index"] for asset in assets} == {1, 3}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_processes_video_generation(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(video_service, "VideoService", FakeVideoTaskService)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-video-queue-1",
+            name="Video Queue Campaign",
+            metadata_json={},
+        )
+        video = VideoAsset(
+            id="video-queue-1",
+            campaign_id=campaign.id,
+            source_asset_ids=["creative-1", "creative-2"],
+            prompt="Create a short ad video",
+            storyboard=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+            status=VideoStatus.REQUESTED.value,
+            metadata_json={},
+        )
+        session.add_all([campaign, video])
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id=video.id,
+            campaign_id=campaign.id,
+            payload={"video_id": video.id},
+        )
+
+    await GenerationTaskService().process_task(task.id)
+
+    async with session_factory() as session:
+        stored = await session.get(GenerationTask, task.id)
+        stored_video = await session.get(VideoAsset, "video-queue-1")
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.queue_name == VIDEO_QUEUE_NAME
+    assert stored.task_type == "video_generate"
+    assert stored.result_json is not None
+    assert stored.result_json["video_id"] == "video-queue-1"
+    assert stored.result_json["status"] == VideoStatus.GENERATING.value
+    assert stored.result_json["provider_job_id"] == "provider-video-job-1"
+    assert stored.result_json["video"]["id"] == "video-queue-1"
+    assert stored_video is not None
+    assert stored_video.status == VideoStatus.GENERATING.value
+    assert stored_video.provider_job_id == "provider-video-job-1"
 
     await engine.dispose()

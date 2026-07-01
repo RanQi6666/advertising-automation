@@ -670,6 +670,8 @@ export const api = {
     }),
   listVideos: (campaignId: string) => request<VideoAsset[]>(`/campaigns/${campaignId}/videos?limit=20`),
   startVideoGeneration: (videoId: string) => post<VideoAsset>(`/videos/${videoId}/generate`),
+  startVideoGenerationTask: (videoId: string) =>
+    post<GenerationTask>(`/videos/${videoId}/generate/task`),
   refreshVideoGeneration: (videoId: string) => post<VideoAsset>(`/videos/${videoId}/refresh`),
 
   submitReview: (

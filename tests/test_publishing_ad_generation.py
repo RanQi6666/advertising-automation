@@ -10,6 +10,7 @@ from backend.app.db.models.agent_run import AgentRun
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.review import ReviewTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
@@ -23,7 +24,9 @@ from backend.app.schemas.ad_generation import (
     PublishingAdGenerationReviewUpdate,
     PublishingWorkOrderPayload,
 )
+from backend.app.services import generation_task_service as task_module
 from backend.app.services.ad_generation_service import AdGenerationService
+from backend.app.services.generation_task_service import GenerationTaskService
 
 
 def _delivery_field(value, normalized_value=None, confidence: float = 1.0) -> dict:
@@ -969,7 +972,7 @@ async def test_confirm_review_returns_without_removed_review_gate_fields() -> No
     await engine.dispose()
 
 @pytest.mark.asyncio
-async def test_publishing_ad_generation_confirm_posts_callback(
+async def test_publishing_ad_generation_confirm_queues_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://ai.example.test")
@@ -980,24 +983,32 @@ async def test_publishing_ad_generation_confirm_posts_callback(
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    captured: dict = {}
+    confirm_completed = False
+
+    async def fake_post_callback(
+        self: AdGenerationService,
+        callback_url: str,
+        payload: dict,
+    ) -> dict:
+        assert confirm_completed, "callback should run from callback_queue after confirm returns"
+        captured["callback_url"] = callback_url
+        captured["payload"] = payload
+        return {
+            "url": callback_url,
+            "status": "succeeded",
+            "status_code": 204,
+            "request_payload": payload,
+            "response_text": "",
+            "started_at": "2026-06-18T00:00:00+00:00",
+            "finished_at": "2026-06-18T00:00:01+00:00",
+        }
+
+    monkeypatch.setattr(AdGenerationService, "_post_callback", fake_post_callback)
+
     async with session_factory() as session:
         service = AdGenerationService()
-        captured: dict = {}
-
-        async def fake_post_callback(callback_url: str, payload: dict) -> dict:
-            captured["callback_url"] = callback_url
-            captured["payload"] = payload
-            return {
-                "url": callback_url,
-                "status": "succeeded",
-                "status_code": 204,
-                "request_payload": payload,
-                "response_text": "",
-                "started_at": "2026-06-18T00:00:00+00:00",
-                "finished_at": "2026-06-18T00:00:01+00:00",
-            }
-
-        monkeypatch.setattr(service, "_post_callback", fake_post_callback)
         job = await service.create_job(
             session,
             PublishingAdGenerationJobCreate(
@@ -1035,6 +1046,34 @@ async def test_publishing_ad_generation_confirm_posts_callback(
         )
 
     assert returned.status == "returned"
+    assert captured == {}
+    callback_delivery = returned.metadata_json["callback_delivery"]
+    assert callback_delivery["status"] == "queued"
+    assert callback_delivery["queue_name"] == "callback_queue"
+    assert callback_delivery["task_id"]
+
+    async with session_factory() as session:
+        queued_task = await session.get(GenerationTask, callback_delivery["task_id"])
+
+    assert queued_task is not None
+    assert queued_task.status == "queued"
+    assert queued_task.queue_name == "callback_queue"
+    assert queued_task.task_type == "ad_generation_callback"
+    assert queued_task.business_type == "ad_generation_job"
+    assert queued_task.business_id == returned.id
+    assert queued_task.max_attempts == 3
+
+    confirm_completed = True
+    await GenerationTaskService().process_task(queued_task.id)
+
+    async with session_factory() as session:
+        processed_task = await session.get(GenerationTask, queued_task.id)
+        processed_job = await session.get(AdGenerationJob, returned.id)
+
+    assert processed_task is not None
+    assert processed_task.status == "succeeded"
+    assert processed_task.result_json is not None
+    assert processed_task.result_json["status"] == "succeeded"
     assert captured["callback_url"] == "https://publishing.example/api/ai-callback"
     assert captured["payload"]["event"] == "ad_generation.returned"
     assert captured["payload"]["job_id"] == returned.id
@@ -1044,9 +1083,12 @@ async def test_publishing_ad_generation_confirm_posts_callback(
         captured["payload"]["result_url"]
         == f"https://ai.example.test/api/v1/integrations/publishing/ad-generation/jobs/{returned.id}/result"
     )
-    callback_delivery = returned.metadata_json["callback_delivery"]
+    assert processed_job is not None
+    callback_delivery = processed_job.metadata_json["callback_delivery"]
     assert callback_delivery["status"] == "succeeded"
     assert callback_delivery["attempts"] == 1
+    assert callback_delivery["task_id"] == queued_task.id
+    assert callback_delivery["queue_name"] == "callback_queue"
     assert callback_delivery["last_status_code"] == 204
     assert callback_delivery["last_result"]["request_payload"] == captured["payload"]
 
@@ -1117,22 +1159,28 @@ async def test_publishing_ad_generation_callback_failure_does_not_block_returned
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+
+    async def fake_post_callback(
+        self: AdGenerationService,
+        callback_url: str,
+        payload: dict,
+    ) -> dict:
+        return {
+            "url": callback_url,
+            "status": "failed",
+            "status_code": 500,
+            "request_payload": payload,
+            "response_text": "temporary failure",
+            "error": "Callback endpoint returned HTTP 500.",
+            "started_at": "2026-06-18T00:00:00+00:00",
+            "finished_at": "2026-06-18T00:00:01+00:00",
+        }
+
+    monkeypatch.setattr(AdGenerationService, "_post_callback", fake_post_callback)
+
     async with session_factory() as session:
         service = AdGenerationService()
-
-        async def fake_post_callback(callback_url: str, payload: dict) -> dict:
-            return {
-                "url": callback_url,
-                "status": "failed",
-                "status_code": 500,
-                "request_payload": payload,
-                "response_text": "temporary failure",
-                "error": "Callback endpoint returned HTTP 500.",
-                "started_at": "2026-06-18T00:00:00+00:00",
-                "finished_at": "2026-06-18T00:00:01+00:00",
-            }
-
-        monkeypatch.setattr(service, "_post_callback", fake_post_callback)
         job = await service.create_job(
             session,
             PublishingAdGenerationJobCreate(
@@ -1167,9 +1215,28 @@ async def test_publishing_ad_generation_callback_failure_does_not_block_returned
 
     assert returned.status == "returned"
     assert returned.result_payload["status"] == "returned"
-    callback_delivery = returned.metadata_json["callback_delivery"]
+    queued_delivery = returned.metadata_json["callback_delivery"]
+    assert queued_delivery["status"] == "queued"
+
+    await GenerationTaskService().process_task(queued_delivery["task_id"])
+
+    async with session_factory() as session:
+        task = await session.get(GenerationTask, queued_delivery["task_id"])
+        processed_job = await session.get(AdGenerationJob, returned.id)
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.retryable is True
+    assert task.error_code == "unknown_provider_error"
+    assert task.error_message == "Callback endpoint returned HTTP 500."
+
+    assert processed_job is not None
+    assert processed_job.status == "returned"
+    callback_delivery = processed_job.metadata_json["callback_delivery"]
     assert callback_delivery["status"] == "failed"
     assert callback_delivery["attempts"] == 1
+    assert callback_delivery["task_id"] == queued_delivery["task_id"]
+    assert callback_delivery["queue_name"] == "callback_queue"
     assert callback_delivery["last_status_code"] == 500
     assert callback_delivery["last_result"]["error"] == "Callback endpoint returned HTTP 500."
 

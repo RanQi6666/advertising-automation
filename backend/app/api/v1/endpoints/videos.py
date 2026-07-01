@@ -1,9 +1,11 @@
 import json
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
+from backend.app.db.models.video_asset import VideoAsset
+from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.schemas.video import (
     VideoAssetRead,
     VideoGenerateRequest,
@@ -12,11 +14,14 @@ from backend.app.schemas.video import (
     VideoStoryboardRewriteRequest,
 )
 from backend.app.services.generation_attempt_service import GenerationAttemptService
+from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
+from backend.app.services.utils import get_required
 from backend.app.services.video_service import VideoService
 
 router = APIRouter()
 service = VideoService()
 attempt_service = GenerationAttemptService()
+task_service = GenerationTaskService()
 
 
 @router.post(
@@ -120,6 +125,35 @@ async def create_video_from_images(payload: VideoGenerateRequest, session: DbSes
 @router.post("/videos/{video_id}/generate", response_model=VideoAssetRead)
 async def start_video_generation(video_id: str, session: DbSession):
     return await service.start_video_generation(session, video_id)
+
+
+@router.post(
+    "/videos/{video_id}/generate/task",
+    response_model=GenerationTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_start_video_generation(
+    video_id: str,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    video = await get_required(session, VideoAsset, video_id)
+    task = await task_service.create_task(
+        session,
+        queue_name=VIDEO_QUEUE_NAME,
+        task_type="video_generate",
+        business_type="video_asset",
+        business_id=video.id,
+        campaign_id=video.campaign_id,
+        payload={"video_id": video.id},
+        metadata={
+            "duration_seconds": video.duration_seconds,
+            "aspect_ratio": video.aspect_ratio,
+            "source_asset_ids": video.source_asset_ids,
+        },
+    )
+    background_tasks.add_task(task_service.process_task, task.id)
+    return GenerationTaskRead.from_model(task)
 
 
 @router.post("/videos/{video_id}/refresh", response_model=VideoAssetRead)

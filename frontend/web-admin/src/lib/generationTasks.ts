@@ -1,4 +1,4 @@
-import type { CreativeAsset } from "../types/domain";
+import type { CreativeAsset, VideoAsset } from "../types/domain";
 
 export type GenerationTaskStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -43,12 +43,22 @@ export function generationTaskIsSuccessful(task: GenerationTask): boolean {
 }
 
 export function generationTaskSummary(task: GenerationTask, label: string): string {
-  const queueLabel = task.queue_name === "image_queue" ? "图片队列" : "文本队列";
+  const queueLabel =
+    task.queue_name === "image_queue"
+      ? "图片队列"
+      : task.queue_name === "video_queue"
+        ? "视频队列"
+        : "文本队列";
   if (task.status === "queued") return `${label}已进入${queueLabel}，等待处理。`;
   if (task.status === "running") return `${label}正在生成中，请稍候。`;
   if (task.status === "succeeded") return `${label}已生成。`;
   if (task.error_message) return `${label}生成失败：${task.error_message}`;
   return `${label}生成失败，请重试。`;
+}
+
+export function videoAssetFromGenerationTask(task: GenerationTask): VideoAsset | null {
+  const video = task.result?.video;
+  return isVideoAsset(video) ? video : null;
 }
 
 export function creativeAssetsFromGenerationTask(task: GenerationTask): CreativeAsset[] {
@@ -105,6 +115,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isCreativeAsset(value: unknown): value is CreativeAsset {
+  return isRecord(value) && typeof value.id === "string";
+}
+
+function isVideoAsset(value: unknown): value is VideoAsset {
   return isRecord(value) && typeof value.id === "string";
 }
 

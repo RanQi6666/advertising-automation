@@ -18,9 +18,11 @@ from backend.app.services.collaboration import (
     record_can_edit,
     require_read_access,
 )
+from backend.app.services.generation_task_service import GenerationTaskService
 
 router = APIRouter()
 service = AdGenerationService()
+task_service = GenerationTaskService()
 
 
 @router.post(
@@ -139,13 +141,15 @@ async def update_publishing_ad_generation_review(
 async def confirm_publishing_ad_generation_review(
     job_id: str,
     payload: PublishingAdGenerationReviewConfirm,
+    background_tasks: BackgroundTasks,
     session: DbSession,
     operator: CurrentOperator,
 ):
-    return _job_read(
-        await service.confirm_review(session, job_id, payload, operator=operator),
-        operator,
-    )
+    job = await service.confirm_review(session, job_id, payload, operator=operator)
+    callback_task_id = _queued_callback_task_id(job)
+    if callback_task_id:
+        background_tasks.add_task(task_service.process_task, callback_task_id)
+    return _job_read(job, operator)
 
 
 def _job_read(
@@ -157,6 +161,16 @@ def _job_read(
     read.return_url = service.return_url_for_job(job)
     read.can_edit = record_can_edit(job, operator)
     return read
+
+
+def _queued_callback_task_id(job: AdGenerationJob) -> str | None:
+    callback_delivery = (job.metadata_json or {}).get("callback_delivery")
+    if not isinstance(callback_delivery, dict):
+        return None
+    if callback_delivery.get("status") != "queued":
+        return None
+    task_id = str(callback_delivery.get("task_id") or "")
+    return task_id or None
 
 
 def _result_payload(job: AdGenerationJob) -> dict[str, Any]:

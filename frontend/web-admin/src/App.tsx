@@ -55,6 +55,7 @@ import {
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskSummary,
+  videoAssetFromGenerationTask,
   type GenerationTask,
 } from "./lib/generationTasks";
 import {
@@ -186,6 +187,10 @@ type ActiveImageGenerationTaskCache = {
   taskId: string;
   draftId: string;
 };
+type ActiveVideoGenerationTaskCache = {
+  taskId: string;
+  videoId: string;
+};
 
 const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
@@ -197,6 +202,7 @@ const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
 const GENERATION_TASK_CONFIRM_TIMEOUT_MS = 240_000;
 const GENERATION_TASK_CONFIRM_INTERVAL_MS = 2_000;
 const ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY = "image_generation_task_v1:active";
+const ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY = "video_generation_task_v1:active";
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -409,6 +415,7 @@ function App() {
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
   const selectedCampaignIdRef = useRef<string | null>(null);
   const imageTaskResumeRef = useRef<string | null>(null);
+  const videoTaskResumeRef = useRef<string | null>(null);
 
   const selectedJob = useMemo(
     () => jobs.find((item) => item.id === selectedJobId) ?? (!selectedJobId ? jobs[0] : null) ?? null,
@@ -958,6 +965,15 @@ function App() {
     return taskAssets;
   }
 
+  function applyVideoGenerationTask(task: GenerationTask): VideoAsset | null {
+    const taskVideo = videoAssetFromGenerationTask(task);
+    if (!taskVideo) return null;
+    setVideos((current) => prependOrReplaceById(current, taskVideo));
+    setSelectedVideoId(taskVideo.id);
+    clearVideoPollWarning(taskVideo.id);
+    return taskVideo;
+  }
+
   useEffect(() => {
     const cached = loadActiveImageGenerationTaskCache();
     if (!cached || imageTaskResumeRef.current === cached.taskId) return;
@@ -1014,6 +1030,65 @@ function App() {
       }
     };
   }, [drafts.map((draft) => draft.id).join("|")]);
+
+  useEffect(() => {
+    const cached = loadActiveVideoGenerationTaskCache();
+    if (!cached || videoTaskResumeRef.current === cached.taskId) return;
+    if (!videos.some((video) => video.id === cached.videoId)) return;
+
+    let cancelled = false;
+    videoTaskResumeRef.current = cached.taskId;
+
+    const resumeVideoTask = async () => {
+      setActiveView("videos");
+      setLoading(`video-generate-${cached.videoId}`);
+      try {
+        const currentTask = await api.getGenerationTask(cached.taskId);
+        if (cancelled) return;
+        if (currentTask.business_id !== cached.videoId) {
+          clearActiveVideoGenerationTaskCache(cached.taskId);
+          return;
+        }
+        applyVideoGenerationTask(currentTask);
+        if (generationTaskIsFinal(currentTask)) {
+          clearActiveVideoGenerationTaskCache(currentTask.id);
+          return;
+        }
+        const completedTask = await waitForGenerationTask(
+          currentTask.id,
+          "视频",
+          "video",
+          applyVideoGenerationTask,
+        );
+        if (cancelled) return;
+        if (completedTask) {
+          applyVideoGenerationTask(completedTask);
+          if (generationTaskIsFinal(completedTask)) {
+            clearActiveVideoGenerationTaskCache(completedTask.id);
+          }
+        }
+      } catch (caught) {
+        if (!cancelled && !isTransientApiError(caught)) {
+          setCaughtError("video", caught, "视频任务恢复失败");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading((current) =>
+            current === `video-generate-${cached.videoId}` ? null : current,
+          );
+          videoTaskResumeRef.current = null;
+        }
+      }
+    };
+
+    void resumeVideoTask();
+    return () => {
+      cancelled = true;
+      if (videoTaskResumeRef.current === cached.taskId) {
+        videoTaskResumeRef.current = null;
+      }
+    };
+  }, [videos.map((video) => video.id).join("|")]);
 
   async function recoverTopicGenerationFromAttempt(
     campaignId: string,
@@ -2828,12 +2903,32 @@ function App() {
       setSelectedVideoId(created.id);
       setActiveView("videos");
       void saveWorkflowStage("video_review");
-      const started = await api.startVideoGeneration(created.id);
-      setVideos((current) => current.map((item) => (item.id === started.id ? started : item)));
+      const task = await api.startVideoGenerationTask(created.id);
+      saveActiveVideoGenerationTaskCache({ taskId: task.id, videoId: created.id });
+      applyVideoGenerationTask(task);
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        "视频",
+        "video",
+        applyVideoGenerationTask,
+      );
+      if (!completedTask) {
+        setVideoPollWarning(created.id, "视频仍在视频队列处理中，请稍后刷新查看。");
+        setNotice("视频仍在视频队列处理中，请稍后刷新查看。");
+        return;
+      }
+      if (generationTaskIsFinal(completedTask)) {
+        clearActiveVideoGenerationTaskCache(completedTask.id);
+      }
+      const started = applyVideoGenerationTask(completedTask);
+      if (!started) {
+        setVideoPollWarning(created.id, generationTaskSummary(completedTask, "视频"));
+        return;
+      }
       setSelectedVideoId(started.id);
       clearVideoPollWarning(started.id);
       clearError("video");
-      setNotice("视频任务已创建，正在生成成片");
+      setNotice("视频任务已进入生成流程，完成后会自动更新预览。");
     } catch (caught) {
       const message = apiErrorMessage(caught, "视频任务创建或生成失败");
       if (createdVideo && !isAuthApiError(caught)) {
@@ -2848,14 +2943,39 @@ function App() {
   }
 
   async function handleStartVideoGeneration(videoId: string) {
-    const video = await run(
-      `video-generate-${videoId}`,
-      () => api.startVideoGeneration(videoId),
-      "视频生成任务已重新提交",
-    );
-    if (video) {
-      setVideos((current) => current.map((item) => (item.id === video.id ? video : item)));
-      clearVideoPollWarning(video.id);
+    const loadingKey = `video-generate-${videoId}`;
+    setLoading(loadingKey);
+    clearError("video");
+    setNotice(null);
+    try {
+      const task = await api.startVideoGenerationTask(videoId);
+      saveActiveVideoGenerationTaskCache({ taskId: task.id, videoId });
+      applyVideoGenerationTask(task);
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        "视频",
+        "video",
+        applyVideoGenerationTask,
+      );
+      if (!completedTask) {
+        setVideoPollWarning(videoId, "视频仍在视频队列处理中，请稍后刷新查看。");
+        setNotice("视频仍在视频队列处理中，请稍后刷新查看。");
+        return;
+      }
+      if (generationTaskIsFinal(completedTask)) {
+        clearActiveVideoGenerationTaskCache(completedTask.id);
+      }
+      const video = applyVideoGenerationTask(completedTask);
+      if (video) {
+        clearVideoPollWarning(video.id);
+        setNotice("视频生成任务已重新提交，完成后会自动更新预览。");
+      } else {
+        setVideoPollWarning(videoId, generationTaskSummary(completedTask, "视频"));
+      }
+    } catch (caught) {
+      setCaughtError("video", caught, "视频生成任务提交失败");
+    } finally {
+      setLoading((current) => (current === loadingKey ? null : current));
     }
   }
 
@@ -7120,6 +7240,41 @@ function clearActiveImageGenerationTaskCache(taskId?: string) {
   if (taskId && cached?.taskId !== taskId) return;
   try {
     window.sessionStorage.removeItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY);
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function loadActiveVideoGenerationTaskCache(): ActiveVideoGenerationTaskCache | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const taskId = typeof parsed.taskId === "string" ? parsed.taskId : "";
+    const videoId = typeof parsed.videoId === "string" ? parsed.videoId : "";
+    return taskId && videoId ? { taskId, videoId } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveVideoGenerationTaskCache(entry: ActiveVideoGenerationTaskCache) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function clearActiveVideoGenerationTaskCache(taskId?: string) {
+  if (typeof window === "undefined") return;
+  const cached = loadActiveVideoGenerationTaskCache();
+  if (taskId && cached?.taskId !== taskId) return;
+  try {
+    window.sessionStorage.removeItem(ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY);
   } catch {
     // Local cache is an optimization only.
   }

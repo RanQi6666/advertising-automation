@@ -7,6 +7,7 @@ import {
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskSummary,
+  videoAssetFromGenerationTask,
   type GenerationTask,
 } from "../src/lib/generationTasks.ts";
 
@@ -112,4 +113,46 @@ test("generation task helpers restore image slots from task result", () => {
   assert.equal(slots[1].message, "provider failed for slot 2");
   assert.equal(slots[2].status, "done");
   assert.equal(slots[2].asset?.id, "creative-3");
+});
+
+test("generation task helpers restore video asset from task result", () => {
+  const videoTask = task("queued");
+  videoTask.queue_name = "video_queue";
+  videoTask.task_type = "video_generate";
+  videoTask.business_type = "video_asset";
+  videoTask.business_id = "video-1";
+
+  assert.equal(generationTaskSummary(videoTask, "视频"), "视频已进入视频队列，等待处理。");
+
+  videoTask.status = "succeeded";
+  videoTask.result = {
+    video_id: "video-1",
+    status: "generating",
+    provider_job_id: "provider-video-job-1",
+    video: {
+      id: "video-1",
+      campaign_id: "campaign-1",
+      draft_id: "draft-1",
+      source_asset_ids: ["creative-1", "creative-2"],
+      url: null,
+      storage_key: null,
+      prompt: "Create a short ad video",
+      storyboard: [],
+      duration_seconds: 12,
+      aspect_ratio: "9:16",
+      status: "generating",
+      provider_job_id: "provider-video-job-1",
+      error_message: null,
+      version: 1,
+      metadata_json: { video_provider: "fake" },
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    },
+  };
+
+  const video = videoAssetFromGenerationTask(videoTask);
+
+  assert.equal(video?.id, "video-1");
+  assert.equal(video?.status, "generating");
+  assert.equal(video?.provider_job_id, "provider-video-job-1");
 });

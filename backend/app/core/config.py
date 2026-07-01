@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     model_gateway_text_timeout_seconds: float = Field(default=180.0, ge=1, le=600)
     text_queue_concurrency: int = Field(default=6, ge=1, le=64)
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
+    video_queue_concurrency: int = Field(default=4, ge=1, le=16)
+    callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"
     model_gateway_image_response_format: str | None = None
