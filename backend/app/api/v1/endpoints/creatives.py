@@ -10,9 +10,11 @@ from backend.app.schemas.creative import (
     CreativeRegenerateRequest,
 )
 from backend.app.services.creative_service import CreativeService
+from backend.app.services.generation_attempt_service import GenerationAttemptService
 
 router = APIRouter()
 service = CreativeService()
+attempt_service = GenerationAttemptService()
 
 
 @router.post(
@@ -26,8 +28,31 @@ async def generate_creatives(payload: CreativeGenerateRequest, session: DbSessio
 
 @router.post("/creatives/generate/stream")
 async def stream_creatives(payload: CreativeGenerateRequest, session: DbSession):
+    total_count = 1 if payload.target_index is not None else payload.count
+    attempt = await attempt_service.create_attempt(
+        session,
+        business_type="image",
+        business_id=payload.draft_id,
+        stage="creative_image_generation",
+        total_count=total_count,
+        model=payload.model_id,
+        metadata={
+            "size": payload.size,
+            "target_index": payload.target_index,
+            "generation_mode": payload.generation_mode,
+            "variant_count": payload.variant_count,
+            "frames_per_variant": payload.frames_per_variant,
+            "video_duration_seconds": payload.video_duration_seconds,
+        },
+    )
+
     async def event_stream():
-        async for event in service.stream_creatives(session, payload):
+        async for event in attempt_service.track_stream(
+            session=session,
+            attempt=attempt,
+            events=service.stream_creatives(session, payload),
+            success_event_types={"asset"},
+        ):
             yield json.dumps(event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(

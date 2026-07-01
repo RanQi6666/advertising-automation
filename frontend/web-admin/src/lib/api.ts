@@ -1,4 +1,7 @@
 import type {
+  GenerationAttempt,
+} from "./generationAttempts";
+import type {
   AdGenerationJob,
   AdGenerationJobAccepted,
   AdPerformanceAIAnalysis,
@@ -26,20 +29,27 @@ const EXTERNAL_AI_TRANSIENT_MESSAGE =
 
 type JsonBody = Record<string, unknown> | unknown[];
 export type TopicStreamEvent =
-  | { type: "start"; limit: number }
+  | { type: "start"; limit: number; attempt_id?: string; total_count?: number }
   | { type: "slot"; index: number }
+  | { type: "heartbeat"; stage: string; interval_seconds?: number }
   | { type: "topic"; index: number; topic: Topic }
   | { type: "error"; index?: number; message: string }
   | { type: "done"; generated?: number };
 export type CreativeStreamEvent =
-  | { type: "start"; limit: number; indices?: number[] }
+  | { type: "start"; limit: number; indices?: number[]; attempt_id?: string; total_count?: number }
   | { type: "slot"; index: number }
   | { type: "heartbeat"; stage: string; pending_indices?: number[]; interval_seconds?: number }
   | { type: "asset"; index: number; asset: CreativeAsset }
   | { type: "error"; index?: number; message: string }
   | { type: "done"; generated?: number };
 export type VideoStoryboardTextStreamEvent =
-  | { type: "start"; duration_seconds: number; aspect_ratio: string }
+  | {
+      type: "start";
+      duration_seconds: number;
+      aspect_ratio: string;
+      attempt_id?: string;
+      total_count?: number;
+    }
   | { type: "heartbeat"; stage: string; interval_seconds?: number }
   | { type: "delta"; text: string }
   | { type: "error"; message: string }
@@ -255,6 +265,8 @@ export const api = {
   listOperators: () => request<OperatorUser[]>("/operators"),
   listWorkOrders: (limit = 50) => request<WorkOrder[]>(`/work-orders?limit=${limit}`),
   getModelOptions: () => request<ModelOptions>("/model-options"),
+  getGenerationAttempt: (attemptId: string) =>
+    request<GenerationAttempt>(`/generation-attempts/${attemptId}`),
   listAdGenerationJobs: (limit = 50) =>
     request<AdGenerationJob[]>(`/integrations/publishing/ad-generation/jobs?limit=${limit}`),
   listAdPerformanceAnalyses: (limit = 50) =>

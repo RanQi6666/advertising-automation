@@ -43,6 +43,13 @@ import {
   type KeyframeVariantCount,
 } from "./lib/creativeKeyframes";
 import {
+  generationAttemptIsFinal,
+  generationAttemptIsRecoverable,
+  generationAttemptLastSuccessEvent,
+  generationAttemptSummary,
+  type GenerationAttempt,
+} from "./lib/generationAttempts";
+import {
   adGenerationJobNumber,
   adPreviewCreativeOptions,
   buildCreativeReviewState,
@@ -108,6 +115,14 @@ type ScopedAppError = {
   transient: boolean;
   createdAt: number;
 };
+type MessageHistoryItem = {
+  id: string;
+  tone: "success" | "warning" | "error";
+  title: string;
+  message: string;
+  createdAt: number;
+  scope?: ErrorScope;
+};
 type WorkflowArtifact = {
   id: string;
   created_at: string;
@@ -164,6 +179,9 @@ const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
 const CREATIVE_GENERATION_LIMIT = 3;
 const KEYFRAME_MAX_TOTAL_IMAGES = KEYFRAME_VARIANT_OPTIONS.length * KEYFRAME_FRAMES_PER_VARIANT;
+const MESSAGE_HISTORY_LIMIT = 50;
+const GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS = 90_000;
+const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -279,6 +297,38 @@ const manualAdPerformanceJsonExample = formatManualAdPerformanceJson({
   },
 });
 
+function prependMessageHistory(
+  current: MessageHistoryItem[],
+  item: MessageHistoryItem,
+): MessageHistoryItem[] {
+  return [item, ...current].slice(0, MESSAGE_HISTORY_LIMIT);
+}
+
+function noticeMessageHistoryItem(message: string): MessageHistoryItem {
+  return {
+    id: messageHistoryId("notice"),
+    tone: "success",
+    title: "操作通知",
+    message,
+    createdAt: Date.now(),
+  };
+}
+
+function errorMessageHistoryItem(error: ScopedAppError): MessageHistoryItem {
+  return {
+    id: messageHistoryId("error"),
+    tone: error.transient ? "warning" : "error",
+    title: error.transient ? "系统提醒" : "需要处理",
+    message: error.message,
+    createdAt: error.createdAt,
+    scope: error.scope,
+  };
+}
+
+function messageHistoryId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>(() => initialViewFromUrl());
   const [jobs, setJobs] = useState<AdGenerationJob[]>([]);
@@ -340,6 +390,7 @@ function App() {
   const [operationElapsedSeconds, setOperationElapsedSeconds] = useState(0);
   const [error, setErrorState] = useState<ScopedAppError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [messageHistory, setMessageHistory] = useState<MessageHistoryItem[]>([]);
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
   const selectedCampaignIdRef = useRef<string | null>(null);
 
@@ -674,6 +725,16 @@ function App() {
     };
   }, [videos.map((video) => `${video.id}:${video.status}:${video.provider_job_id ?? ""}`).join("|")]);
 
+  useEffect(() => {
+    if (!notice) return;
+    setMessageHistory((current) => prependMessageHistory(current, noticeMessageHistoryItem(notice)));
+  }, [notice]);
+
+  useEffect(() => {
+    if (!error) return;
+    setMessageHistory((current) => prependMessageHistory(current, errorMessageHistoryItem(error)));
+  }, [error]);
+
   function setError(message: string | null, scope: ErrorScope = "global", transient = false) {
     if (!message) {
       clearError();
@@ -776,6 +837,137 @@ function App() {
     } finally {
       setLoading(null);
     }
+  }
+
+  async function confirmGenerationAttempt(
+    attemptId: string | null,
+    label: string,
+    scope: ErrorScope,
+  ): Promise<GenerationAttempt | null> {
+    if (!attemptId) return null;
+    setNotice("连接中断，正在确认后台生成结果...");
+    const attempt = await waitForGenerationAttempt(attemptId);
+    if (!attempt) return null;
+    if (generationAttemptIsRecoverable(attempt)) {
+      clearError(scope);
+      setNotice(generationAttemptSummary(attempt, label));
+      return attempt;
+    }
+    if (generationAttemptIsFinal(attempt)) {
+      setError(generationAttemptSummary(attempt, label), scope);
+    } else {
+      setNotice(generationAttemptSummary(attempt, label));
+    }
+    return attempt;
+  }
+
+  async function waitForGenerationAttempt(attemptId: string): Promise<GenerationAttempt | null> {
+    const deadline = Date.now() + GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS;
+    let latest: GenerationAttempt | null = null;
+    while (Date.now() <= deadline) {
+      try {
+        latest = await api.getGenerationAttempt(attemptId);
+        if (generationAttemptIsFinal(latest)) return latest;
+      } catch (caught) {
+        if (!isTransientApiError(caught)) throw caught;
+      }
+      await sleep(GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS);
+    }
+    return latest;
+  }
+
+  async function recoverTopicGenerationFromAttempt(
+    campaignId: string,
+    attempt: GenerationAttempt,
+  ): Promise<boolean> {
+    const nextTopics = await api.listTopics(campaignId);
+    setTopics(nextTopics);
+    const recoveredTopics = nextTopics
+      .filter(
+        (topic) =>
+          topic.campaign_id === campaignId && artifactTimestamp(topic) >= attemptStartedAt(attempt),
+      )
+      .sort((left, right) => artifactTimestamp(left) - artifactTimestamp(right))
+      .slice(0, attempt.total_count || TOPIC_GENERATION_LIMIT);
+    if (!recoveredTopics.length) return false;
+
+    setSelectedTopicId((current) => current ?? recoveredTopics[0]?.id ?? null);
+    const total = attempt.total_count || TOPIC_GENERATION_LIMIT;
+    if (recoveredTopics.length >= total) {
+      clearCompletedTopicGenerationSlots(campaignId);
+      setTopicGenerationSlots((current) => current.filter((slot) => slot.campaignId !== campaignId));
+      return true;
+    }
+    setTopicGenerationSlots((current) => [
+      ...current.filter((slot) => slot.campaignId !== campaignId),
+      ...initialTopicSlots(total, campaignId).map((slot) => {
+        const topic = recoveredTopics[slot.index - 1];
+        return topic
+          ? { ...slot, status: "done" as const, topic }
+          : { ...slot, status: "error" as const, message: "后台未返回此候选，请重试。" };
+      }),
+    ]);
+    return true;
+  }
+
+  async function recoverCreativeGenerationFromAttempt(
+    campaignId: string,
+    draftId: string,
+    attempt: GenerationAttempt,
+    generationPlan: ReturnType<typeof imageGenerationPlanForMode>,
+  ): Promise<boolean> {
+    const nextCreatives = await api.listCreatives(campaignId);
+    setCreatives(nextCreatives);
+    const recoveredAssets = nextCreatives
+      .filter(
+        (asset) =>
+          asset.draft_id === draftId && artifactTimestamp(asset) >= attemptStartedAt(attempt),
+      )
+      .sort((left, right) => creativeImageIndex(left, 0) - creativeImageIndex(right, 0))
+      .slice(0, attempt.total_count || generationPlan.count);
+    if (!recoveredAssets.length) return false;
+
+    const assetsByIndex = new Map(
+      recoveredAssets.map((asset, index) => [creativeImageIndex(asset, index + 1), asset]),
+    );
+    const total = attempt.total_count || generationPlan.count;
+    setCreativeGenerationSlots(
+      initialCreativeSlots(total).map((slot) => {
+        const asset = assetsByIndex.get(slot.index);
+        return asset
+          ? { ...slot, status: "done" as const, asset }
+          : { ...slot, status: "error" as const, message: "后台未返回此图片，请重试。" };
+      }),
+    );
+
+    if (generationPlan.isKeyframeVariant) {
+      const firstGroupIds = firstCompleteKeyframeGroupIds(recoveredAssets);
+      if (firstGroupIds.length) setSelectedCreativeIds(firstGroupIds);
+    } else {
+      setSelectedCreativeIds((current) => {
+        const nextIds = recoveredAssets.map((asset) => asset.id);
+        return [...current, ...nextIds.filter((id) => !current.includes(id))];
+      });
+    }
+    return true;
+  }
+
+  function recoverVideoStoryboardFromAttempt(attempt: GenerationAttempt): boolean {
+    const doneEvent = generationAttemptLastSuccessEvent<VideoStoryboardTextStreamEvent>(attempt);
+    if (!doneEvent || doneEvent.type !== "done" || typeof doneEvent.text !== "string") {
+      return false;
+    }
+    const text = doneEvent.text;
+    if (!text.trim()) return false;
+    setVideoStoryboardText(text);
+    setVideoStoryboardDirty(true);
+    if (typeof doneEvent.aspect_ratio === "string") setVideoAspectRatio(doneEvent.aspect_ratio);
+    if (typeof doneEvent.duration_seconds === "number") {
+      setVideoDurationSeconds(doneEvent.duration_seconds);
+    }
+    clearError("video");
+    setNotice(generationAttemptSummary(attempt, "创意脚本"));
+    return true;
   }
 
   async function loadOperators() {
@@ -1262,6 +1454,7 @@ function App() {
     const revisionFeedback = feedback?.trim();
     const signals = buildTopicGenerationSignals(revisionFeedback);
     const streamedTopics: Topic[] = [];
+    let attemptId: string | null = null;
 
     try {
       await api.generateTopicsStream(
@@ -1270,6 +1463,7 @@ function App() {
         signals,
         (event: TopicStreamEvent) => {
           if (event.type === "start") {
+            attemptId = event.attempt_id ?? attemptId;
             replaceTopicGenerationSlots(campaignId, event.limit);
             return;
           }
@@ -1311,6 +1505,11 @@ function App() {
       );
 
       if (!streamedTopics.length) {
+        const attempt = await confirmGenerationAttempt(attemptId, "选题", "topic");
+        if (attempt && generationAttemptIsRecoverable(attempt)) {
+          const recovered = await recoverTopicGenerationFromAttempt(campaignId, attempt);
+          if (recovered) return;
+        }
         if (isSelectedCampaign(campaignId)) {
           setError("选题生成失败，请稍后重试。", "topic");
         }
@@ -1331,6 +1530,11 @@ function App() {
         void saveWorkflowStage("topic_review");
       }
     } catch (caught) {
+      const attempt = await confirmGenerationAttempt(attemptId, "选题", "topic");
+      if (attempt && generationAttemptIsRecoverable(attempt)) {
+        const recovered = await recoverTopicGenerationFromAttempt(campaignId, attempt);
+        if (recovered) return;
+      }
       const message = apiErrorMessage(caught, "选题生成失败");
       if (isSelectedCampaign(campaignId)) {
         if (streamedTopics.length) {
@@ -1703,6 +1907,7 @@ function App() {
     setKeyframeRewriteFeedbacks({});
 
     const streamedAssets: CreativeAsset[] = [];
+    let attemptId: string | null = null;
     try {
       const storyboardContext = isVideoKeyframeMode(creativeGenerationMode)
         ? currentStoryboardContextForKeyframes()
@@ -1718,6 +1923,7 @@ function App() {
         generationPlan.size,
         (event: CreativeStreamEvent) => {
           if (event.type === "start") {
+            attemptId = event.attempt_id ?? attemptId;
             setCreativeGenerationSlots(initialCreativeSlots(event.limit));
             return;
           }
@@ -1772,6 +1978,19 @@ function App() {
       );
 
       if (!streamedAssets.length) {
+        const attempt = await confirmGenerationAttempt(attemptId, "图片", "image");
+        if (attempt && generationAttemptIsRecoverable(attempt) && selectedCampaign) {
+          const recovered = await recoverCreativeGenerationFromAttempt(
+            selectedCampaign.id,
+            draft.id,
+            attempt,
+            generationPlan,
+          );
+          if (recovered) {
+            void saveWorkflowStage("image_review");
+            return;
+          }
+        }
         setError("图片生成失败，请稍后重试。", "image");
         markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
         return;
@@ -1799,6 +2018,19 @@ function App() {
       }
       void saveWorkflowStage("image_review");
     } catch (caught) {
+      const attempt = await confirmGenerationAttempt(attemptId, "图片", "image");
+      if (attempt && generationAttemptIsRecoverable(attempt) && selectedCampaign) {
+        const recovered = await recoverCreativeGenerationFromAttempt(
+          selectedCampaign.id,
+          draft.id,
+          attempt,
+          generationPlan,
+        );
+        if (recovered) {
+          void saveWorkflowStage("image_review");
+          return;
+        }
+      }
       const message = apiErrorMessage(caught, "图片生成失败");
       if (streamedAssets.length) {
         clearError("image");
@@ -2071,6 +2303,7 @@ function App() {
     }
     const previousText = videoStoryboardText;
     let streamedText = "";
+    let attemptId: string | null = null;
     setLoading("video-storyboard");
     clearError("video");
     setNotice(null);
@@ -2087,6 +2320,7 @@ function App() {
         videoInstructions,
         (event: VideoStoryboardTextStreamEvent) => {
           if (event.type === "start") {
+            attemptId = event.attempt_id ?? attemptId;
             setVideoAspectRatio(event.aspect_ratio);
             setVideoDurationSeconds(event.duration_seconds);
             return;
@@ -2110,10 +2344,18 @@ function App() {
         selectedCopyModelId,
       );
       if (!streamedText.trim()) {
+        const attempt = await confirmGenerationAttempt(attemptId, "创意脚本", "video");
+        if (attempt && generationAttemptIsRecoverable(attempt) && recoverVideoStoryboardFromAttempt(attempt)) {
+          return;
+        }
         throw new Error("模型未返回创意脚本，请重试。");
       }
       setNotice("创意脚本已生成");
     } catch (caught) {
+      const attempt = await confirmGenerationAttempt(attemptId, "创意脚本", "video");
+      if (attempt && generationAttemptIsRecoverable(attempt) && recoverVideoStoryboardFromAttempt(attempt)) {
+        return;
+      }
       const message = apiErrorMessage(caught, "创意脚本生成失败");
       if (streamedText.trim() && isTransientApiError(caught)) {
         clearError("video");
@@ -2460,13 +2702,13 @@ function App() {
           <div className="topbar-actions">
             <OperatorBadge operator={currentOperator} onSwitch={handleSwitchOperator} />
             <MessageCenter
-              error={visibleError}
-              notice={notice}
+              messages={messageHistory}
               open={messageCenterOpen}
               onToggle={() => setMessageCenterOpen((current) => !current)}
               onClear={() => {
-                if (visibleError) clearError(visibleError.scope);
-                if (notice) setNotice(null);
+                setMessageHistory([]);
+                clearError();
+                setNotice(null);
                 setMessageCenterOpen(false);
               }}
             />
@@ -2863,38 +3105,33 @@ function DashboardView({
   );
 }
 
+function formatMessageTime(createdAt: number): string {
+  const elapsedSeconds = Math.max(Math.floor((Date.now() - createdAt) / 1000), 0);
+  if (elapsedSeconds < 60) return "刚刚";
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟前`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours} 小时前`;
+  return new Date(createdAt).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function MessageCenter({
-  error,
-  notice,
+  messages,
   open,
   onToggle,
   onClear,
 }: {
-  error: ScopedAppError | null;
-  notice: string | null;
+  messages: MessageHistoryItem[];
   open: boolean;
   onToggle: () => void;
   onClear: () => void;
 }) {
-  const items = [
-    error
-      ? {
-          id: "error",
-          tone: error.transient ? "warning" : "error",
-          title: error.transient ? "系统提醒" : "需要处理",
-          message: error.message,
-        }
-      : null,
-    notice
-      ? {
-          id: "notice",
-          tone: "success",
-          title: "操作通知",
-          message: notice,
-        }
-      : null,
-  ].filter((item): item is { id: string; tone: string; title: string; message: string } => Boolean(item));
-  const noticeCount = items.length;
+  const noticeCount = messages.length;
 
   return (
     <div className="message-center">
@@ -2916,8 +3153,8 @@ function MessageCenter({
             </button>
           </div>
           <div className="message-list">
-            {items.length ? (
-              items.map((item) => {
+            {messages.length ? (
+              messages.map((item) => {
                 const Icon = item.tone === "error" ? X : item.tone === "warning" ? Clock3 : Check;
                 return (
                   <div className={`message-item ${item.tone}`} key={item.id}>
@@ -2927,7 +3164,7 @@ function MessageCenter({
                     <div>
                       <strong>{item.title}</strong>
                       <p>{item.message}</p>
-                      <span>刚刚</span>
+                      <span>{formatMessageTime(item.createdAt)}</span>
                     </div>
                   </div>
                 );
@@ -6744,6 +6981,15 @@ function hasNewOrFreshArtifact<T extends WorkflowArtifact>(
 function artifactTimestamp(item: WorkflowArtifact): number {
   const timestamps = [Date.parse(item.updated_at), Date.parse(item.created_at)].filter(Number.isFinite);
   return timestamps.length ? Math.max(...timestamps) : 0;
+}
+
+function attemptStartedAt(attempt: GenerationAttempt): number {
+  const startedAt = Date.parse(attempt.started_at);
+  return Number.isFinite(startedAt) ? startedAt - 10_000 : 0;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function initialTopicSlots(limit: number, campaignId: string): TopicGenerationSlot[] {

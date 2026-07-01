@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from urllib.parse import urlparse
 
@@ -28,6 +29,7 @@ from backend.app.services.utils import get_required
 TOPIC_LANDING_EXCERPT_CHARS = 600
 TOPIC_TEXT_FIELD_CHARS = 500
 TOPIC_SELLING_POINT_LIMIT = 5
+TOPIC_STREAM_HEARTBEAT_SECONDS = 5.0
 
 
 class TopicService:
@@ -106,11 +108,16 @@ class TopicService:
         generated_count = 0
         angle_plan = _topic_angle_plan(effective_signals)
         try:
-            async for candidate in llm.stream_topics(
+            topic_stream = llm.stream_topics(
                 campaign=campaign,  # type: ignore[arg-type]
                 limit=limit,
                 signals=effective_signals,
-            ):
+            )
+            async for item in _stream_topics_with_heartbeat(topic_stream):
+                if isinstance(item, dict):
+                    yield item
+                    continue
+                candidate = item
                 if generated_count >= limit:
                     break
                 generated_count += 1
@@ -136,11 +143,12 @@ class TopicService:
                     "topic": TopicRead.model_validate(topic).model_dump(mode="json"),
                 }
         except Exception as exc:
+            error_detail = str(exc) or exc.__class__.__name__
             for index in range(generated_count + 1, limit + 1):
                 yield {
                     "type": "error",
                     "index": index,
-                    "message": f"选题生成中断：{exc}",
+                    "message": f"选题生成中断：{error_detail}",
                 }
             yield {"type": "done", "generated": generated_count}
             return
@@ -330,6 +338,43 @@ class TopicService:
             )
             .values(status=TopicStatus.REJECTED.value)
         )
+
+
+async def _stream_topics_with_heartbeat(
+    candidates: AsyncIterator[TopicCandidate],
+) -> AsyncIterator[TopicCandidate | dict]:
+    candidate_task = asyncio.create_task(anext(candidates))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {candidate_task},
+                timeout=TOPIC_STREAM_HEARTBEAT_SECONDS,
+            )
+            if not done:
+                yield {
+                    "type": "heartbeat",
+                    "stage": "topic_generation",
+                    "interval_seconds": TOPIC_STREAM_HEARTBEAT_SECONDS,
+                }
+                continue
+
+            try:
+                candidate = candidate_task.result()
+            except StopAsyncIteration:
+                break
+
+            yield candidate
+            candidate_task = asyncio.create_task(anext(candidates))
+    finally:
+        if not candidate_task.done():
+            candidate_task.cancel()
+            try:
+                await candidate_task
+            except asyncio.CancelledError:
+                pass
+        aclose = getattr(candidates, "aclose", None)
+        if aclose:
+            await aclose()
 
 
 def _landing_url_from_context(work_order_context: dict | None) -> str | None:

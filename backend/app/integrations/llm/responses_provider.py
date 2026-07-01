@@ -27,16 +27,18 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
         api_key: str,
         model: str,
         base_url: str,
+        timeout_seconds: float = 180.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/") + "/"
+        self.timeout_seconds = timeout_seconds
         self.supports_video_input = False
         self.video_input_fps = 1.0
         self._http_client = http_client or httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=60.0,
+            timeout=timeout_seconds,
         )
 
     async def _json_completion(self, system: str, user: Any) -> dict[str, Any]:

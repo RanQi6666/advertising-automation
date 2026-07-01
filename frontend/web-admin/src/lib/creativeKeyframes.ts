@@ -1,5 +1,5 @@
 export const KEYFRAME_VARIANT_OPTIONS = [1, 2, 3] as const;
-export const DEFAULT_KEYFRAME_VARIANT_COUNT = 1;
+export const DEFAULT_KEYFRAME_VARIANT_COUNT = 3;
 export const KEYFRAME_FRAMES_PER_VARIANT = 2;
 export const COPY_IMAGE_GENERATION_COUNT = 2;
 

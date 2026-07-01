@@ -93,6 +93,9 @@ test("global notices live in a collapsible topbar message center", () => {
   assert.match(appSource, /className="message-center"/);
   assert.match(appSource, /className="message-center-popover"/);
   assert.match(appSource, /通知\(\{noticeCount\}\)/);
+  assert.match(appSource, /const \[messageHistory, setMessageHistory\]/);
+  assert.match(appSource, /messages=\{messageHistory\}/);
+  assert.match(appSource, /prependMessageHistory/);
   assert.doesNotMatch(appSource, /消息\(0\)/);
   assert.doesNotMatch(appSource, /待办\(0\)/);
   assert.doesNotMatch(appSource, /className=\{`banner \$\{bannerTone\}`\}/);

@@ -11,10 +11,12 @@ from backend.app.schemas.video import (
     VideoStoryboardRead,
     VideoStoryboardRewriteRequest,
 )
+from backend.app.services.generation_attempt_service import GenerationAttemptService
 from backend.app.services.video_service import VideoService
 
 router = APIRouter()
 service = VideoService()
+attempt_service = GenerationAttemptService()
 
 
 @router.post(
@@ -28,8 +30,29 @@ async def generate_video_storyboard(payload: VideoStoryboardGenerateRequest, ses
 
 @router.post("/videos/storyboard/stream")
 async def stream_video_storyboard(payload: VideoStoryboardGenerateRequest, session: DbSession):
+    attempt = await attempt_service.create_attempt(
+        session,
+        business_type="video_storyboard",
+        business_id=payload.draft_id or payload.campaign_id,
+        campaign_id=payload.campaign_id,
+        stage="video_storyboard_generation",
+        total_count=1,
+        model=payload.model_id,
+        metadata={
+            "creative_asset_ids": payload.creative_asset_ids,
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+        },
+    )
+
     async def event_stream():
-        async for event in service.stream_storyboard_text(session, payload):
+        async for event in attempt_service.track_stream(
+            session=session,
+            attempt=attempt,
+            events=service.stream_storyboard_text(session, payload),
+            success_event_types={"done"},
+            store_last_success_event=True,
+        ):
             yield _sse_event(event.get("type", "message"), event)
 
     return StreamingResponse(
@@ -53,8 +76,29 @@ async def stream_rewrite_video_storyboard(
     payload: VideoStoryboardRewriteRequest,
     session: DbSession,
 ):
+    attempt = await attempt_service.create_attempt(
+        session,
+        business_type="video_storyboard",
+        business_id=payload.draft_id or payload.campaign_id,
+        campaign_id=payload.campaign_id,
+        stage="video_storyboard_rewrite",
+        total_count=1,
+        model=payload.model_id,
+        metadata={
+            "creative_asset_ids": payload.creative_asset_ids,
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+        },
+    )
+
     async def event_stream():
-        async for event in service.stream_rewrite_storyboard_text(session, payload):
+        async for event in attempt_service.track_stream(
+            session=session,
+            attempt=attempt,
+            events=service.stream_rewrite_storyboard_text(session, payload),
+            success_event_types={"done"},
+            store_last_success_event=True,
+        ):
             yield _sse_event(event.get("type", "message"), event)
 
     return StreamingResponse(

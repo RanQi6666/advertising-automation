@@ -10,21 +10,21 @@ import {
   normalizeKeyframeVariantCount,
 } from "../src/lib/creativeKeyframes.ts";
 
-test("defaults video keyframe generation to one two-frame方案", () => {
+test("defaults video keyframe generation to three two-frame方案", () => {
   const plan = creativeGenerationPlan(12, "9:16");
 
-  assert.equal(DEFAULT_KEYFRAME_VARIANT_COUNT, 1);
+  assert.equal(DEFAULT_KEYFRAME_VARIANT_COUNT, 3);
   assert.equal(plan.isKeyframeVariant, true);
-  assert.equal(plan.variantCount, 1);
+  assert.equal(plan.variantCount, 3);
   assert.equal(plan.framesPerVariant, 2);
-  assert.equal(plan.count, 2);
+  assert.equal(plan.count, 6);
 });
 
 test("supports one two or three keyframe方案 options", () => {
   assert.equal(normalizeKeyframeVariantCount(1), 1);
   assert.equal(normalizeKeyframeVariantCount(2), 2);
   assert.equal(normalizeKeyframeVariantCount(3), 3);
-  assert.equal(normalizeKeyframeVariantCount(6), 1);
+  assert.equal(normalizeKeyframeVariantCount(6), 3);
 
   assert.equal(creativeGenerationPlan(12, "9:16", 3).count, 6);
 });

@@ -413,7 +413,7 @@ input:focus-visible {
 
 .message-center-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   border-bottom: 1px solid #dce8e4;
   padding: 12px 14px 0;

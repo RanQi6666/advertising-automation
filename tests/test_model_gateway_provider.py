@@ -26,12 +26,14 @@ def test_gateway_llm_provider_uses_model_gateway_settings() -> None:
         model_gateway_api_key="gateway-key",
         model_gateway_base_url="http://127.0.0.1:3000/v1",
         model_gateway_text_model="gateway-text-model",
+        model_gateway_text_timeout_seconds=240,
     )
 
     provider = get_llm_provider(settings)
 
     assert isinstance(provider, GatewayResponsesLLMProvider)
     assert provider.model == "gateway-text-model"
+    assert provider.timeout_seconds == 240
 
 
 @pytest.mark.asyncio

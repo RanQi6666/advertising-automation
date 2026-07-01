@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -14,9 +15,11 @@ from backend.app.integrations.llm.openai_provider import (
     _TopicNDJSONStreamParser,
 )
 from backend.app.schemas.ai import TopicCandidate
+from backend.app.services import topic_service as topic_service_module
 from backend.app.services.topic_service import (
     TopicService,
     _angle_plan_item_for_candidate,
+    _stream_topics_with_heartbeat,
 )
 
 
@@ -579,3 +582,34 @@ def test_topic_stream_parser_yields_ndjson_topics_incrementally() -> None:
     assert [candidate.title for candidate in first] == ["Family TV hook"]
     assert [candidate.title for candidate in second] == ["Simple setup hook"]
     assert parser.finish() == []
+
+
+@pytest.mark.asyncio
+async def test_topic_stream_sends_heartbeat_while_candidate_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(topic_service_module, "TOPIC_STREAM_HEARTBEAT_SECONDS", 0.001)
+
+    async def slow_candidates():
+        await asyncio.sleep(0.01)
+        yield TopicCandidate(
+            title="Slow topic",
+            angle="Wait for the model.",
+            audience="operators",
+            selling_points=["Progress stays visible"],
+            risk_notes="None",
+            rationale="The connection should not look stuck while the model is pending.",
+            score=0.8,
+        )
+
+    events = [event async for event in _stream_topics_with_heartbeat(slow_candidates())]
+    heartbeats = [event for event in events if isinstance(event, dict)]
+
+    assert heartbeats
+    assert heartbeats[0]["type"] == "heartbeat"
+    assert heartbeats[0]["stage"] == "topic_generation"
+    assert heartbeats[0]["interval_seconds"] == 0.001
+    assert any(
+        isinstance(event, TopicCandidate) and event.title == "Slow topic"
+        for event in events
+    )

@@ -32,6 +32,7 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
             api_key=api_key,
             model=model,
             base_url=base_url,
+            timeout_seconds=settings.model_gateway_text_timeout_seconds,
         )
     if settings.llm_provider == "volcengine":
         if not settings.volcengine_api_key:

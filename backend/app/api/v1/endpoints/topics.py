@@ -5,10 +5,12 @@ from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
+from backend.app.services.generation_attempt_service import GenerationAttemptService
 from backend.app.services.topic_service import TopicService
 
 router = APIRouter()
 service = TopicService()
+attempt_service = GenerationAttemptService()
 
 
 @router.post(
@@ -20,8 +22,24 @@ async def generate_topics(payload: TopicGenerateRequest, session: DbSession):
 
 @router.post("/topics/generate/stream")
 async def stream_topics(payload: TopicGenerateRequest, session: DbSession):
+    attempt = await attempt_service.create_attempt(
+        session,
+        business_type="topic",
+        business_id=payload.campaign_id,
+        campaign_id=payload.campaign_id,
+        stage="topic_generation",
+        total_count=payload.limit,
+        model=payload.model_id,
+        metadata={"signals": payload.signals},
+    )
+
     async def event_stream():
-        async for event in service.stream_topics(session, payload):
+        async for event in attempt_service.track_stream(
+            session=session,
+            attempt=attempt,
+            events=service.stream_topics(session, payload),
+            success_event_types={"topic"},
+        ):
             yield json.dumps(event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(
