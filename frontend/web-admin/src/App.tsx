@@ -50,6 +50,8 @@ import {
   type GenerationAttempt,
 } from "./lib/generationAttempts";
 import {
+  creativeAssetsFromGenerationTask,
+  creativeSlotsFromGenerationTask,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskSummary,
@@ -180,6 +182,10 @@ type AdGenerationIntegrationParams = {
   returnUrl: string | null;
   callbackUrl: string | null;
 };
+type ActiveImageGenerationTaskCache = {
+  taskId: string;
+  draftId: string;
+};
 
 const VIDEO_MAX_REFERENCE_IMAGES = 2;
 const TOPIC_GENERATION_LIMIT = 3;
@@ -190,6 +196,7 @@ const GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS = 90_000;
 const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
 const GENERATION_TASK_CONFIRM_TIMEOUT_MS = 240_000;
 const GENERATION_TASK_CONFIRM_INTERVAL_MS = 2_000;
+const ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY = "image_generation_task_v1:active";
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
 const VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY = "video_storyboard_draft_v1:last";
 const DELIVERY_EXTRACTION_CACHE_PREFIX = "ad_delivery_extraction_v1:";
@@ -401,6 +408,7 @@ function App() {
   const [messageHistory, setMessageHistory] = useState<MessageHistoryItem[]>([]);
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
   const selectedCampaignIdRef = useRef<string | null>(null);
+  const imageTaskResumeRef = useRef<string | null>(null);
 
   const selectedJob = useMemo(
     () => jobs.find((item) => item.id === selectedJobId) ?? (!selectedJobId ? jobs[0] : null) ?? null,
@@ -888,6 +896,7 @@ function App() {
     taskId: string,
     label: string,
     scope: ErrorScope,
+    onUpdate?: (task: GenerationTask) => void,
   ): Promise<GenerationTask | null> {
     const deadline = Date.now() + GENERATION_TASK_CONFIRM_TIMEOUT_MS;
     let latest: GenerationTask | null = null;
@@ -895,6 +904,7 @@ function App() {
     while (Date.now() <= deadline) {
       try {
         latest = await api.getGenerationTask(taskId);
+        onUpdate?.(latest);
         const summary = generationTaskSummary(latest, label);
         if (summary !== lastSummary) {
           lastSummary = summary;
@@ -921,6 +931,89 @@ function App() {
     const draft = task.result?.draft;
     return isRecord(draft) && typeof draft.id === "string" ? (draft as unknown as CopyDraft) : null;
   }
+
+  function applyCreativeGenerationTask(task: GenerationTask): CreativeAsset[] {
+    const taskAssets = creativeAssetsFromGenerationTask(task);
+    if (taskAssets.length) {
+      setCreatives((current) =>
+        taskAssets.reduce((next, asset) => prependOrReplaceById(next, asset), current),
+      );
+    }
+
+    const taskSlots = creativeSlotsFromGenerationTask(task);
+    if (taskSlots.length) {
+      setCreativeGenerationSlots((current) => {
+        const maxIndex = Math.max(...taskSlots.map((slot) => slot.index));
+        const baseSlots = current.length ? current : initialCreativeSlots(maxIndex);
+        const taskSlotsByIndex = new Map(taskSlots.map((slot) => [slot.index, slot]));
+        const merged = baseSlots.map((slot) => {
+          const taskSlot = taskSlotsByIndex.get(slot.index);
+          return taskSlot ? { ...slot, ...taskSlot } : slot;
+        });
+        const knownIndices = new Set(merged.map((slot) => slot.index));
+        const extras = taskSlots.filter((slot) => !knownIndices.has(slot.index));
+        return [...merged, ...extras].sort((left, right) => left.index - right.index);
+      });
+    }
+    return taskAssets;
+  }
+
+  useEffect(() => {
+    const cached = loadActiveImageGenerationTaskCache();
+    if (!cached || imageTaskResumeRef.current === cached.taskId) return;
+    if (!drafts.some((draft) => draft.id === cached.draftId)) return;
+
+    let cancelled = false;
+    imageTaskResumeRef.current = cached.taskId;
+
+    const resumeImageTask = async () => {
+      setActiveView("creatives");
+      setLoading("creatives");
+      try {
+        const currentTask = await api.getGenerationTask(cached.taskId);
+        if (cancelled) return;
+        if (currentTask.business_id !== cached.draftId) {
+          clearActiveImageGenerationTaskCache(cached.taskId);
+          return;
+        }
+        applyCreativeGenerationTask(currentTask);
+        if (generationTaskIsFinal(currentTask)) {
+          clearActiveImageGenerationTaskCache(currentTask.id);
+          return;
+        }
+        const completedTask = await waitForGenerationTask(
+          currentTask.id,
+          "图片",
+          "image",
+          applyCreativeGenerationTask,
+        );
+        if (cancelled) return;
+        if (completedTask) {
+          applyCreativeGenerationTask(completedTask);
+          if (generationTaskIsFinal(completedTask)) {
+            clearActiveImageGenerationTaskCache(completedTask.id);
+          }
+        }
+      } catch (caught) {
+        if (!cancelled && !isTransientApiError(caught)) {
+          setCaughtError("image", caught, "图片任务恢复失败");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading((current) => (current === "creatives" ? null : current));
+          imageTaskResumeRef.current = null;
+        }
+      }
+    };
+
+    void resumeImageTask();
+    return () => {
+      cancelled = true;
+      if (imageTaskResumeRef.current === cached.taskId) {
+        imageTaskResumeRef.current = null;
+      }
+    };
+  }, [drafts.map((draft) => draft.id).join("|")]);
 
   async function recoverTopicGenerationFromAttempt(
     campaignId: string,
@@ -1932,6 +2025,102 @@ function App() {
     };
   }
 
+  async function handleGenerateCreativesTask() {
+    const draft = approvedDraft ?? selectedDraft;
+    if (!draft) {
+      setError("请先生成并审核通过一条文案。", "image");
+      return;
+    }
+    if (creativeGenerationSlots.some((slot) => slot.status === "loading")) return;
+    const generationPlan = imageGenerationPlanForMode(
+      creativeGenerationMode,
+      videoDurationSeconds,
+      videoAspectRatio,
+      keyframeVariantCount,
+    );
+    setActiveView("creatives");
+    setLoading("creatives");
+    clearError("image");
+    setNotice(null);
+    setCreativeGenerationSlots(initialCreativeSlots(generationPlan.count));
+    setKeyframeRewriteFeedbacks({});
+
+    try {
+      const storyboardContext = isVideoKeyframeMode(creativeGenerationMode)
+        ? currentStoryboardContextForKeyframes()
+        : null;
+      if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
+        setError("请先生成或粘贴视频脚本，再生成关键帧。", "image");
+        markLoadingCreativeSlotsFailed("等待视频脚本。");
+        return;
+      }
+
+      const task = await api.generateCreativesTask(
+        draft.id,
+        generationPlan.count,
+        generationPlan.size,
+        undefined,
+        {
+          modelId: selectedImageModelId,
+          storyboard: storyboardContext?.storyboard,
+          storyboardText: storyboardContext?.storyboardText,
+          generationMode: generationPlan.generationMode,
+          variantCount: generationPlan.variantCount,
+          framesPerVariant: generationPlan.framesPerVariant,
+          videoDurationSeconds: generationPlan.videoDurationSeconds,
+        },
+      );
+      saveActiveImageGenerationTaskCache({ taskId: task.id, draftId: draft.id });
+      applyCreativeGenerationTask(task);
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        "图片",
+        "image",
+        applyCreativeGenerationTask,
+      );
+      if (!completedTask) {
+        setNotice("图片仍在图片队列处理中，请稍后刷新查看。");
+        return;
+      }
+      if (generationTaskIsFinal(completedTask)) {
+        clearActiveImageGenerationTaskCache(completedTask.id);
+      }
+
+      const generatedAssets = applyCreativeGenerationTask(completedTask);
+      if (!generatedAssets.length) {
+        setError(
+          generationTaskSummary(completedTask, "图片") || "图片生成失败，请稍后重试。",
+          "image",
+        );
+        markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
+        return;
+      }
+
+      clearError("image");
+      if (generationPlan.isKeyframeVariant) {
+        const firstGroupIds = firstCompleteKeyframeGroupIds(generatedAssets);
+        if (firstGroupIds.length) setSelectedCreativeIds(firstGroupIds);
+        setNotice(
+          generatedAssets.length === generationPlan.count
+            ? `${generationPlan.variantCount ?? DEFAULT_KEYFRAME_VARIANT_COUNT} 组关键帧方案已生成`
+            : `已生成 ${generatedAssets.length} 张关键帧，失败图片可单独重试`,
+        );
+      } else {
+        setSelectedCreativeIds((current) => {
+          const nextIds = generatedAssets.map((asset) => asset.id);
+          return [...current, ...nextIds.filter((id) => !current.includes(id))];
+        });
+        setNotice(`已通过文案生成 ${generatedAssets.length} 张图片`);
+      }
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message = setCaughtError("image", caught, "图片生成失败");
+      markLoadingCreativeSlotsFailed(message || "图片生成中断，请重试。");
+    } finally {
+      setLoading((current) => (current === "creatives" ? null : current));
+    }
+  }
+
   async function handleGenerateCreatives() {
     const draft = approvedDraft ?? selectedDraft;
     if (!draft) {
@@ -2090,6 +2279,111 @@ function App() {
       }
     } finally {
       setLoading((current) => (current === "creatives" ? null : current));
+    }
+  }
+
+  async function handleRetryCreativeSlotTask(slotIndex: number) {
+    const draft = approvedDraft ?? selectedDraft;
+    if (!draft) {
+      setError("请先生成并审核通过一条文案。", "image");
+      return;
+    }
+    if (loading?.startsWith("creative-retry-")) return;
+    const generationPlan = imageGenerationPlanForMode(
+      creativeGenerationMode,
+      videoDurationSeconds,
+      videoAspectRatio,
+      keyframeVariantCount,
+    );
+    const previousSlotAssetId =
+      creativeGenerationSlots.find((slot) => slot.index === slotIndex)?.asset?.id ??
+      buildCreativeReviewState<CreativeGenerationSlot>(topicCreatives, []).visibleSlots.find(
+        (slot) => slot.index === slotIndex,
+      )?.asset?.id;
+    setLoading(`creative-retry-${slotIndex}`);
+    clearError("image");
+    setNotice(null);
+    updateCreativeGenerationSlot(slotIndex, {
+      status: "loading",
+      asset: undefined,
+      message: undefined,
+    });
+
+    try {
+      const storyboardContext = isVideoKeyframeMode(creativeGenerationMode)
+        ? currentStoryboardContextForKeyframes()
+        : null;
+      if (isVideoKeyframeMode(creativeGenerationMode) && !storyboardContext) {
+        setError("请先生成或粘贴视频脚本，再生成关键帧。", "image");
+        updateCreativeGenerationSlot(slotIndex, {
+          status: "error",
+          message: "等待视频脚本。",
+        });
+        return;
+      }
+
+      const task = await api.generateCreativesTask(
+        draft.id,
+        1,
+        generationPlan.size,
+        slotIndex,
+        {
+          modelId: selectedImageModelId,
+          storyboard: storyboardContext?.storyboard,
+          storyboardText: storyboardContext?.storyboardText,
+          generationMode: generationPlan.generationMode,
+          variantCount: generationPlan.variantCount,
+          framesPerVariant: generationPlan.framesPerVariant,
+          videoDurationSeconds: generationPlan.videoDurationSeconds,
+        },
+      );
+      saveActiveImageGenerationTaskCache({ taskId: task.id, draftId: draft.id });
+      applyCreativeGenerationTask(task);
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        `图片 ${slotIndex}`,
+        "image",
+        applyCreativeGenerationTask,
+      );
+      if (completedTask && generationTaskIsFinal(completedTask)) {
+        clearActiveImageGenerationTaskCache(completedTask.id);
+      }
+      const generatedAssets = completedTask ? applyCreativeGenerationTask(completedTask) : [];
+      const retriedAsset =
+        generatedAssets.find((asset) => creativeImageIndex(asset, 0) === slotIndex) ??
+        generatedAssets[0] ??
+        null;
+      if (!retriedAsset) {
+        updateCreativeGenerationSlot(slotIndex, {
+          status: "error",
+          message: completedTask
+            ? generationTaskSummary(completedTask, `图片 ${slotIndex}`)
+            : "图片仍在图片队列处理中，请稍后刷新查看。",
+        });
+        return;
+      }
+
+      setSelectedCreativeIds((current) => {
+        if (generationPlan.isKeyframeVariant) {
+          const kept = previousSlotAssetId
+            ? current.filter((id) => id !== previousSlotAssetId)
+            : current;
+          return previousSlotAssetId && current.includes(previousSlotAssetId)
+            ? [...kept, retriedAsset.id]
+            : kept;
+        }
+        return current.includes(retriedAsset.id) ? current : [...current, retriedAsset.id];
+      });
+      setNotice(`图片 ${slotIndex} 已重新生成`);
+      clearError("image");
+    } catch (caught) {
+      const message = setCaughtError("image", caught, "图片重试失败");
+      updateCreativeGenerationSlot(slotIndex, {
+        status: "error",
+        message,
+      });
+    } finally {
+      setLoading((current) => (current === `creative-retry-${slotIndex}` ? null : current));
     }
   }
 
@@ -2827,7 +3121,7 @@ function App() {
             onRefresh={() => (selectedJob ? void refreshJob(selectedJob.id) : void refreshBaseData())}
             onGenerateTopics={() => void handleGenerateTopics()}
             onGenerateCopy={() => void handleGenerateCopy()}
-            onGenerateCreatives={() => void handleGenerateCreatives()}
+            onGenerateCreatives={() => void handleGenerateCreativesTask()}
             onGoToView={setActiveView}
             onPrepareFinal={prepareFinalPayload}
             onSaveFinal={() => void handleSaveFinalPayload()}
@@ -2910,8 +3204,8 @@ function App() {
             videoDurationSeconds={videoDurationSeconds}
             onGenerateStoryboard={() => void handleGenerateVideoStoryboard()}
             onRewriteStoryboard={() => void handleRewriteVideoStoryboard()}
-            onGenerate={() => void handleGenerateCreatives()}
-            onRetrySlot={(index) => void handleRetryCreativeSlot(index)}
+            onGenerate={() => void handleGenerateCreativesTask()}
+            onRetrySlot={(index) => void handleRetryCreativeSlotTask(index)}
             onRegenerate={(asset) => void handleRegenerateCreative(asset)}
             onRegenerateGroup={(group) => void handleRegenerateKeyframeGroup(group)}
             onReview={handleReview}
@@ -6791,6 +7085,41 @@ function saveVideoStoryboardDraftCache(campaignId: string, entry: VideoStoryboar
     const key = videoStoryboardDraftCacheKey(campaignId);
     window.localStorage.setItem(key, JSON.stringify(entry));
     window.localStorage.setItem(VIDEO_STORYBOARD_DRAFT_LAST_CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function loadActiveImageGenerationTaskCache(): ActiveImageGenerationTaskCache | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const taskId = typeof parsed.taskId === "string" ? parsed.taskId : "";
+    const draftId = typeof parsed.draftId === "string" ? parsed.draftId : "";
+    return taskId && draftId ? { taskId, draftId } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveImageGenerationTaskCache(entry: ActiveImageGenerationTaskCache) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // Local cache is an optimization only.
+  }
+}
+
+function clearActiveImageGenerationTaskCache(taskId?: string) {
+  if (typeof window === "undefined") return;
+  const cached = loadActiveImageGenerationTaskCache();
+  if (taskId && cached?.taskId !== taskId) return;
+  try {
+    window.sessionStorage.removeItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY);
   } catch {
     // Local cache is an optimization only.
   }

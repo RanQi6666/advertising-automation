@@ -86,27 +86,33 @@ class CreativeService:
         )
         slot_indices = [target_index] if target_index is not None else list(range(1, count + 1))
         briefs = _briefs_for_slots(briefs, slot_indices)
-        image_settings = settings_for_image_model(self.settings, image_model_id)
-        image_provider = get_image_provider(image_settings)
-        generated_images = await image_provider.generate_images(briefs)
-        assets: list[CreativeAsset] = []
-        for brief, image in zip(briefs, generated_images, strict=False):
-            asset = await self._asset_from_generated_image(
-                draft=draft,  # type: ignore[arg-type]
-                brief=brief,
-                image=image,
-                version=1,
-                extra_metadata={
-                    **extra_metadata,
-                    **({"storyboard_context": storyboard_context} if storyboard_context else {}),
-                    **({"creative_strategy": creative_strategy} if creative_strategy else {}),
-                    **_keyframe_metadata(brief.image_index, keyframe_plan),
-                    "image_model": effective_image_model(image_settings),
-                    "image_provider": image_settings.image_provider,
-                },
+        return list(
+            await asyncio.gather(
+                *[
+                    self._generate_asset_from_brief(
+                        draft=draft,  # type: ignore[arg-type]
+                        brief=brief,
+                        version=1,
+                        extra_metadata={
+                            **extra_metadata,
+                            **(
+                                {"storyboard_context": storyboard_context}
+                                if storyboard_context
+                                else {}
+                            ),
+                            **(
+                                {"creative_strategy": creative_strategy}
+                                if creative_strategy
+                                else {}
+                            ),
+                            **_keyframe_metadata(brief.image_index, keyframe_plan),
+                        },
+                        image_model_id=image_model_id,
+                    )
+                    for brief in briefs
+                ]
             )
-            assets.append(asset)
-        return assets
+        )
 
     async def stream_creatives(
         self,
@@ -330,7 +336,9 @@ class CreativeService:
     ) -> CreativeAsset:
         image_settings = settings_for_image_model(self.settings, image_model_id)
         image_provider = get_image_provider(image_settings)
-        generated_images = await image_provider.generate_images([brief])
+        generated_images = await self.text_tasks.run_in_image_queue(
+            lambda: image_provider.generate_images([brief])
+        )
         if not generated_images:
             raise ProviderError("Image provider returned no generated image.")
         return await self._asset_from_generated_image(

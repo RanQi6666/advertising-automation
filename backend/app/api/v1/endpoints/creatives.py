@@ -1,20 +1,25 @@
 import json
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import DbSession
+from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.schemas.creative import (
     CreativeAssetRead,
     CreativeGenerateRequest,
     CreativeRegenerateRequest,
 )
+from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.generation_attempt_service import GenerationAttemptService
+from backend.app.services.generation_task_service import IMAGE_QUEUE_NAME, GenerationTaskService
+from backend.app.services.utils import get_required
 
 router = APIRouter()
 service = CreativeService()
 attempt_service = GenerationAttemptService()
+task_service = GenerationTaskService()
 
 
 @router.post(
@@ -24,6 +29,38 @@ attempt_service = GenerationAttemptService()
 )
 async def generate_creatives(payload: CreativeGenerateRequest, session: DbSession):
     return await service.generate_creatives(session, payload)
+
+
+@router.post(
+    "/creatives/generate/task",
+    response_model=GenerationTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_generate_creatives(
+    payload: CreativeGenerateRequest,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    draft = await get_required(session, CopyDraft, payload.draft_id)
+    task = await task_service.create_task(
+        session,
+        queue_name=IMAGE_QUEUE_NAME,
+        task_type="image_generate",
+        business_type="copy_draft",
+        business_id=payload.draft_id,
+        campaign_id=draft.campaign_id,
+        payload=payload.model_dump(mode="json"),
+        metadata={
+            "size": payload.size,
+            "target_index": payload.target_index,
+            "generation_mode": payload.generation_mode,
+            "variant_count": payload.variant_count,
+            "frames_per_variant": payload.frames_per_variant,
+            "video_duration_seconds": payload.video_duration_seconds,
+        },
+    )
+    background_tasks.add_task(task_service.process_task, task.id)
+    return GenerationTaskRead.from_model(task)
 
 
 @router.post("/creatives/generate/stream")

@@ -5,10 +5,52 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
+from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
+from backend.app.schemas.ai import GeneratedImage, ImageBrief
+from backend.app.services import creative_service
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.generation_task_service import TEXT_QUEUE_NAME, GenerationTaskService
+
+
+class FakeImageTaskLLMProvider:
+    async def generate_image_briefs(
+        self,
+        draft: CopyDraft,
+        count: int,
+        size: str,
+        feedback: str | None = None,
+        source_asset: CreativeAsset | None = None,
+        storyboard_context: dict | None = None,
+    ) -> list[ImageBrief]:
+        return [
+            ImageBrief(
+                image_index=index + 1,
+                title=f"Image {index + 1}",
+                short_text=f"Text {index + 1}",
+                visual_direction=f"Direction {index + 1}",
+                size=size,
+            )
+            for index in range(count)
+        ]
+
+
+class PartiallyFailingImageProvider:
+    async def generate_images(self, briefs: list[ImageBrief]) -> list[GeneratedImage]:
+        brief = briefs[0]
+        if brief.image_index == 2:
+            raise RuntimeError("provider failed for slot 2")
+        return [
+            GeneratedImage(
+                prompt=f"{brief.title}: {brief.visual_direction}",
+                storage_key=f"fake://image-{brief.image_index}",
+                alt_text=brief.short_text,
+                size=brief.size,
+                metadata={"provider": "fake", "image_index": brief.image_index},
+            )
+        ]
 
 
 @pytest.mark.asyncio
@@ -76,3 +118,84 @@ async def test_run_in_text_queue_does_not_require_database_session(monkeypatch) 
     result = await GenerationTaskService().run_in_text_queue(operation)
 
     assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_generation_task_processes_image_generation_with_partial_success(
+    monkeypatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(
+        creative_service,
+        "get_llm_provider",
+        lambda settings: FakeImageTaskLLMProvider(),
+    )
+    monkeypatch.setattr(
+        creative_service,
+        "get_image_provider",
+        lambda settings: PartiallyFailingImageProvider(),
+    )
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-image-queue-1",
+            name="Image Queue Campaign",
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-image-queue-1",
+            campaign_id=campaign.id,
+            title="Queue topic",
+            angle="Queue angle",
+            source_data={},
+        )
+        draft = CopyDraft(
+            id="draft-image-queue-1",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name="image_queue",
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id=draft.id,
+            campaign_id=campaign.id,
+            payload={"draft_id": draft.id, "count": 3, "size": "1:1"},
+        )
+
+    await GenerationTaskService().process_task(task.id)
+
+    async with session_factory() as session:
+        stored = await session.get(GenerationTask, task.id)
+        assets = list((await session.execute(select(CreativeAsset))).scalars().all())
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.queue_name == "image_queue"
+    assert stored.task_type == "image_generate"
+    assert stored.result_json is not None
+    assert stored.result_json["total_count"] == 3
+    assert stored.result_json["generated_count"] == 2
+    assert stored.result_json["failed_count"] == 1
+    assert [(slot["index"], slot["status"]) for slot in stored.result_json["slots"]] == [
+        (1, "done"),
+        (2, "error"),
+        (3, "done"),
+    ]
+    assert stored.result_json["slots"][1]["message"] == "provider failed for slot 2"
+    assert len(stored.result_json["assets"]) == 2
+    assert {asset.metadata_json["image_index"] for asset in assets} == {1, 3}
+
+    await engine.dispose()

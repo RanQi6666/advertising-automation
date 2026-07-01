@@ -483,6 +483,34 @@ export const api = {
       ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
       ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
     }),
+  generateCreativesTask: (
+    draftId: string,
+    count = 3,
+    size = "1:1",
+    targetIndex?: number,
+    options: {
+      modelId?: string | null;
+      storyboard?: Record<string, unknown>[];
+      storyboardText?: string | null;
+      generationMode?: "standard" | "video_keyframe_variants";
+      variantCount?: number;
+      framesPerVariant?: number;
+      videoDurationSeconds?: number | null;
+    } = {},
+  ) =>
+    post<GenerationTask>("/creatives/generate/task", {
+      draft_id: draftId,
+      count,
+      size,
+      ...(targetIndex ? { target_index: targetIndex } : {}),
+      ...(options.modelId ? { model_id: options.modelId } : {}),
+      ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
+      ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
+      ...(options.generationMode ? { generation_mode: options.generationMode } : {}),
+      ...(options.variantCount ? { variant_count: options.variantCount } : {}),
+      ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
+      ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
+    }),
   generateCreativesStream: (
     draftId: string,
     count = 3,
