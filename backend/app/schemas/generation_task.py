@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.schemas.common import TimestampedRead
+from backend.app.services.generation_task_service import GenerationTaskListResult
 
 
 class GenerationTaskRead(TimestampedRead):
@@ -52,4 +53,22 @@ class GenerationTaskRead(TimestampedRead):
             finished_at=task.finished_at,
             duration_ms=task.duration_ms,
             metadata=task.metadata_json or {},
+        )
+
+
+class GenerationTaskListResponse(BaseModel):
+    items: list[GenerationTaskRead]
+    total: int
+    limit: int
+    offset: int
+    summary: dict = Field(default_factory=dict)
+
+    @classmethod
+    def from_result(cls, result: GenerationTaskListResult) -> "GenerationTaskListResponse":
+        return cls(
+            items=[GenerationTaskRead.from_model(task) for task in result.items],
+            total=result.total,
+            limit=result.limit,
+            offset=result.offset,
+            summary=result.summary,
         )

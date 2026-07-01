@@ -3,6 +3,7 @@ import type {
 } from "./generationAttempts";
 import type {
   GenerationTask,
+  GenerationTaskListResponse,
 } from "./generationTasks";
 import type {
   AdGenerationJob,
@@ -454,6 +455,25 @@ export const api = {
       ...(modelId ? { model_id: modelId } : {}),
     }),
   listDrafts: (campaignId: string) => request<CopyDraft[]>(`/campaigns/${campaignId}/drafts?limit=20`),
+  listGenerationTasks: (
+    filters: {
+      queueName?: string;
+      status?: string;
+      taskType?: string;
+      businessId?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (filters.queueName) params.set("queue_name", filters.queueName);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.taskType) params.set("task_type", filters.taskType);
+    if (filters.businessId) params.set("business_id", filters.businessId);
+    params.set("limit", String(filters.limit ?? 100));
+    params.set("offset", String(filters.offset ?? 0));
+    return request<GenerationTaskListResponse>(`/generation-tasks?${params.toString()}`);
+  },
   getGenerationTask: (taskId: string) => request<GenerationTask>(`/generation-tasks/${taskId}`),
   retryGenerationTask: (taskId: string) => post<GenerationTask>(`/generation-tasks/${taskId}/retry`),
 

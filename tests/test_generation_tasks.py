@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import get_settings
-from backend.app.db.base import Base
+from backend.app.db.base import Base, utcnow
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -15,6 +15,8 @@ from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.services import creative_service, video_service
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.generation_task_service import (
+    CALLBACK_QUEUE_NAME,
+    IMAGE_QUEUE_NAME,
     TEXT_QUEUE_NAME,
     VIDEO_QUEUE_NAME,
     GenerationTaskService,
@@ -156,6 +158,107 @@ async def test_run_in_video_queue_does_not_require_database_session(monkeypatch)
     result = await GenerationTaskService().run_in_video_queue(operation)
 
     assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_generation_task_service_lists_tasks_with_filters_and_summary() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-task-monitor-1",
+            name="Task Monitor Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        service = GenerationTaskService()
+        queued_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id},
+        )
+        failed_image_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-task-monitor-1",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-task-monitor-1"},
+            max_attempts=3,
+        )
+        running_video_task = await service.create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id="video-task-monitor-1",
+            campaign_id=campaign.id,
+            payload={"video_id": "video-task-monitor-1"},
+        )
+        failed_callback_task = await service.create_task(
+            session,
+            queue_name=CALLBACK_QUEUE_NAME,
+            task_type="ad_generation_callback",
+            business_type="ad_generation_job",
+            business_id="job-task-monitor-1",
+            payload={"job_id": "job-task-monitor-1"},
+            max_attempts=1,
+        )
+
+        failed_image_task.status = "failed"
+        failed_image_task.error_code = "provider_timeout"
+        failed_image_task.error_message = "provider timeout"
+        failed_image_task.retryable = True
+        failed_image_task.attempt_count = 1
+        failed_image_task.finished_at = utcnow()
+        running_video_task.status = "running"
+        running_video_task.attempt_count = 1
+        running_video_task.started_at = utcnow()
+        failed_callback_task.status = "failed"
+        failed_callback_task.error_code = "unknown_provider_error"
+        failed_callback_task.error_message = "Callback endpoint returned HTTP 500."
+        failed_callback_task.retryable = False
+        failed_callback_task.attempt_count = 1
+        failed_callback_task.finished_at = utcnow()
+        await session.commit()
+
+        listing = await service.list_tasks(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            status="failed",
+            limit=20,
+        )
+
+    assert [task.id for task in listing.items] == [failed_image_task.id]
+    assert listing.total == 1
+    assert listing.limit == 20
+    assert listing.offset == 0
+    assert listing.summary["total"] == 4
+    assert listing.summary["by_status"] == {
+        "failed": 2,
+        "queued": 1,
+        "running": 1,
+    }
+    assert listing.summary["by_queue"][TEXT_QUEUE_NAME] == 1
+    assert listing.summary["by_queue"][IMAGE_QUEUE_NAME] == 1
+    assert listing.summary["by_queue"][VIDEO_QUEUE_NAME] == 1
+    assert listing.summary["by_queue"][CALLBACK_QUEUE_NAME] == 1
+    assert listing.summary["retryable_failed_count"] == 1
+    assert listing.summary["active_count"] == 2
+    assert queued_task.status == "queued"
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

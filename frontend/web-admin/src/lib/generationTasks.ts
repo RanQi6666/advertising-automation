@@ -34,6 +34,82 @@ export type GenerationTask = {
   updated_at: string;
 };
 
+export type GenerationTaskListResponse = {
+  items: GenerationTask[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary: {
+    total?: number;
+    by_status?: Record<string, number>;
+    by_queue?: Record<string, number>;
+    retryable_failed_count?: number;
+    active_count?: number;
+  };
+};
+
+export type GenerationTaskMonitorStats = {
+  activeCount: number;
+  failedCount: number;
+  retryableFailedCount: number;
+  succeededCount: number;
+};
+
+const generationTaskQueueLabels: Record<string, string> = {
+  text_queue: "文本队列",
+  image_queue: "图片队列",
+  video_queue: "视频队列",
+  callback_queue: "回调队列",
+};
+
+const generationTaskStatusLabels: Record<string, string> = {
+  queued: "等待中",
+  running: "运行中",
+  succeeded: "已完成",
+  failed: "失败",
+};
+
+const generationTaskTypeLabels: Record<string, string> = {
+  topic_generate: "选题生成",
+  copy_generate: "文案生成",
+  copy_revise: "文案改写",
+  image_generate: "图片生成",
+  video_generate: "视频生成",
+  ad_generation_callback: "回调外部系统",
+};
+
+export function generationTaskQueueLabel(queueName: string): string {
+  return generationTaskQueueLabels[queueName] ?? queueName;
+}
+
+export function generationTaskStatusLabel(status: string): string {
+  return generationTaskStatusLabels[status] ?? status;
+}
+
+export function generationTaskTypeLabel(taskType: string): string {
+  return generationTaskTypeLabels[taskType] ?? taskType;
+}
+
+export function generationTaskMonitorStats(tasks: GenerationTask[]): GenerationTaskMonitorStats {
+  return tasks.reduce<GenerationTaskMonitorStats>(
+    (stats, task) => {
+      if (task.status === "queued" || task.status === "running") stats.activeCount += 1;
+      if (task.status === "failed") {
+        stats.failedCount += 1;
+        if (task.retryable) stats.retryableFailedCount += 1;
+      }
+      if (task.status === "succeeded") stats.succeededCount += 1;
+      return stats;
+    },
+    {
+      activeCount: 0,
+      failedCount: 0,
+      retryableFailedCount: 0,
+      succeededCount: 0,
+    },
+  );
+}
+
 export function generationTaskIsFinal(task: GenerationTask): boolean {
   return task.status === "succeeded" || task.status === "failed";
 }

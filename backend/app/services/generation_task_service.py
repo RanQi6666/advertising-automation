@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeVar
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
@@ -44,6 +46,15 @@ _callback_queue_semaphore: asyncio.Semaphore | None = None
 _callback_queue_limit: int | None = None
 
 
+@dataclass(frozen=True)
+class GenerationTaskListResult:
+    items: list[GenerationTask]
+    total: int
+    limit: int
+    offset: int
+    summary: dict[str, Any]
+
+
 class GenerationTaskService:
     async def create_task(
         self,
@@ -81,6 +92,99 @@ class GenerationTaskService:
 
     async def get_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
         return await get_required(session, GenerationTask, task_id)  # type: ignore[return-value]
+
+    async def list_tasks(
+        self,
+        session: AsyncSession,
+        *,
+        queue_name: str | None = None,
+        status: str | None = None,
+        task_type: str | None = None,
+        business_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> GenerationTaskListResult:
+        conditions = []
+        if queue_name:
+            conditions.append(GenerationTask.queue_name == queue_name)
+        if status:
+            conditions.append(GenerationTask.status == status)
+        if task_type:
+            conditions.append(GenerationTask.task_type == task_type)
+        if business_id:
+            conditions.append(GenerationTask.business_id == business_id)
+
+        total = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(GenerationTask).where(*conditions)
+                )
+            ).scalar_one()
+            or 0
+        )
+        items = list(
+            (
+                await session.execute(
+                    select(GenerationTask)
+                    .where(*conditions)
+                    .order_by(GenerationTask.queued_at.desc(), GenerationTask.created_at.desc())
+                    .offset(max(offset, 0))
+                    .limit(max(min(limit, 200), 1))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return GenerationTaskListResult(
+            items=items,
+            total=total,
+            limit=max(min(limit, 200), 1),
+            offset=max(offset, 0),
+            summary=await self.task_summary(session),
+        )
+
+    async def task_summary(self, session: AsyncSession) -> dict[str, Any]:
+        status_rows = (
+            await session.execute(
+                select(GenerationTask.status, func.count()).group_by(GenerationTask.status)
+            )
+        ).all()
+        queue_rows = (
+            await session.execute(
+                select(GenerationTask.queue_name, func.count()).group_by(GenerationTask.queue_name)
+            )
+        ).all()
+        total = int(
+            (await session.execute(select(func.count()).select_from(GenerationTask))).scalar_one()
+            or 0
+        )
+        retryable_failed_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(GenerationTask)
+                    .where(GenerationTask.status == "failed", GenerationTask.retryable.is_(True))
+                )
+            ).scalar_one()
+            or 0
+        )
+        active_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(GenerationTask)
+                    .where(GenerationTask.status.in_(("queued", "running")))
+                )
+            ).scalar_one()
+            or 0
+        )
+        return {
+            "total": total,
+            "by_status": {str(status): int(count) for status, count in status_rows},
+            "by_queue": {str(queue_name): int(count) for queue_name, count in queue_rows},
+            "retryable_failed_count": retryable_failed_count,
+            "active_count": active_count,
+        }
 
     async def retry_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
         task = await self.get_task(session, task_id)

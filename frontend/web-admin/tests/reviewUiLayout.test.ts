@@ -305,3 +305,34 @@ test("operator id and optimistic updated_at checks are sent through the api laye
   assert.match(appSource, /api\.updateAdGenerationReview\(selectedJob\.id, parsed, "", selectedJob\.updated_at\)/);
   assert.match(appSource, /api\.confirmAdGenerationReview\(selectedJob\.id, parsed, "", selectedJob\.updated_at\)/);
 });
+
+test("task monitor view lists generation tasks and exposes retry", () => {
+  assert.match(appSource, /\|\s*"tasks"/);
+  assert.match(appSource, /\{\s*key:\s*"tasks"/);
+  assert.match(appSource, /function TaskMonitorView\(/);
+  assert.match(appSource, /className="task-monitor-layout"/);
+  assert.match(appSource, /generationTaskMonitorStats/);
+  assert.match(appSource, /api\.listGenerationTasks/);
+  assert.match(appSource, /api\.retryGenerationTask\(taskId\)/);
+  assert.match(apiSource, /listGenerationTasks:/);
+  assert.match(apiSource, /\/generation-tasks\?/);
+  assert.match(stylesSource, /\.task-monitor-layout\s*\{/);
+  assert.match(stylesSource, /\.task-table\s*\{/);
+});
+
+test("task monitor rows use readable work order context before technical ids", () => {
+  const taskMonitorSource = componentSource("TaskMonitorView", "WorkflowProgress");
+
+  assert.match(taskMonitorSource, /jobs:\s*AdGenerationJob\[\]/);
+  assert.match(taskMonitorSource, /campaigns:\s*Campaign\[\]/);
+  assert.match(taskMonitorSource, /topics:\s*Topic\[\]/);
+  assert.match(taskMonitorSource, /drafts:\s*CopyDraft\[\]/);
+  assert.match(taskMonitorSource, /videos:\s*VideoAsset\[\]/);
+  assert.match(taskMonitorSource, /taskMonitorDisplayContext\(task,/);
+  assert.match(taskMonitorSource, /className="task-work-order"/);
+  assert.match(taskMonitorSource, /display\.workOrderLabel/);
+  assert.match(taskMonitorSource, /display\.taskTypeLabel/);
+  assert.match(taskMonitorSource, /display\.businessLabel/);
+  assert.match(taskMonitorSource, /\u4efb\u52a1\u53f7 \{shortId\(task\.id\)\}/);
+  assert.doesNotMatch(taskMonitorSource, /<span className="task-id">\{shortId\(task\.id\)\}<\/span>/);
+});

@@ -54,9 +54,14 @@ import {
   creativeSlotsFromGenerationTask,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
+  generationTaskMonitorStats,
+  generationTaskQueueLabel,
   generationTaskSummary,
+  generationTaskStatusLabel,
+  generationTaskTypeLabel,
   videoAssetFromGenerationTask,
   type GenerationTask,
+  type GenerationTaskListResponse,
 } from "./lib/generationTasks";
 import {
   adGenerationJobNumber,
@@ -104,6 +109,7 @@ type ViewKey =
   | "copy"
   | "creatives"
   | "videos"
+  | "tasks"
   | "performance";
 type ErrorScope =
   | "global"
@@ -113,6 +119,7 @@ type ErrorScope =
   | "copy"
   | "image"
   | "video"
+  | "tasks"
   | "performance"
   | "final";
 type ReviewEntityType = "topic" | "copy_draft" | "creative_asset" | "video_asset";
@@ -239,6 +246,7 @@ const navItems: Array<{ key: ViewKey; label: string; icon: typeof BarChart3 }> =
   { key: "copy", label: "文案", icon: FileText },
   { key: "creatives", label: "图片", icon: Image },
   { key: "videos", label: "视频", icon: Film },
+  { key: "tasks", label: "任务监控", icon: Clock3 },
   { key: "performance", label: "投放分析", icon: BarChart3 },
 ];
 
@@ -356,6 +364,11 @@ function App() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(() => adGenerationJobIdFromUrl());
   const [performanceAnalyses, setPerformanceAnalyses] = useState<AdPerformanceAnalysis[]>([]);
   const [selectedPerformanceAnalysisId, setSelectedPerformanceAnalysisId] = useState<string | null>(null);
+  const [generationTaskList, setGenerationTaskList] = useState<GenerationTask[]>([]);
+  const [generationTaskTotal, setGenerationTaskTotal] = useState(0);
+  const [generationTaskListSummary, setGenerationTaskListSummary] = useState<GenerationTaskListResponse["summary"]>({});
+  const [generationTaskQueueFilter, setGenerationTaskQueueFilter] = useState("");
+  const [generationTaskStatusFilter, setGenerationTaskStatusFilter] = useState("");
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -532,6 +545,11 @@ function App() {
       void claimAndSelectJob(reviewJobId, "workflow");
     }
   }, [currentOperatorId]);
+
+  useEffect(() => {
+    if (!currentOperatorId || activeView !== "tasks") return;
+    void refreshGenerationTasks();
+  }, [activeView, currentOperatorId, generationTaskQueueFilter, generationTaskStatusFilter]);
 
   useEffect(() => {
     setDeliveryExtractionCache(loadDeliveryExtractionCache(rawWorkOrder));
@@ -1286,16 +1304,24 @@ function App() {
   async function refreshBaseData() {
     if (!currentOperatorId) return;
     await run("refresh", async () => {
-      const [nextJobs, nextCampaigns, nextPerformanceAnalyses, nextModelOptions] = await Promise.all([
+      const [
+        nextJobs,
+        nextCampaigns,
+        nextPerformanceAnalyses,
+        nextModelOptions,
+        nextGenerationTasks,
+      ] = await Promise.all([
         api.listAdGenerationJobs(100),
         api.listCampaigns(100),
         api.listAdPerformanceAnalyses(100),
         api.getModelOptions(),
+        api.listGenerationTasks(generationTaskListFilters()),
       ]);
       setJobs(nextJobs);
       setCampaigns(nextCampaigns);
       setPerformanceAnalyses(nextPerformanceAnalyses);
       applyModelOptions(nextModelOptions);
+      applyGenerationTaskList(nextGenerationTasks);
       setSelectedJobId((current) =>
         current && nextJobs.some((item) => item.id === current) ? current : nextJobs[0]?.id ?? null,
       );
@@ -1313,6 +1339,40 @@ function App() {
         clearCampaignWorkflowState();
       }
     });
+  }
+
+  function generationTaskListFilters() {
+    return {
+      queueName: generationTaskQueueFilter || undefined,
+      status: generationTaskStatusFilter || undefined,
+      limit: 100,
+    };
+  }
+
+  function applyGenerationTaskList(response: GenerationTaskListResponse) {
+    setGenerationTaskList(response.items);
+    setGenerationTaskTotal(response.total);
+    setGenerationTaskListSummary(response.summary ?? {});
+  }
+
+  async function refreshGenerationTasks(): Promise<boolean> {
+    if (!currentOperatorId) return false;
+    const response = await run("generation-task-list", () =>
+      api.listGenerationTasks(generationTaskListFilters()),
+    );
+    if (!response) return false;
+    applyGenerationTaskList(response);
+    return true;
+  }
+
+  async function handleRetryGenerationTask(taskId: string) {
+    const retriedTask = await run(`generation-task-retry-${taskId}`, () =>
+      api.retryGenerationTask(taskId),
+    );
+    if (!retriedTask) return;
+    setGenerationTaskList((current) => upsertById(current, retriedTask));
+    const refreshed = await refreshGenerationTasks();
+    if (refreshed) setNotice("任务已重新入队");
   }
 
   function applyModelOptions(nextOptions: ModelOptions) {
@@ -3196,6 +3256,26 @@ function App() {
             onCreateAnalysis={(payload) => handleCreatePerformanceAnalysis(payload)}
             onDeleteAnalysis={(analysisId) => void handleDeletePerformanceAnalysis(analysisId)}
             onRefresh={() => void refreshPerformanceAnalyses()}
+            loading={loading}
+          />
+        )}
+
+        {activeView === "tasks" && (
+          <TaskMonitorView
+            tasks={generationTaskList}
+            total={generationTaskTotal}
+            summary={generationTaskListSummary}
+            jobs={jobs}
+            campaigns={campaigns}
+            topics={topics}
+            drafts={drafts}
+            videos={videos}
+            queueFilter={generationTaskQueueFilter}
+            setQueueFilter={setGenerationTaskQueueFilter}
+            statusFilter={generationTaskStatusFilter}
+            setStatusFilter={setGenerationTaskStatusFilter}
+            onRefresh={() => void refreshGenerationTasks()}
+            onRetry={(taskId) => void handleRetryGenerationTask(taskId)}
             loading={loading}
           />
         )}
@@ -5827,6 +5907,344 @@ function Metric({
   );
 }
 
+function TaskMonitorView({
+  tasks,
+  total,
+  summary,
+  jobs,
+  campaigns,
+  topics,
+  drafts,
+  videos,
+  queueFilter,
+  setQueueFilter,
+  statusFilter,
+  setStatusFilter,
+  onRefresh,
+  onRetry,
+  loading,
+}: {
+  tasks: GenerationTask[];
+  total: number;
+  summary: GenerationTaskListResponse["summary"];
+  jobs: AdGenerationJob[];
+  campaigns: Campaign[];
+  topics: Topic[];
+  drafts: CopyDraft[];
+  videos: VideoAsset[];
+  queueFilter: string;
+  setQueueFilter: (value: string) => void;
+  statusFilter: string;
+  setStatusFilter: (value: string) => void;
+  onRefresh: () => void;
+  onRetry: (taskId: string) => void;
+  loading: string | null;
+}) {
+  const stats = generationTaskMonitorStats(tasks);
+  const byStatus = summary.by_status ?? {};
+  const byQueue = summary.by_queue ?? {};
+  const activeCount = summary.active_count ?? stats.activeCount;
+  const failedCount = byStatus.failed ?? stats.failedCount;
+  const retryableFailedCount = summary.retryable_failed_count ?? stats.retryableFailedCount;
+  const succeededCount = byStatus.succeeded ?? stats.succeededCount;
+  const isRefreshing = loading === "generation-task-list";
+  const queueOptions = ["text_queue", "image_queue", "video_queue", "callback_queue"];
+  const statusOptions = ["queued", "running", "failed", "succeeded"];
+
+  return (
+    <section className="task-monitor-layout">
+      <section className="metrics-grid task-metric-grid">
+        <Metric label="处理中" value={activeCount} accent="blue" hint="等待和运行任务" icon={Clock3} />
+        <Metric label="失败" value={failedCount} accent="rose" hint="需要排查的任务" icon={X} />
+        <Metric label="可重试" value={retryableFailedCount} accent="amber" hint="可重新入队" icon={RefreshCw} />
+        <Metric label="已完成" value={succeededCount} accent="violet" hint="生成成功任务" icon={Check} />
+      </section>
+
+      <section className="panel task-monitor-panel">
+        <div className="panel-header task-monitor-header">
+          <div>
+            <h2>生成任务</h2>
+            <span className="panel-note">
+              当前 {total} 条 / 全部 {summary.total ?? total} 条
+            </span>
+          </div>
+          <div className="task-monitor-actions">
+            <select
+              className="select task-filter-select"
+              value={queueFilter}
+              onChange={(event) => setQueueFilter(event.target.value)}
+              aria-label="队列筛选"
+            >
+              <option value="">全部队列</option>
+              {queueOptions.map((queueName) => (
+                <option key={queueName} value={queueName}>
+                  {generationTaskQueueLabel(queueName)}
+                </option>
+              ))}
+            </select>
+            <select
+              className="select task-filter-select"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              aria-label="状态筛选"
+            >
+              <option value="">全部状态</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>
+                  {generationTaskStatusLabel(status)}
+                </option>
+              ))}
+            </select>
+            <button className="icon-button" onClick={onRefresh} title="刷新任务" disabled={isRefreshing}>
+              {isRefreshing ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
+            </button>
+          </div>
+        </div>
+
+        <div className="task-queue-strip">
+          {queueOptions.map((queueName) => (
+            <div className="task-queue-chip" key={queueName}>
+              <span>{generationTaskQueueLabel(queueName)}</span>
+              <strong>{byQueue[queueName] ?? 0}</strong>
+            </div>
+          ))}
+        </div>
+
+        <div className="task-table-wrap">
+          <table className="task-table">
+            <thead>
+              <tr>
+                <th>所属工单</th>
+                <th>任务内容</th>
+                <th>关联内容</th>
+                <th>状态</th>
+                <th>错误</th>
+                <th>次数</th>
+                <th>时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map((task) => {
+                const retryKey = `generation-task-retry-${task.id}`;
+                const retrying = loading === retryKey;
+                const canRetry = task.status === "failed" && task.retryable;
+                const display = taskMonitorDisplayContext(task, {
+                  jobs,
+                  campaigns,
+                  topics,
+                  drafts,
+                  videos,
+                });
+                return (
+                  <tr key={task.id}>
+                    <td>
+                      <strong className="task-work-order">{display.workOrderLabel}</strong>
+                      <span className="task-subline">{display.workOrderTitle}</span>
+                      <span className="task-subline">
+                        {generationTaskQueueLabel(task.queue_name)} / 任务号 {shortId(task.id)}
+                      </span>
+                    </td>
+                    <td>
+                      <strong className="task-type">{display.taskTypeLabel}</strong>
+                      <span className="task-subline">{task.task_type}</span>
+                    </td>
+                    <td>
+                      <span className="task-business">{display.businessLabel}</span>
+                      <span className="task-subline">{display.businessDetail}</span>
+                    </td>
+                    <td>
+                      <span className={`status ${task.status}`}>{generationTaskStatusLabel(task.status)}</span>
+                    </td>
+                    <td>
+                      <span className="task-error-text">{task.error_message || "-"}</span>
+                    </td>
+                    <td>
+                      <span className="task-attempts">
+                        {task.attempt_count}/{task.max_attempts}
+                      </span>
+                    </td>
+                    <td>
+                      <span>{formatDate(task.queued_at)}</span>
+                      <span className="task-subline">{formatTaskDurationMs(task.duration_ms)}</span>
+                    </td>
+                    <td>
+                      <button
+                        className="secondary-button task-retry-button"
+                        onClick={() => onRetry(task.id)}
+                        disabled={!canRetry || Boolean(loading)}
+                      >
+                        {retrying ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                        <span>{canRetry ? "重试" : "不可重试"}</span>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!tasks.length && (
+                <tr>
+                  <td colSpan={8}>
+                    <div className="task-empty">暂无匹配任务</div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+type TaskMonitorLookupData = {
+  jobs: AdGenerationJob[];
+  campaigns: Campaign[];
+  topics: Topic[];
+  drafts: CopyDraft[];
+  videos: VideoAsset[];
+};
+
+type TaskMonitorDisplayContext = {
+  workOrderLabel: string;
+  workOrderTitle: string;
+  taskTypeLabel: string;
+  businessLabel: string;
+  businessDetail: string;
+};
+
+function taskMonitorDisplayContext(
+  task: GenerationTask,
+  lookups: TaskMonitorLookupData,
+): TaskMonitorDisplayContext {
+  const job = taskMonitorJobForTask(task, lookups);
+  const campaign = taskMonitorCampaignForTask(task, lookups);
+  const business = taskMonitorBusinessContext(task, lookups);
+  return {
+    workOrderLabel: job ? `工单${adGenerationJobNumber(job, lookups.jobs)}` : "未关联工单",
+    workOrderTitle: job ? adGenerationJobTitle(job) : campaign?.name ?? "未匹配到工单",
+    taskTypeLabel: generationTaskTypeLabel(task.task_type),
+    businessLabel: business.label,
+    businessDetail: business.detail,
+  };
+}
+
+function taskMonitorJobForTask(
+  task: GenerationTask,
+  lookups: TaskMonitorLookupData,
+): AdGenerationJob | null {
+  if (task.business_type === "ad_generation_job") {
+    return lookups.jobs.find((job) => job.id === task.business_id) ?? null;
+  }
+  const campaignId = taskMonitorCampaignId(task, lookups);
+  if (!campaignId) return null;
+  return lookups.jobs.find((job) => adGenerationCampaignId(job) === campaignId) ?? null;
+}
+
+function taskMonitorCampaignForTask(
+  task: GenerationTask,
+  lookups: TaskMonitorLookupData,
+): Campaign | null {
+  const campaignId = taskMonitorCampaignId(task, lookups);
+  if (!campaignId) return null;
+  return lookups.campaigns.find((campaign) => campaign.id === campaignId) ?? null;
+}
+
+function taskMonitorCampaignId(task: GenerationTask, lookups: TaskMonitorLookupData): string | null {
+  if (task.campaign_id) return task.campaign_id;
+
+  const payloadCampaignId = readText(task.payload.campaign_id);
+  if (payloadCampaignId) return payloadCampaignId;
+
+  const metadataCampaignId = readText(task.metadata.campaign_id);
+  if (metadataCampaignId) return metadataCampaignId;
+
+  if (task.business_type === "campaign" && task.business_id) return task.business_id;
+
+  if (task.business_type === "topic") {
+    return lookups.topics.find((topic) => topic.id === task.business_id)?.campaign_id ?? null;
+  }
+
+  if (task.business_type === "copy_draft") {
+    return lookups.drafts.find((draft) => draft.id === task.business_id)?.campaign_id ?? null;
+  }
+
+  if (task.business_type === "video_asset") {
+    return lookups.videos.find((video) => video.id === task.business_id)?.campaign_id ?? null;
+  }
+
+  if (task.business_type === "ad_generation_job") {
+    const job = lookups.jobs.find((item) => item.id === task.business_id) ?? null;
+    return job ? adGenerationCampaignId(job) : null;
+  }
+
+  return null;
+}
+
+function taskMonitorBusinessContext(
+  task: GenerationTask,
+  lookups: TaskMonitorLookupData,
+): { label: string; detail: string } {
+  const fallbackId = task.business_id ? shortId(task.business_id) : "-";
+  const campaign = taskMonitorCampaignForTask(task, lookups);
+
+  if (task.business_type === "campaign") {
+    const matchedCampaign = lookups.campaigns.find((item) => item.id === task.business_id) ?? campaign;
+    return {
+      label: `项目：${matchedCampaign?.name ?? "未加载项目"}`,
+      detail: `项目号 ${fallbackId}`,
+    };
+  }
+
+  if (task.business_type === "topic") {
+    const topic = lookups.topics.find((item) => item.id === task.business_id) ?? null;
+    return {
+      label: `选题：${topic?.title ?? "未加载选题"}`,
+      detail: campaign ? `项目：${campaign.name}` : `选题号 ${fallbackId}`,
+    };
+  }
+
+  if (task.business_type === "copy_draft") {
+    const draft = lookups.drafts.find((item) => item.id === task.business_id) ?? null;
+    const topic = draft ? lookups.topics.find((item) => item.id === draft.topic_id) ?? null : null;
+    return {
+      label: `文案：${draft ? copySnippet(draft) : "未加载文案"}`,
+      detail: topic ? `选题：${topic.title}` : campaign ? `项目：${campaign.name}` : `文案号 ${fallbackId}`,
+    };
+  }
+
+  if (task.business_type === "video_asset") {
+    const video = lookups.videos.find((item) => item.id === task.business_id) ?? null;
+    return {
+      label: video ? `视频：${video.aspect_ratio} / ${statusLabel(video.status)}` : "视频：未加载视频",
+      detail: campaign ? `项目：${campaign.name}` : `视频号 ${fallbackId}`,
+    };
+  }
+
+  if (task.business_type === "ad_generation_job") {
+    const job = lookups.jobs.find((item) => item.id === task.business_id) ?? null;
+    return {
+      label: job ? `工单：工单${adGenerationJobNumber(job, lookups.jobs)}` : "工单：未加载工单",
+      detail: job ? adGenerationJobTitle(job) : `工单号 ${fallbackId}`,
+    };
+  }
+
+  return {
+    label: `${taskMonitorBusinessTypeLabel(task.business_type)}：${fallbackId}`,
+    detail: campaign ? `项目：${campaign.name}` : "未匹配到业务内容",
+  };
+}
+
+function taskMonitorBusinessTypeLabel(businessType: string): string {
+  const labels: Record<string, string> = {
+    campaign: "项目",
+    topic: "选题",
+    copy_draft: "文案",
+    video_asset: "视频",
+    ad_generation_job: "工单",
+  };
+  return labels[businessType] ?? businessType;
+}
+
 function WorkflowProgress({ summary }: { summary: WorkflowSummary }) {
   const steps = workflowSummarySteps(summary);
   return (
@@ -7850,6 +8268,7 @@ function isAuthApiError(caught: unknown): boolean {
 }
 
 function errorScopeForOperationKey(key: string): ErrorScope {
+  if (key.includes("generation-task")) return "tasks";
   if (key.includes("refresh")) return "refresh";
   if (key.includes("topic")) return "topic";
   if (key.includes("copy") || key.includes("draft")) return "copy";
@@ -7876,6 +8295,7 @@ function shouldShowErrorBanner(error: ScopedAppError, activeView: ViewKey): bool
     copy: ["copy"],
     creatives: ["image"],
     videos: ["video"],
+    tasks: ["tasks"],
     performance: ["global", "refresh", "performance"],
   };
   return activeScopes[activeView].includes(error.scope);
@@ -7945,6 +8365,11 @@ function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+}
+
+function formatTaskDurationMs(durationMs: number | null): string {
+  if (durationMs === null) return "-";
+  return formatDuration(Math.max(1, Math.round(durationMs / 1000)));
 }
 
 function copyPreviewCreatives(creatives: CreativeAsset[], selectedDraft: CopyDraft | null): CreativeAsset[] {

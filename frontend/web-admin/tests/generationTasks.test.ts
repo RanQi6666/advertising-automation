@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import * as generationTaskHelpers from "../src/lib/generationTasks.ts";
 import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
+  generationTaskMonitorStats,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
+  generationTaskQueueLabel,
   generationTaskSummary,
+  generationTaskStatusLabel,
   videoAssetFromGenerationTask,
   type GenerationTask,
 } from "../src/lib/generationTasks.ts";
@@ -155,4 +159,53 @@ test("generation task helpers restore video asset from task result", () => {
   assert.equal(video?.id, "video-1");
   assert.equal(video?.status, "generating");
   assert.equal(video?.provider_job_id, "provider-video-job-1");
+});
+
+test("generation task monitor helpers label queues and count retryable failures", () => {
+  const tasks = [
+    task("queued"),
+    { ...task("running"), id: "task-2", queue_name: "image_queue" },
+    {
+      ...task("failed", "provider timeout"),
+      id: "task-3",
+      queue_name: "image_queue",
+      retryable: true,
+    },
+    {
+      ...task("succeeded"),
+      id: "task-4",
+      queue_name: "callback_queue",
+      task_type: "ad_generation_callback",
+    },
+  ];
+
+  assert.equal(generationTaskQueueLabel("text_queue"), "文本队列");
+  assert.equal(generationTaskQueueLabel("image_queue"), "图片队列");
+  assert.equal(generationTaskQueueLabel("video_queue"), "视频队列");
+  assert.equal(generationTaskQueueLabel("callback_queue"), "回调队列");
+  assert.equal(generationTaskStatusLabel("queued"), "等待中");
+  assert.equal(generationTaskStatusLabel("running"), "运行中");
+  assert.equal(generationTaskStatusLabel("failed"), "失败");
+
+  assert.deepEqual(generationTaskMonitorStats(tasks), {
+    activeCount: 2,
+    failedCount: 1,
+    retryableFailedCount: 1,
+    succeededCount: 1,
+  });
+});
+
+test("generation task helpers label task types in business language", () => {
+  const typeLabel = generationTaskHelpers.generationTaskTypeLabel as
+    | ((taskType: string) => string)
+    | undefined;
+
+  assert.equal(typeof typeLabel, "function");
+  assert.equal(typeLabel?.("topic_generate"), "\u9009\u9898\u751f\u6210");
+  assert.equal(typeLabel?.("copy_generate"), "\u6587\u6848\u751f\u6210");
+  assert.equal(typeLabel?.("copy_revise"), "\u6587\u6848\u6539\u5199");
+  assert.equal(typeLabel?.("image_generate"), "\u56fe\u7247\u751f\u6210");
+  assert.equal(typeLabel?.("video_generate"), "\u89c6\u9891\u751f\u6210");
+  assert.equal(typeLabel?.("ad_generation_callback"), "\u56de\u8c03\u5916\u90e8\u7cfb\u7edf");
+  assert.equal(typeLabel?.("unknown_task"), "unknown_task");
 });
