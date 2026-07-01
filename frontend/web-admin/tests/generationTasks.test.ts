@@ -209,3 +209,49 @@ test("generation task helpers label task types in business language", () => {
   assert.equal(typeLabel?.("ad_generation_callback"), "\u56de\u8c03\u5916\u90e8\u7cfb\u7edf");
   assert.equal(typeLabel?.("unknown_task"), "unknown_task");
 });
+
+test("generation task helpers explain failure codes with operator actions", () => {
+  const failureAdvice = generationTaskHelpers.generationTaskFailureAdvice as
+    | ((
+        task: Pick<GenerationTask, "error_code" | "error_message" | "retryable">,
+      ) => { title: string; detail: string; action: string })
+    | undefined;
+
+  assert.equal(typeof failureAdvice, "function");
+  assert.deepEqual(
+    failureAdvice?.({
+      error_code: "provider_429",
+      error_message: "rate limit",
+      retryable: true,
+    }),
+    {
+      title: "\u6a21\u578b\u9650\u6d41",
+      detail: "\u5f53\u524d\u751f\u6210\u5e76\u53d1\u8f83\u9ad8\uff0c\u4f9b\u5e94\u5546\u6682\u65f6\u62d2\u7edd\u5904\u7406\u3002",
+      action: "\u53ef\u4ee5\u7a0d\u7b49\u540e\u70b9\u51fb\u91cd\u8bd5\uff0c\u6216\u964d\u4f4e\u540c\u65f6\u751f\u6210\u7684\u4efb\u52a1\u6570\u3002",
+    },
+  );
+  assert.deepEqual(
+    failureAdvice?.({
+      error_code: "external_url_unreachable",
+      error_message: "landing page failed",
+      retryable: false,
+    }),
+    {
+      title: "\u5916\u90e8\u94fe\u63a5\u4e0d\u53ef\u8fbe",
+      detail: "\u7cfb\u7edf\u65e0\u6cd5\u8bbf\u95ee\u5de5\u5355\u3001\u7d20\u6750\u6216\u843d\u5730\u9875\u91cc\u7684\u5916\u90e8\u5730\u5740\u3002",
+      action: "\u5148\u68c0\u67e5 URL \u662f\u5426\u53ef\u6253\u5f00\uff0c\u4fee\u6b63\u540e\u91cd\u65b0\u751f\u6210\u6216\u91cd\u8bd5\u4efb\u52a1\u3002",
+    },
+  );
+  assert.deepEqual(
+    failureAdvice?.({
+      error_code: "task_interrupted",
+      error_message: "backend restarted",
+      retryable: true,
+    }),
+    {
+      title: "\u540e\u53f0\u4efb\u52a1\u88ab\u4e2d\u65ad",
+      detail: "\u540e\u7aef\u53ef\u80fd\u5728\u4efb\u52a1\u6267\u884c\u65f6\u91cd\u542f\uff0c\u7cfb\u7edf\u5df2\u5c06\u8fd9\u4e2a\u8fd0\u884c\u4e2d\u7684\u4efb\u52a1\u6807\u8bb0\u4e3a\u53ef\u91cd\u8bd5\u5931\u8d25\u3002",
+      action: "\u5148\u786e\u8ba4\u5bf9\u5e94\u7684\u56fe\u7247\u3001\u9009\u9898\u6216\u6587\u6848\u662f\u5426\u5df2\u7ecf\u751f\u6210\uff1b\u5982\u679c\u672a\u751f\u6210\uff0c\u518d\u70b9\u51fb\u91cd\u8bd5\u3002",
+    },
+  );
+});

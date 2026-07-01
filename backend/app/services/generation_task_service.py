@@ -1,7 +1,8 @@
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, TypeVar
 
 from sqlalchemy import func, select
@@ -30,11 +31,14 @@ CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 RETRYABLE_TASK_ERROR_CODES = {
     "provider_timeout",
     "provider_429",
+    "task_interrupted",
+    "task_stale",
     "external_url_unreachable",
     "unknown_provider_error",
 }
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 _text_queue_semaphore: asyncio.Semaphore | None = None
 _text_queue_limit: int | None = None
@@ -53,6 +57,13 @@ class GenerationTaskListResult:
     limit: int
     offset: int
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GenerationTaskRecoveryResult:
+    rescheduled_task_ids: list[str]
+    interrupted_task_ids: list[str]
+    stale_task_ids: list[str]
 
 
 class GenerationTaskService:
@@ -178,13 +189,167 @@ class GenerationTaskService:
             ).scalar_one()
             or 0
         )
+        resumable_queued_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(GenerationTask)
+                    .where(GenerationTask.status == "queued")
+                )
+            ).scalar_one()
+            or 0
+        )
+        running_stale_before = utcnow() - timedelta(
+            seconds=get_settings().generation_task_running_stale_seconds
+        )
+        stale_running_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(GenerationTask)
+                    .where(
+                        GenerationTask.status == "running",
+                        (
+                            GenerationTask.started_at.is_(None)
+                            | (GenerationTask.started_at <= running_stale_before)
+                        ),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        interrupted_failed_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(GenerationTask)
+                    .where(
+                        GenerationTask.status == "failed",
+                        GenerationTask.error_code.in_(("task_interrupted", "task_stale")),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
         return {
             "total": total,
             "by_status": {str(status): int(count) for status, count in status_rows},
             "by_queue": {str(queue_name): int(count) for queue_name, count in queue_rows},
             "retryable_failed_count": retryable_failed_count,
             "active_count": active_count,
+            "resumable_queued_count": resumable_queued_count,
+            "stale_running_count": stale_running_count,
+            "interrupted_failed_count": interrupted_failed_count,
         }
+
+    async def recover_interrupted_tasks(
+        self,
+        session: AsyncSession,
+    ) -> GenerationTaskRecoveryResult:
+        queued_task_ids = await self._queued_task_ids(session)
+        running_tasks = await self._running_tasks(session)
+        for task in running_tasks:
+            self._mark_interrupted(
+                task,
+                error_code="task_interrupted",
+                message=(
+                    "Generation task was interrupted before completion. "
+                    "The backend may have restarted before BackgroundTasks finished."
+                ),
+            )
+        await session.commit()
+        return GenerationTaskRecoveryResult(
+            rescheduled_task_ids=queued_task_ids,
+            interrupted_task_ids=[task.id for task in running_tasks],
+            stale_task_ids=[],
+        )
+
+    async def recover_stale_tasks(self, session: AsyncSession) -> GenerationTaskRecoveryResult:
+        settings = get_settings()
+        now = utcnow()
+        queued_before = now - timedelta(seconds=settings.generation_task_queued_stale_seconds)
+        running_before = now - timedelta(seconds=settings.generation_task_running_stale_seconds)
+
+        queued_task_ids = await self._queued_task_ids(session, queued_before=queued_before)
+        stale_tasks = await self._running_tasks(session, started_before=running_before)
+        for task in stale_tasks:
+            self._mark_interrupted(
+                task,
+                error_code="task_stale",
+                message=(
+                    "Generation task stayed running past the configured recovery timeout. "
+                    "It may have stalled while calling the model provider."
+                ),
+            )
+        await session.commit()
+        return GenerationTaskRecoveryResult(
+            rescheduled_task_ids=queued_task_ids,
+            interrupted_task_ids=[],
+            stale_task_ids=[task.id for task in stale_tasks],
+        )
+
+    async def _queued_task_ids(
+        self,
+        session: AsyncSession,
+        *,
+        queued_before: datetime | None = None,
+    ) -> list[str]:
+        conditions = [GenerationTask.status == "queued"]
+        if queued_before is not None:
+            conditions.append(GenerationTask.queued_at <= queued_before)
+        return [
+            str(task_id)
+            for task_id in (
+                await session.execute(
+                    select(GenerationTask.id)
+                    .where(*conditions)
+                    .order_by(
+                        GenerationTask.priority.desc(),
+                        GenerationTask.queued_at.asc(),
+                        GenerationTask.created_at.asc(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        ]
+
+    async def _running_tasks(
+        self,
+        session: AsyncSession,
+        *,
+        started_before: datetime | None = None,
+    ) -> list[GenerationTask]:
+        conditions = [GenerationTask.status == "running"]
+        if started_before is not None:
+            conditions.append(
+                GenerationTask.started_at.is_(None) | (GenerationTask.started_at <= started_before)
+            )
+        return list(
+            (
+                await session.execute(
+                    select(GenerationTask)
+                    .where(*conditions)
+                    .order_by(GenerationTask.started_at.asc(), GenerationTask.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    def _mark_interrupted(
+        self,
+        task: GenerationTask,
+        *,
+        error_code: str,
+        message: str,
+    ) -> None:
+        task.status = "failed"
+        task.error_code = error_code
+        task.error_message = message
+        task.retryable = task.attempt_count < task.max_attempts
+        task.finished_at = utcnow()
+        task.duration_ms = _duration_ms(task.started_at, task.finished_at)
 
     async def retry_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
         task = await self.get_task(session, task_id)
@@ -539,6 +704,62 @@ def _callback_queue_capacity() -> asyncio.Semaphore:
         _callback_queue_semaphore = asyncio.Semaphore(limit)
         _callback_queue_limit = limit
     return _callback_queue_semaphore
+
+
+async def recover_generation_tasks_on_startup(
+    schedule_task: Callable[[str], Any] | None = None,
+) -> GenerationTaskRecoveryResult:
+    service = GenerationTaskService()
+    async with AsyncSessionLocal() as session:
+        result = await service.recover_interrupted_tasks(session)
+    for task_id in result.rescheduled_task_ids:
+        _schedule_recovered_task(task_id, schedule_task)
+    _log_recovery_result("startup", result)
+    return result
+
+
+async def run_generation_task_recovery_loop(
+    schedule_task: Callable[[str], Any] | None = None,
+) -> None:
+    service = GenerationTaskService()
+    while True:
+        await asyncio.sleep(get_settings().generation_task_recovery_interval_seconds)
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await service.recover_stale_tasks(session)
+            for task_id in result.rescheduled_task_ids:
+                _schedule_recovered_task(task_id, schedule_task)
+            _log_recovery_result("periodic", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Generation task recovery loop failed.")
+
+
+def _schedule_recovered_task(
+    task_id: str,
+    schedule_task: Callable[[str], Any] | None,
+) -> None:
+    if schedule_task is not None:
+        schedule_task(task_id)
+        return
+    asyncio.create_task(GenerationTaskService().process_task(task_id))
+
+
+def _log_recovery_result(source: str, result: GenerationTaskRecoveryResult) -> None:
+    if not (
+        result.rescheduled_task_ids or result.interrupted_task_ids or result.stale_task_ids
+    ):
+        return
+    logger.info(
+        "Generation task recovery completed.",
+        extra={
+            "source": source,
+            "rescheduled_count": len(result.rescheduled_task_ids),
+            "interrupted_count": len(result.interrupted_task_ids),
+            "stale_count": len(result.stale_task_ids),
+        },
+    )
 
 
 def _initial_image_task_result(

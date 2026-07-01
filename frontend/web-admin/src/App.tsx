@@ -52,6 +52,7 @@ import {
 import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
+  generationTaskFailureAdvice,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskMonitorStats,
@@ -208,6 +209,8 @@ const GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS = 90_000;
 const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
 const GENERATION_TASK_CONFIRM_TIMEOUT_MS = 240_000;
 const GENERATION_TASK_CONFIRM_INTERVAL_MS = 2_000;
+const TASK_MONITOR_ACTIVE_REFRESH_MS = 5000;
+const TASK_MONITOR_IDLE_REFRESH_MS = 15000;
 const ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY = "image_generation_task_v1:active";
 const ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY = "video_generation_task_v1:active";
 const VIDEO_STORYBOARD_DRAFT_CACHE_PREFIX = "video_storyboard_draft_v1:";
@@ -528,6 +531,10 @@ function App() {
       ),
     [creatives, selectedCreativeIds],
   );
+  const hasActiveGenerationTasks = useMemo(
+    () => generationTaskList.some((task) => !generationTaskIsFinal(task)),
+    [generationTaskList],
+  );
 
   useEffect(() => {
     selectedCampaignIdRef.current = selectedCampaign?.id ?? null;
@@ -550,6 +557,23 @@ function App() {
     if (!currentOperatorId || activeView !== "tasks") return;
     void refreshGenerationTasks();
   }, [activeView, currentOperatorId, generationTaskQueueFilter, generationTaskStatusFilter]);
+
+  useEffect(() => {
+    if (!currentOperatorId || activeView !== "tasks") return;
+    const refreshMs = hasActiveGenerationTasks
+      ? TASK_MONITOR_ACTIVE_REFRESH_MS
+      : TASK_MONITOR_IDLE_REFRESH_MS;
+    const timer = window.setInterval(() => {
+      void refreshGenerationTasks({ silent: true });
+    }, refreshMs);
+    return () => window.clearInterval(timer);
+  }, [
+    activeView,
+    currentOperatorId,
+    generationTaskQueueFilter,
+    generationTaskStatusFilter,
+    hasActiveGenerationTasks,
+  ]);
 
   useEffect(() => {
     setDeliveryExtractionCache(loadDeliveryExtractionCache(rawWorkOrder));
@@ -1355,13 +1379,18 @@ function App() {
     setGenerationTaskListSummary(response.summary ?? {});
   }
 
-  async function refreshGenerationTasks(): Promise<boolean> {
+  async function refreshGenerationTasks(options: { silent?: boolean } = {}): Promise<boolean> {
     if (!currentOperatorId) return false;
-    const response = await run("generation-task-list", () =>
-      api.listGenerationTasks(generationTaskListFilters()),
-    );
+    const loadTasks = () => api.listGenerationTasks(generationTaskListFilters());
+    const response = options.silent
+      ? await loadTasks().catch((caught) => {
+          if (!isTransientApiError(caught)) setCaughtError("tasks", caught, "任务刷新失败");
+          return null;
+        })
+      : await run("generation-task-list", loadTasks);
     if (!response) return false;
     applyGenerationTaskList(response);
+    if (options.silent) clearError("tasks");
     return true;
   }
 
@@ -5947,9 +5976,15 @@ function TaskMonitorView({
   const failedCount = byStatus.failed ?? stats.failedCount;
   const retryableFailedCount = summary.retryable_failed_count ?? stats.retryableFailedCount;
   const succeededCount = byStatus.succeeded ?? stats.succeededCount;
+  const resumableQueuedCount = summary.resumable_queued_count ?? byStatus.queued ?? 0;
+  const interruptedFailedCount = summary.interrupted_failed_count ?? 0;
   const isRefreshing = loading === "generation-task-list";
   const queueOptions = ["text_queue", "image_queue", "video_queue", "callback_queue"];
   const statusOptions = ["queued", "running", "failed", "succeeded"];
+  const lookups = { jobs, campaigns, topics, drafts, videos };
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
+  const selectedTaskDisplay = selectedTask ? taskMonitorDisplayContext(selectedTask, lookups) : null;
 
   return (
     <section className="task-monitor-layout">
@@ -5958,6 +5993,8 @@ function TaskMonitorView({
         <Metric label="失败" value={failedCount} accent="rose" hint="需要排查的任务" icon={X} />
         <Metric label="可重试" value={retryableFailedCount} accent="amber" hint="可重新入队" icon={RefreshCw} />
         <Metric label="已完成" value={succeededCount} accent="violet" hint="生成成功任务" icon={Check} />
+        <Metric label="待补偿" value={resumableQueuedCount} accent="blue" hint="启动或巡检会重新调度" icon={RefreshCw} />
+        <Metric label="中断失败" value={interruptedFailedCount} accent="amber" hint="可在详情确认后重试" icon={X} />
       </section>
 
       <section className="panel task-monitor-panel">
@@ -6029,15 +6066,19 @@ function TaskMonitorView({
                 const retryKey = `generation-task-retry-${task.id}`;
                 const retrying = loading === retryKey;
                 const canRetry = task.status === "failed" && task.retryable;
-                const display = taskMonitorDisplayContext(task, {
-                  jobs,
-                  campaigns,
-                  topics,
-                  drafts,
-                  videos,
-                });
+                const display = taskMonitorDisplayContext(task, lookups);
                 return (
-                  <tr key={task.id}>
+                  <tr
+                    key={task.id}
+                    className="task-row"
+                    onClick={() => setSelectedTaskId(task.id)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      setSelectedTaskId(task.id);
+                    }}
+                    tabIndex={0}
+                  >
                     <td>
                       <strong className="task-work-order">{display.workOrderLabel}</strong>
                       <span className="task-subline">{display.workOrderTitle}</span>
@@ -6071,7 +6112,10 @@ function TaskMonitorView({
                     <td>
                       <button
                         className="secondary-button task-retry-button"
-                        onClick={() => onRetry(task.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRetry(task.id);
+                        }}
                         disabled={!canRetry || Boolean(loading)}
                       >
                         {retrying ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
@@ -6091,6 +6135,11 @@ function TaskMonitorView({
             </tbody>
           </table>
         </div>
+        <TaskDetailDrawer
+          task={selectedTask}
+          display={selectedTaskDisplay}
+          onClose={() => setSelectedTaskId(null)}
+        />
       </section>
     </section>
   );
@@ -6243,6 +6292,96 @@ function taskMonitorBusinessTypeLabel(businessType: string): string {
     ad_generation_job: "工单",
   };
   return labels[businessType] ?? businessType;
+}
+
+function TaskDetailDrawer({
+  task,
+  display,
+  onClose,
+}: {
+  task: GenerationTask | null;
+  display: TaskMonitorDisplayContext | null;
+  onClose: () => void;
+}) {
+  if (!task || !display) return null;
+  const advice = generationTaskFailureAdvice(task);
+  const showAdvice = task.status === "failed" || Boolean(task.error_code || task.error_message);
+
+  return (
+    <div className="task-detail-backdrop" onClick={onClose}>
+      <aside
+        className="task-detail-panel"
+        aria-label="任务详情"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="task-detail-head">
+          <div>
+            <span className="section-eyebrow">Task detail</span>
+            <h3>{display.workOrderLabel}</h3>
+            <p>{display.taskTypeLabel} / {generationTaskQueueLabel(task.queue_name)}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="关闭任务详情">
+            <X size={18} />
+          </button>
+        </div>
+
+        {showAdvice && (
+          <article className="task-detail-advice">
+            <strong>{advice.title}</strong>
+            <span>{advice.detail}</span>
+            <em>{advice.action}</em>
+          </article>
+        )}
+
+        <div className="task-detail-grid">
+          <TaskDetailField label="所属工单" value={`${display.workOrderLabel} / ${display.workOrderTitle}`} />
+          <TaskDetailField label="关联内容" value={`${display.businessLabel} / ${display.businessDetail}`} />
+          <TaskDetailField label="任务状态" value={generationTaskStatusLabel(task.status)} />
+          <TaskDetailField label="任务号" value={task.id} mono />
+          <TaskDetailField label="业务对象" value={`${task.business_type} / ${task.business_id}`} mono />
+          <TaskDetailField label="错误码" value={task.error_code || "-"} mono />
+          <TaskDetailField label="错误原文" value={task.error_message || "-"} />
+          <TaskDetailField label="重试次数" value={`${task.attempt_count}/${task.max_attempts}`} />
+          <TaskDetailField label="排队时间" value={formatDate(task.queued_at)} />
+          <TaskDetailField label="开始时间" value={formatDate(task.started_at)} />
+          <TaskDetailField label="结束时间" value={formatDate(task.finished_at)} />
+          <TaskDetailField label="耗时" value={formatTaskDurationMs(task.duration_ms)} />
+        </div>
+
+        <details className="task-detail-section" open>
+          <summary>请求参数</summary>
+          <pre className="task-detail-json">{formatTaskJson(task.payload)}</pre>
+        </details>
+        <details className="task-detail-section">
+          <summary>返回结果</summary>
+          <pre className="task-detail-json">{formatTaskJson(task.result)}</pre>
+        </details>
+        <details className="task-detail-section">
+          <summary>任务元数据</summary>
+          <pre className="task-detail-json">{formatTaskJson(task.metadata)}</pre>
+        </details>
+      </aside>
+    </div>
+  );
+}
+
+function TaskDetailField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="task-detail-field">
+      <span>{label}</span>
+      <strong className={mono ? "mono" : undefined}>{value || "-"}</strong>
+    </div>
+  );
+}
+
+function formatTaskJson(value: unknown): string {
+  if (value == null) return "-";
+  if (isRecord(value) && !Object.keys(value).length) return "{}";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function WorkflowProgress({ summary }: { summary: WorkflowSummary }) {

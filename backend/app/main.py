@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -12,14 +13,33 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.core.logging import configure_logging
 from backend.app.db.init_db import create_all_tables
+from backend.app.services.generation_task_service import (
+    recover_generation_tasks_on_startup,
+    run_generation_task_recovery_loop,
+)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    if get_settings().create_db_on_startup:
+    settings = get_settings()
+    if settings.create_db_on_startup:
         await create_all_tables()
-    yield
+    recovery_loop: asyncio.Task[None] | None = None
+    if (
+        settings.generation_task_recovery_enabled
+        and settings.environment != "local"
+        and not app.dependency_overrides
+    ):
+        await recover_generation_tasks_on_startup()
+        recovery_loop = asyncio.create_task(run_generation_task_recovery_loop())
+    try:
+        yield
+    finally:
+        if recovery_loop is not None:
+            recovery_loop.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery_loop
 
 
 def create_app() -> FastAPI:

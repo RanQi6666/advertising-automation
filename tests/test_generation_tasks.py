@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -20,6 +22,7 @@ from backend.app.services.generation_task_service import (
     TEXT_QUEUE_NAME,
     VIDEO_QUEUE_NAME,
     GenerationTaskService,
+    recover_generation_tasks_on_startup,
 )
 
 
@@ -257,6 +260,76 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert listing.summary["retryable_failed_count"] == 1
     assert listing.summary["active_count"] == 2
     assert queued_task.status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_startup_recovery_reschedules_queued_and_marks_running_interrupted(
+    monkeypatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-startup-recovery-1",
+            name="Startup Recovery Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        queued_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id, "limit": 3, "signals": {}},
+        )
+        running_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-startup-recovery-1",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-startup-recovery-1", "count": 2, "size": "1:1"},
+            max_attempts=3,
+        )
+        running_task.status = "running"
+        running_task.attempt_count = 1
+        running_task.started_at = utcnow() - timedelta(minutes=5)
+        running_task.error_code = None
+        running_task.error_message = None
+        await session.commit()
+
+    scheduled_task_ids: list[str] = []
+    recovery = await recover_generation_tasks_on_startup(schedule_task=scheduled_task_ids.append)
+
+    async with session_factory() as session:
+        stored_queued = await session.get(GenerationTask, queued_task.id)
+        stored_running = await session.get(GenerationTask, running_task.id)
+        summary = await GenerationTaskService().task_summary(session)
+
+    assert recovery.rescheduled_task_ids == [queued_task.id]
+    assert recovery.interrupted_task_ids == [running_task.id]
+    assert scheduled_task_ids == [queued_task.id]
+    assert stored_queued is not None
+    assert stored_queued.status == "queued"
+    assert stored_running is not None
+    assert stored_running.status == "failed"
+    assert stored_running.error_code == "task_interrupted"
+    assert stored_running.retryable is True
+    assert "interrupted" in (stored_running.error_message or "").lower()
+    assert summary["resumable_queued_count"] == 1
+    assert summary["interrupted_failed_count"] == 1
 
     await engine.dispose()
 

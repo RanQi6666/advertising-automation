@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
+    generation_task_recovery_enabled: bool = True
+    generation_task_recovery_interval_seconds: float = Field(default=60.0, ge=5, le=3600)
+    generation_task_queued_stale_seconds: float = Field(default=60.0, ge=1, le=3600)
+    generation_task_running_stale_seconds: float = Field(default=1800.0, ge=60, le=86400)
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"
     model_gateway_image_response_format: str | None = None

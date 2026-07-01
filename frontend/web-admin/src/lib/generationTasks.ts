@@ -45,6 +45,9 @@ export type GenerationTaskListResponse = {
     by_queue?: Record<string, number>;
     retryable_failed_count?: number;
     active_count?: number;
+    resumable_queued_count?: number;
+    stale_running_count?: number;
+    interrupted_failed_count?: number;
   };
 };
 
@@ -53,6 +56,12 @@ export type GenerationTaskMonitorStats = {
   failedCount: number;
   retryableFailedCount: number;
   succeededCount: number;
+};
+
+export type GenerationTaskFailureAdvice = {
+  title: string;
+  detail: string;
+  action: string;
 };
 
 const generationTaskQueueLabels: Record<string, string> = {
@@ -88,6 +97,61 @@ export function generationTaskStatusLabel(status: string): string {
 
 export function generationTaskTypeLabel(taskType: string): string {
   return generationTaskTypeLabels[taskType] ?? taskType;
+}
+
+export function generationTaskFailureAdvice(
+  task: Pick<GenerationTask, "error_code" | "error_message" | "retryable">,
+): GenerationTaskFailureAdvice {
+  const fallbackAction = task.retryable
+    ? "可以先点击重试；如果连续失败，再检查模型服务、外部链接或输入内容。"
+    : "请先检查输入内容或后端日志，修正后重新发起生成。";
+  const fallbackDetail = task.error_message || "任务执行失败，但后台没有返回更具体的错误信息。";
+  const adviceByCode: Record<string, GenerationTaskFailureAdvice> = {
+    provider_timeout: {
+      title: "模型响应超时",
+      detail: "模型供应商在限定时间内没有返回结果，任务可能已经排队过久或请求内容较重。",
+      action: "可以稍后点击重试；如果频繁出现，优先降低同一时间的图片或视频生成数量。",
+    },
+    provider_429: {
+      title: "模型限流",
+      detail: "当前生成并发较高，供应商暂时拒绝处理。",
+      action: "可以稍等后点击重试，或降低同时生成的任务数。",
+    },
+    external_url_unreachable: {
+      title: "外部链接不可达",
+      detail: "系统无法访问工单、素材或落地页里的外部地址。",
+      action: "先检查 URL 是否可打开，修正后重新生成或重试任务。",
+    },
+    unknown_provider_error: {
+      title: "模型服务异常",
+      detail: "供应商返回了未分类错误，通常与模型服务、网络或请求内容有关。",
+      action: "可以先重试一次；如果仍失败，再查看详情里的错误原文和请求参数。",
+    },
+    callback_failed: {
+      title: "回调外部系统失败",
+      detail: "AI 结果已经生成，但回传外部系统时失败。",
+      action: "检查外部系统回调地址、鉴权和网络连通性，然后重试回调任务。",
+    },
+    task_interrupted: {
+      title: "后台任务被中断",
+      detail: "后端可能在任务执行时重启，系统已将这个运行中的任务标记为可重试失败。",
+      action: "先确认对应的图片、选题或文案是否已经生成；如果未生成，再点击重试。",
+    },
+    task_stale: {
+      title: "后台任务疑似卡死",
+      detail: "任务运行时间超过后端恢复阈值，系统已将它标记为可重试失败。",
+      action: "先查看详情里的结果和对应素材；如果没有产出，再点击重试。",
+    },
+  };
+  return task.error_code ? adviceByCode[task.error_code] ?? {
+    title: "任务执行失败",
+    detail: fallbackDetail,
+    action: fallbackAction,
+  } : {
+    title: "任务执行失败",
+    detail: fallbackDetail,
+    action: fallbackAction,
+  };
 }
 
 export function generationTaskMonitorStats(tasks: GenerationTask[]): GenerationTaskMonitorStats {

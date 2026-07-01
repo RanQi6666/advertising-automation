@@ -336,3 +336,31 @@ test("task monitor rows use readable work order context before technical ids", (
   assert.match(taskMonitorSource, /\u4efb\u52a1\u53f7 \{shortId\(task\.id\)\}/);
   assert.doesNotMatch(taskMonitorSource, /<span className="task-id">\{shortId\(task\.id\)\}<\/span>/);
 });
+
+test("task monitor auto refreshes active tasks silently", () => {
+  assert.match(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 5000;/);
+  assert.match(appSource, /const TASK_MONITOR_IDLE_REFRESH_MS = 15000;/);
+  assert.match(appSource, /const hasActiveGenerationTasks = useMemo\(/);
+  assert.match(appSource, /generationTaskIsFinal\(task\)/);
+  assert.match(appSource, /window\.setInterval/);
+  assert.match(appSource, /refreshGenerationTasks\(\{ silent: true \}\)/);
+  assert.match(
+    appSource,
+    /async function refreshGenerationTasks\(options: \{ silent\?: boolean \} = \{\}\): Promise<boolean>/,
+  );
+});
+
+test("task monitor opens a detail drawer with failure advice and debug data", () => {
+  const taskMonitorSource = componentSource("TaskMonitorView", "TaskDetailDrawer");
+  const detailDrawerSource = componentSource("TaskDetailDrawer", "WorkflowProgress");
+
+  assert.match(taskMonitorSource, /const \[selectedTaskId, setSelectedTaskId\]/);
+  assert.match(taskMonitorSource, /setSelectedTaskId\(task\.id\)/);
+  assert.match(taskMonitorSource, /<TaskDetailDrawer/);
+  assert.match(detailDrawerSource, /generationTaskFailureAdvice\(task\)/);
+  assert.match(detailDrawerSource, /className="task-detail-panel"/);
+  assert.match(detailDrawerSource, /className="task-detail-advice"/);
+  assert.match(detailDrawerSource, /className="task-detail-json"/);
+  assert.match(stylesSource, /\.task-detail-panel\s*\{/);
+  assert.match(stylesSource, /\.task-detail-json\s*\{/);
+});
