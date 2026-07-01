@@ -27,6 +27,7 @@ class GenerationTaskRead(TimestampedRead):
     finished_at: datetime | None = None
     duration_ms: int | None = None
     metadata: dict = Field(default_factory=dict)
+    reused_existing: bool = False
 
     @classmethod
     def from_model(cls, task: GenerationTask) -> "GenerationTaskRead":
@@ -53,6 +54,7 @@ class GenerationTaskRead(TimestampedRead):
             finished_at=task.finished_at,
             duration_ms=task.duration_ms,
             metadata=task.metadata_json or {},
+            reused_existing=bool(getattr(task, "reused_existing", False)),
         )
 
 

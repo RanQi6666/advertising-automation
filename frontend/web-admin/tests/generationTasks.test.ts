@@ -37,6 +37,7 @@ function task(status: GenerationTask["status"], errorMessage: string | null = nu
     finished_at: null,
     duration_ms: null,
     metadata: {},
+    reused_existing: false,
     created_at: "2026-07-01T00:00:00Z",
     updated_at: "2026-07-01T00:00:00Z",
   };
@@ -49,6 +50,10 @@ test("generation task helpers summarize text queue statuses", () => {
   assert.equal(generationTaskSummary(task("queued"), "选题"), "选题已进入文本队列，等待处理。");
   assert.equal(generationTaskSummary(task("running"), "选题"), "选题正在生成中，请稍候。");
   assert.equal(generationTaskSummary(task("failed", "provider timeout"), "选题"), "选题生成失败：provider timeout");
+  assert.equal(
+    generationTaskSummary({ ...task("running"), reused_existing: true }, "选题"),
+    "选题已有生成任务在处理，正在继续跟进原任务。",
+  );
 });
 
 test("generation task helpers restore image slots from task result", () => {

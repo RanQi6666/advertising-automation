@@ -14,7 +14,11 @@ from backend.app.schemas.video import (
     VideoStoryboardRewriteRequest,
 )
 from backend.app.services.generation_attempt_service import GenerationAttemptService
-from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
+from backend.app.services.generation_task_service import (
+    VIDEO_QUEUE_NAME,
+    GenerationTaskService,
+    should_schedule_generation_task,
+)
 from backend.app.services.utils import get_required
 from backend.app.services.video_service import VideoService
 
@@ -152,7 +156,8 @@ async def queue_start_video_generation(
             "source_asset_ids": video.source_asset_ids,
         },
     )
-    background_tasks.add_task(task_service.process_task, task.id)
+    if should_schedule_generation_task(task):
+        background_tasks.add_task(task_service.process_task, task.id)
     return GenerationTaskRead.from_model(task)
 
 

@@ -30,6 +30,7 @@ export type GenerationTask = {
   finished_at: string | null;
   duration_ms: number | null;
   metadata: Record<string, unknown>;
+  reused_existing: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -189,6 +190,9 @@ export function generationTaskSummary(task: GenerationTask, label: string): stri
       : task.queue_name === "video_queue"
         ? "视频队列"
         : "文本队列";
+  if (task.reused_existing && (task.status === "queued" || task.status === "running")) {
+    return `${label}已有生成任务在处理，正在继续跟进原任务。`;
+  }
   if (task.status === "queued") return `${label}已进入${queueLabel}，等待处理。`;
   if (task.status === "running") return `${label}正在生成中，请稍候。`;
   if (task.status === "succeeded") return `${label}已生成。`;

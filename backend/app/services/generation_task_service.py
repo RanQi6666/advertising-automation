@@ -1,8 +1,12 @@
 import asyncio
+import hashlib
+import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Lock
 from typing import Any, TypeVar
 
 from sqlalchemy import func, select
@@ -28,6 +32,8 @@ TEXT_TASK_TYPES = {"topic_generate", "copy_generate", "copy_revise"}
 IMAGE_TASK_TYPES = {"image_generate"}
 VIDEO_TASK_TYPES = {"video_generate"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
+ACTIVE_TASK_STATUSES = {"queued", "running"}
+IDEMPOTENCY_KEY_METADATA_FIELD = "idempotency_key"
 RETRYABLE_TASK_ERROR_CODES = {
     "provider_timeout",
     "provider_429",
@@ -48,6 +54,14 @@ _video_queue_semaphore: asyncio.Semaphore | None = None
 _video_queue_limit: int | None = None
 _callback_queue_semaphore: asyncio.Semaphore | None = None
 _callback_queue_limit: int | None = None
+_idempotency_locks_guard = Lock()
+_idempotency_locks: dict[str, "_GenerationTaskIdempotencyLock"] = {}
+
+
+@dataclass
+class _GenerationTaskIdempotencyLock:
+    lock: asyncio.Lock
+    ref_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,28 +95,112 @@ class GenerationTaskService:
         max_attempts: int = 2,
         metadata: dict[str, Any] | None = None,
     ) -> GenerationTask:
-        task = GenerationTask(
+        idempotency_key = _generation_task_idempotency_key(
             queue_name=queue_name,
             task_type=task_type,
             business_type=business_type,
             business_id=business_id,
-            campaign_id=campaign_id,
-            status="queued",
-            priority=priority,
-            payload_json=payload,
-            retryable=False,
-            attempt_count=0,
-            max_attempts=max(max_attempts, 1),
-            queued_at=utcnow(),
-            metadata_json=metadata or {},
+            payload=payload,
         )
-        session.add(task)
-        await session.commit()
-        await session.refresh(task)
-        return task
+        async with _generation_task_idempotency_scope(idempotency_key):
+            existing_task = await self._find_active_duplicate_task(
+                session,
+                queue_name=queue_name,
+                task_type=task_type,
+                business_type=business_type,
+                business_id=business_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if existing_task is not None:
+                await self._mark_idempotency_reuse(session, existing_task, idempotency_key)
+                return existing_task
+
+            task = GenerationTask(
+                queue_name=queue_name,
+                task_type=task_type,
+                business_type=business_type,
+                business_id=business_id,
+                campaign_id=campaign_id,
+                status="queued",
+                priority=priority,
+                payload_json=payload,
+                retryable=False,
+                attempt_count=0,
+                max_attempts=max(max_attempts, 1),
+                queued_at=utcnow(),
+                metadata_json={
+                    **(metadata or {}),
+                    IDEMPOTENCY_KEY_METADATA_FIELD: idempotency_key,
+                },
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            _set_generation_task_reused(task, False)
+            return task
 
     async def get_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
         return await get_required(session, GenerationTask, task_id)  # type: ignore[return-value]
+
+    async def _find_active_duplicate_task(
+        self,
+        session: AsyncSession,
+        *,
+        queue_name: str,
+        task_type: str,
+        business_type: str,
+        business_id: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> GenerationTask | None:
+        tasks = list(
+            (
+                await session.execute(
+                    select(GenerationTask)
+                    .where(
+                        GenerationTask.queue_name == queue_name,
+                        GenerationTask.task_type == task_type,
+                        GenerationTask.business_type == business_type,
+                        GenerationTask.business_id == business_id,
+                        GenerationTask.status.in_(ACTIVE_TASK_STATUSES),
+                    )
+                    .order_by(GenerationTask.queued_at.asc(), GenerationTask.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for task in tasks:
+            metadata = task.metadata_json or {}
+            if metadata.get(IDEMPOTENCY_KEY_METADATA_FIELD) == idempotency_key:
+                return task
+            if _generation_task_payload_fingerprint(task.payload_json or {}) == (
+                _generation_task_payload_fingerprint(payload)
+            ):
+                return task
+        return None
+
+    async def _mark_idempotency_reuse(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+        idempotency_key: str,
+    ) -> None:
+        metadata = task.metadata_json or {}
+        try:
+            reuse_count = int(metadata.get("idempotency_reuse_count") or 0)
+        except (TypeError, ValueError):
+            reuse_count = 0
+        task.metadata_json = {
+            **metadata,
+            IDEMPOTENCY_KEY_METADATA_FIELD: idempotency_key,
+            "idempotency_reuse_count": reuse_count + 1,
+            "idempotency_last_reused_at": utcnow().isoformat(),
+        }
+        await session.commit()
+        await session.refresh(task)
+        _set_generation_task_reused(task, True)
 
     async def list_tasks(
         self,
@@ -759,6 +857,70 @@ def _log_recovery_result(source: str, result: GenerationTaskRecoveryResult) -> N
             "interrupted_count": len(result.interrupted_task_ids),
             "stale_count": len(result.stale_task_ids),
         },
+    )
+
+
+def generation_task_was_reused(task: GenerationTask) -> bool:
+    return bool(getattr(task, "reused_existing", False))
+
+
+def should_schedule_generation_task(task: GenerationTask) -> bool:
+    return not generation_task_was_reused(task)
+
+
+def _set_generation_task_reused(task: GenerationTask, reused: bool) -> None:
+    task.reused_existing = reused
+
+
+@asynccontextmanager
+async def _generation_task_idempotency_scope(idempotency_key: str) -> AsyncIterator[None]:
+    with _idempotency_locks_guard:
+        entry = _idempotency_locks.get(idempotency_key)
+        if entry is None:
+            entry = _GenerationTaskIdempotencyLock(lock=asyncio.Lock())
+            _idempotency_locks[idempotency_key] = entry
+        entry.ref_count += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        with _idempotency_locks_guard:
+            entry.ref_count -= 1
+            if entry.ref_count <= 0:
+                _idempotency_locks.pop(idempotency_key, None)
+
+
+def _generation_task_idempotency_key(
+    *,
+    queue_name: str,
+    task_type: str,
+    business_type: str,
+    business_id: str,
+    payload: dict[str, Any],
+) -> str:
+    raw = _canonical_json(
+        {
+            "queue_name": queue_name,
+            "task_type": task_type,
+            "business_type": business_type,
+            "business_id": business_id,
+            "payload": payload,
+        }
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _generation_task_payload_fingerprint(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
     )
 
 

@@ -4,7 +4,11 @@ from backend.app.api.deps import DbSession
 from backend.app.schemas.copywriting import CopyDraftRead, CopyGenerateRequest, CopyReviseRequest
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services.copywriting_service import CopywritingService
-from backend.app.services.generation_task_service import TEXT_QUEUE_NAME, GenerationTaskService
+from backend.app.services.generation_task_service import (
+    TEXT_QUEUE_NAME,
+    GenerationTaskService,
+    should_schedule_generation_task,
+)
 
 router = APIRouter()
 service = CopywritingService()
@@ -36,7 +40,8 @@ async def queue_generate_copy(
         business_id=payload.topic_id,
         payload=payload.model_dump(mode="json"),
     )
-    background_tasks.add_task(task_service.process_task, task.id)
+    if should_schedule_generation_task(task):
+        background_tasks.add_task(task_service.process_task, task.id)
     return GenerationTaskRead.from_model(task)
 
 
@@ -64,7 +69,8 @@ async def queue_revise_copy(
         business_id=draft_id,
         payload={"draft_id": draft_id, "request": payload.model_dump(mode="json")},
     )
-    background_tasks.add_task(task_service.process_task, task.id)
+    if should_schedule_generation_task(task):
+        background_tasks.add_task(task_service.process_task, task.id)
     return GenerationTaskRead.from_model(task)
 
 

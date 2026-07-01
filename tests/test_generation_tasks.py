@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
+from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services import creative_service, video_service
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.generation_task_service import (
@@ -23,6 +25,7 @@ from backend.app.services.generation_task_service import (
     VIDEO_QUEUE_NAME,
     GenerationTaskService,
     recover_generation_tasks_on_startup,
+    should_schedule_generation_task,
 )
 
 
@@ -260,6 +263,170 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert listing.summary["retryable_failed_count"] == 1
     assert listing.summary["active_count"] == 2
     assert queued_task.status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_service_reuses_active_duplicate_task() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-idempotent-task-1",
+            name="Idempotent Task Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        service = GenerationTaskService()
+        first_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={
+                "campaign_id": campaign.id,
+                "limit": 3,
+                "signals": {"country": "US", "platform": "Facebook"},
+            },
+        )
+        duplicate_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={
+                "signals": {"platform": "Facebook", "country": "US"},
+                "limit": 3,
+                "campaign_id": campaign.id,
+            },
+        )
+        rows_after_duplicate = list(
+            (await session.execute(select(GenerationTask))).scalars().all()
+        )
+
+        first_task.status = "succeeded"
+        first_task.result_json = {"topics": [], "generated_count": 0}
+        first_task.finished_at = utcnow()
+        await session.commit()
+
+        next_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={
+                "campaign_id": campaign.id,
+                "limit": 3,
+                "signals": {"country": "US", "platform": "Facebook"},
+            },
+        )
+        rows_after_completed = list(
+            (await session.execute(select(GenerationTask))).scalars().all()
+        )
+
+    assert duplicate_task.id == first_task.id
+    assert getattr(duplicate_task, "reused_existing", False) is True
+    assert should_schedule_generation_task(duplicate_task) is False
+    assert GenerationTaskRead.from_model(duplicate_task).reused_existing is True
+    assert duplicate_task.metadata_json["idempotency_reuse_count"] == 1
+    assert "idempotency_key" in duplicate_task.metadata_json
+    assert len(rows_after_duplicate) == 1
+    assert next_task.id != first_task.id
+    assert getattr(next_task, "reused_existing", False) is False
+    assert should_schedule_generation_task(next_task) is True
+    assert len(rows_after_completed) == 2
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_service_reuses_concurrent_duplicate_task(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tasks.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-idempotent-task-race-1",
+            name="Idempotent Task Race Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+    service = GenerationTaskService()
+    original_find = service._find_active_duplicate_task
+    entered_empty_find_count = 0
+    both_requests_checked_for_duplicates = asyncio.Event()
+
+    async def delayed_find(*args, **kwargs):
+        nonlocal entered_empty_find_count
+        result = await original_find(*args, **kwargs)
+        if result is not None:
+            return result
+        entered_empty_find_count += 1
+        if entered_empty_find_count == 2:
+            both_requests_checked_for_duplicates.set()
+        try:
+            await asyncio.wait_for(both_requests_checked_for_duplicates.wait(), timeout=0.05)
+        except TimeoutError:
+            pass
+        return result
+
+    monkeypatch.setattr(service, "_find_active_duplicate_task", delayed_find)
+
+    async def create_duplicate_task() -> GenerationTask:
+        async with session_factory() as session:
+            return await service.create_task(
+                session,
+                queue_name=TEXT_QUEUE_NAME,
+                task_type="topic_generate",
+                business_type="campaign",
+                business_id=campaign.id,
+                campaign_id=campaign.id,
+                payload={
+                    "campaign_id": campaign.id,
+                    "limit": 3,
+                    "signals": {"country": "US", "platform": "Facebook"},
+                },
+            )
+
+    first_task, duplicate_task = await asyncio.gather(
+        create_duplicate_task(),
+        create_duplicate_task(),
+    )
+
+    async with session_factory() as session:
+        rows = list((await session.execute(select(GenerationTask))).scalars().all())
+
+    assert first_task.id == duplicate_task.id
+    reuse_flags = {
+        getattr(first_task, "reused_existing", False),
+        getattr(duplicate_task, "reused_existing", False),
+    }
+    assert reuse_flags == {
+        False,
+        True,
+    }
+    assert len(rows) == 1
 
     await engine.dispose()
 
