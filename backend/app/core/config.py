@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         default_factory=lambda: [10, 30, 60]
     )
     model_provider_text_concurrency: int = Field(default=6, ge=1, le=64)
-    model_provider_image_concurrency: int = Field(default=2, ge=1, le=32)
+    model_provider_image_concurrency: int = Field(default=6, ge=1, le=32)
     model_provider_video_concurrency: int = Field(default=1, ge=1, le=16)
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"

@@ -49,6 +49,7 @@ class CreativeService:
             storyboard=payload.storyboard,
             storyboard_text=payload.storyboard_text,
             keyframe_plan=_keyframe_plan(payload),
+            prepared_briefs=payload.prepared_briefs,
         )
         for asset in assets:
             session.add(asset)
@@ -71,6 +72,7 @@ class CreativeService:
         storyboard: list[dict] | None = None,
         storyboard_text: str | None = None,
         keyframe_plan: dict | None = None,
+        prepared_briefs: list[ImageBrief] | None = None,
         task_id: str | None = None,
     ) -> list[CreativeAsset]:
         draft = await get_required(session, CopyDraft, draft_id)
@@ -86,15 +88,15 @@ class CreativeService:
             target_index=target_index,
             target_indices=target_indices or [],
         )
-        briefs = await self._generate_image_briefs_via_text_queue(
+        briefs = await self.prepare_image_briefs_for_slots(
             draft=draft,  # type: ignore[arg-type]
-            count=len(slot_indices),
+            slot_indices=slot_indices,
             size=size,
             storyboard_context=storyboard_context,
             streamed=False,
             task_id=task_id,
+            prepared_briefs=prepared_briefs,
         )
-        briefs = _briefs_for_slots(briefs, slot_indices)
         return list(
             await asyncio.gather(
                 *[
@@ -118,11 +120,59 @@ class CreativeService:
                         },
                         image_model_id=image_model_id,
                         task_id=task_id,
+                        use_image_queue=task_id is None,
                     )
                     for brief in briefs
                 ]
             )
         )
+
+    async def prepare_image_briefs(
+        self,
+        session: AsyncSession,
+        payload: CreativeGenerateRequest,
+        task_id: str | None = None,
+    ) -> list[ImageBrief]:
+        draft = await get_required(session, CopyDraft, payload.draft_id)
+        creative_strategy = _creative_strategy_from_draft(draft)
+        storyboard_context = _storyboard_context(
+            payload.storyboard,
+            payload.storyboard_text,
+            _keyframe_plan(payload),
+            creative_strategy,
+        )
+        return await self.prepare_image_briefs_for_slots(
+            draft=draft,  # type: ignore[arg-type]
+            slot_indices=_slot_indices(payload),
+            size=payload.size,
+            storyboard_context=storyboard_context,
+            streamed=False,
+            task_id=task_id,
+            prepared_briefs=payload.prepared_briefs,
+        )
+
+    async def prepare_image_briefs_for_slots(
+        self,
+        *,
+        draft: CopyDraft,
+        slot_indices: list[int],
+        size: str,
+        storyboard_context: dict | None,
+        streamed: bool,
+        task_id: str | None = None,
+        prepared_briefs: list[ImageBrief] | None = None,
+    ) -> list[ImageBrief]:
+        if prepared_briefs:
+            return _prepared_briefs_for_slots(prepared_briefs, slot_indices)
+        briefs = await self._generate_image_briefs_via_text_queue(
+            draft=draft,
+            count=len(slot_indices),
+            size=size,
+            storyboard_context=storyboard_context,
+            streamed=streamed,
+            task_id=task_id,
+        )
+        return _briefs_for_slots(briefs, slot_indices)
 
     async def stream_creatives(
         self,
@@ -145,35 +195,37 @@ class CreativeService:
             yield {"type": "slot", "index": index}
 
         try:
-            brief_task = asyncio.create_task(
-                self._generate_image_briefs_via_text_queue(
-                    draft=draft,  # type: ignore[arg-type]
-                    count=len(slot_indices),
-                    size=payload.size,
-                    storyboard_context=storyboard_context,
-                    streamed=True,
-                    task_id=task_id,
+            if payload.prepared_briefs:
+                briefs = _prepared_briefs_for_slots(payload.prepared_briefs, slot_indices)
+            else:
+                brief_task = asyncio.create_task(
+                    self._generate_image_briefs_via_text_queue(
+                        draft=draft,  # type: ignore[arg-type]
+                        count=len(slot_indices),
+                        size=payload.size,
+                        storyboard_context=storyboard_context,
+                        streamed=True,
+                        task_id=task_id,
+                    )
                 )
-            )
-            while True:
-                done, _ = await asyncio.wait(
-                    {brief_task},
-                    timeout=STREAM_HEARTBEAT_SECONDS,
-                )
-                if done:
-                    break
-                yield _heartbeat_event(
-                    stage="image_brief_generation",
-                    pending_indices=slot_indices,
-                )
-            briefs = await brief_task
+                while True:
+                    done, _ = await asyncio.wait(
+                        {brief_task},
+                        timeout=STREAM_HEARTBEAT_SECONDS,
+                    )
+                    if done:
+                        break
+                    yield _heartbeat_event(
+                        stage="image_brief_generation",
+                        pending_indices=slot_indices,
+                    )
+                briefs = _briefs_for_slots(await brief_task, slot_indices)
         except Exception as exc:
             for index in slot_indices:
                 yield {"type": "error", "index": index, "message": f"图片 brief 生成失败：{exc}"}
             yield {"type": "done", "generated": 0}
             return
 
-        briefs = _briefs_for_slots(briefs, slot_indices)
         missing_indices = slot_indices[len(briefs) :]
         tasks = [
             asyncio.create_task(
@@ -190,6 +242,7 @@ class CreativeService:
                     ),
                     image_model_id=payload.model_id,
                     task_id=task_id,
+                    use_image_queue=task_id is None,
                 )
             )
             for brief in briefs
@@ -344,6 +397,7 @@ class CreativeService:
         extra_metadata: dict,
         image_model_id: str | None = None,
         task_id: str | None = None,
+        use_image_queue: bool = True,
     ) -> tuple[int, CreativeAsset | None, str | None]:
         try:
             asset = await self._generate_asset_from_brief(
@@ -353,6 +407,7 @@ class CreativeService:
                 extra_metadata=extra_metadata,
                 image_model_id=image_model_id,
                 task_id=task_id,
+                use_image_queue=use_image_queue,
             )
             return brief.image_index, asset, None
         except Exception as exc:
@@ -366,6 +421,7 @@ class CreativeService:
         extra_metadata: dict,
         image_model_id: str | None = None,
         task_id: str | None = None,
+        use_image_queue: bool = True,
     ) -> CreativeAsset:
         image_settings = settings_for_image_model(self.settings, image_model_id)
         image_provider = get_image_provider(image_settings)
@@ -381,9 +437,12 @@ class CreativeService:
             provider=image_settings.image_provider,
             model=image_model,
         ):
-            generated_images = await self.text_tasks.run_in_image_queue(
-                lambda: image_provider.generate_images([brief])
+            runner = (
+                self.text_tasks.run_in_image_queue
+                if use_image_queue
+                else self.text_tasks.run_in_image_provider
             )
+            generated_images = await runner(lambda: image_provider.generate_images([brief]))
         if not generated_images:
             raise ProviderError("Image provider returned no generated image.")
         return await self._asset_from_generated_image(
@@ -486,6 +545,28 @@ def _briefs_for_slots(briefs: list[ImageBrief], slot_indices: list[int]) -> list
             )
         )
     return normalized
+
+
+def _prepared_briefs_for_slots(
+    briefs: list[ImageBrief],
+    slot_indices: list[int],
+) -> list[ImageBrief]:
+    by_index = {brief.image_index: brief for brief in briefs}
+    selected: list[ImageBrief] = []
+    for slot_index in slot_indices:
+        brief = by_index.get(slot_index)
+        if brief is None:
+            raise ProviderError(f"Prepared image brief missing slot {slot_index}.")
+        selected.append(
+            ImageBrief(
+                image_index=slot_index,
+                title=brief.title,
+                short_text=brief.short_text,
+                visual_direction=brief.visual_direction,
+                size=brief.size,
+            )
+        )
+    return selected
 
 
 def _storyboard_context(

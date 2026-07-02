@@ -816,8 +816,7 @@ class GenerationTaskService:
             return
         if queue_name == IMAGE_QUEUE_NAME:
             async with _image_queue_capacity():
-                async with _model_provider_capacity(IMAGE_QUEUE_NAME):
-                    await self._process_task_body(task_id)
+                await self._process_task_body(task_id)
             return
         if queue_name == VIDEO_QUEUE_NAME:
             async with _video_queue_capacity():
@@ -928,6 +927,10 @@ class GenerationTaskService:
         async with _image_queue_capacity():
             async with _model_provider_capacity(IMAGE_QUEUE_NAME):
                 return await operation()
+
+    async def run_in_image_provider(self, operation: Callable[[], Awaitable[T]]) -> T:
+        async with _model_provider_capacity(IMAGE_QUEUE_NAME):
+            return await operation()
 
     async def run_in_video_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
         async with _video_queue_capacity():

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from backend.app.api.v1.endpoints import creatives as creatives_endpoint
 from backend.app.api.v1.endpoints import generation_tasks as generation_tasks_endpoint
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base, utcnow
@@ -1531,7 +1532,7 @@ async def test_model_provider_capacity_limits_image_work(
 
 
 @pytest.mark.asyncio
-async def test_image_generation_task_uses_model_provider_capacity(
+async def test_image_generation_task_does_not_hold_model_provider_capacity(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1583,10 +1584,153 @@ async def test_image_generation_task_uses_model_provider_capacity(
         GenerationTaskService().process_task(second_task.id),
     )
 
-    assert max_active_count == 1
+    assert max_active_count == 2
 
     await engine.dispose()
     task_module._reset_model_provider_capacity_for_tests()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_keyframe_task_batch_prepares_briefs_once_and_splits_scheme_tasks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "")
+    get_settings.cache_clear()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'keyframe-batch.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_get_session():
+        async with session_factory() as session:
+            yield session
+
+    await _seed_generation_task_users(session_factory)
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-keyframe-batch-1",
+            name="Keyframe Batch Campaign",
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-keyframe-batch-1",
+            campaign_id=campaign.id,
+            title="Batch topic",
+            angle="Batch angle",
+            source_data={},
+        )
+        draft = CopyDraft(
+            id="draft-keyframe-batch-1",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Ad copy for keyframes",
+            headline="Batch headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+    brief_calls: list[int] = []
+
+    class CountingImageTaskLLMProvider(FakeImageTaskLLMProvider):
+        async def generate_image_briefs(
+            self,
+            draft: CopyDraft,
+            count: int,
+            size: str,
+            feedback: str | None = None,
+            source_asset: CreativeAsset | None = None,
+            storyboard_context: dict | None = None,
+        ) -> list[ImageBrief]:
+            brief_calls.append(count)
+            return await super().generate_image_briefs(
+                draft=draft,
+                count=count,
+                size=size,
+                feedback=feedback,
+                source_asset=source_asset,
+                storyboard_context=storyboard_context,
+            )
+
+    scheduled_task_ids: list[str] = []
+
+    def capture_schedule(task, background_tasks=None):
+        scheduled_task_ids.append(task.id)
+        return True
+
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(
+        creative_service,
+        "get_llm_provider",
+        lambda settings: CountingImageTaskLLMProvider(),
+    )
+    monkeypatch.setattr(creatives_endpoint, "service", creative_service.CreativeService())
+    monkeypatch.setattr(creatives_endpoint, "schedule_generation_task", capture_schedule)
+
+    app = create_app()
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/creatives/generate/keyframe-tasks",
+                headers=_operator_headers(OPERATOR_A_ID),
+                json={
+                    "draft_id": "draft-keyframe-batch-1",
+                    "count": 6,
+                    "size": "9:16",
+                    "generation_mode": "video_keyframe_variants",
+                    "variant_count": 3,
+                    "frames_per_variant": 2,
+                    "video_duration_seconds": 12,
+                    "storyboard": [
+                        {
+                            "scene_index": 1,
+                            "visual": "Open with product proof.",
+                            "subtitle": "Win faster",
+                        }
+                    ],
+                    "storyboard_text": "Scene 1: Open with product proof.",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert [item["queue_name"] for item in payload] == [
+        IMAGE_QUEUE_NAME,
+        IMAGE_QUEUE_NAME,
+        IMAGE_QUEUE_NAME,
+    ]
+    assert brief_calls == [6]
+
+    async with session_factory() as session:
+        tasks = list(
+            (
+                await session.execute(
+                    select(GenerationTask).order_by(GenerationTask.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [task.id for task in tasks] == scheduled_task_ids
+    assert [task.payload_json["target_indices"] for task in tasks] == [
+        [1, 2],
+        [3, 4],
+        [5, 6],
+    ]
+    assert [task.payload_json["count"] for task in tasks] == [2, 2, 2]
+    assert [
+        [brief["image_index"] for brief in task.payload_json["prepared_briefs"]]
+        for task in tasks
+    ] == [[1, 2], [3, 4], [5, 6]]
+
+    await engine.dispose()
     get_settings.cache_clear()
 
 

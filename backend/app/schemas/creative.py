@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from backend.app.schemas.ai import ImageBrief
 from backend.app.schemas.common import TimestampedRead
 
 
@@ -18,6 +19,7 @@ class CreativeGenerateRequest(BaseModel):
     variant_count: int = Field(default=3, ge=1, le=3)
     frames_per_variant: int = Field(default=2, ge=1, le=2)
     video_duration_seconds: int | None = Field(default=None, ge=1, le=300)
+    prepared_briefs: list[ImageBrief] = Field(default_factory=list, max_length=6)
 
     @field_validator("target_indices")
     @classmethod

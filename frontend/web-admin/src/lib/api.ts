@@ -533,6 +533,31 @@ export const api = {
       ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
       ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
     }),
+  generateKeyframeCreativesTasks: (
+    draftId: string,
+    count = 6,
+    size = "9:16",
+    options: {
+      modelId?: string | null;
+      storyboard?: Record<string, unknown>[];
+      storyboardText?: string | null;
+      variantCount?: number;
+      framesPerVariant?: number;
+      videoDurationSeconds?: number | null;
+    } = {},
+  ) =>
+    post<GenerationTask[]>("/creatives/generate/keyframe-tasks", {
+      draft_id: draftId,
+      count,
+      size,
+      generation_mode: "video_keyframe_variants",
+      ...(options.modelId ? { model_id: options.modelId } : {}),
+      ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
+      ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
+      ...(options.variantCount ? { variant_count: options.variantCount } : {}),
+      ...(options.framesPerVariant ? { frames_per_variant: options.framesPerVariant } : {}),
+      ...(options.videoDurationSeconds ? { video_duration_seconds: options.videoDurationSeconds } : {}),
+    }),
   generateCreativesStream: (
     draftId: string,
     count = 3,

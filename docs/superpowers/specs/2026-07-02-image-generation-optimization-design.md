@@ -108,7 +108,7 @@ error_code
 先将：
 
 ```env
-MODEL_PROVIDER_IMAGE_CONCURRENCY=3
+MODEL_PROVIDER_IMAGE_CONCURRENCY=6
 ```
 
 不直接设为 6。当前生产式本地 Docker 使用 Celery image worker，worker 本身还有并发；如果 provider 并发直接升到 6，叠加多个 worker 进程后可能对 CLIProxyAPI 或上游模型造成过量并发，引发排队、限流、超时或失败率上升。
@@ -122,7 +122,7 @@ MODEL_PROVIDER_IMAGE_CONCURRENCY=3
 - 单张失败时，可以只重试该图，不影响同方案另一张已成功图片。
 - 可以对某个方案执行整组重生。
 - 后端日志能区分 brief、provider、下载保存、DB 写入各阶段耗时。
-- `MODEL_PROVIDER_IMAGE_CONCURRENCY=3` 下，图片任务成功率不低于现状，耗时有可观测对比数据。
+- `MODEL_PROVIDER_IMAGE_CONCURRENCY=6` 下，图片任务成功率不低于现状，耗时有可观测对比数据。
 
 ## 非目标
 

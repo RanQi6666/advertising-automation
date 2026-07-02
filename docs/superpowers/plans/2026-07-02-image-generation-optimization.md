@@ -14,8 +14,7 @@
 - Do not show technical statuses like `brief 生成中` or `图片下载保存中` in the frontend.
 - Keep `/integrations/material-generation/images` public response shape unchanged.
 - Keep `creative_assets` as the generated image asset table.
-- Do not set image provider concurrency directly to 6.
-- Use `MODEL_PROVIDER_IMAGE_CONCURRENCY=3` as the first concurrency adjustment.
+- Use `MODEL_PROVIDER_IMAGE_CONCURRENCY=6` with GPT image models after removing nested provider capacity holds.
 - Preserve existing `target_index` single-image retry compatibility.
 
 ---
@@ -34,7 +33,7 @@
 - Add `frontend/web-admin/tests/creativeGenerationTasks.test.ts` for the new frontend helpers.
 - Modify `frontend/web-admin/src/App.tsx` to launch keyframe方案 tasks, resume multiple image tasks, and add whole方案 retry.
 - Modify `frontend/web-admin/tests/reviewUiLayout.test.ts` or add source-level assertions in `frontend/web-admin/tests/creativeGenerationTasks.test.ts` only where behavior is helper-based.
-- Modify `.env.example` and `.env.production.example` to document `MODEL_PROVIDER_IMAGE_CONCURRENCY=3`.
+- Modify `.env.example` and `.env.production.example` to document `MODEL_PROVIDER_IMAGE_CONCURRENCY=6`.
 
 ---
 
@@ -1146,14 +1145,14 @@ git commit -m "feat: add keyframe scheme retry"
 - Verify: no changes to `.env`, `.env.production`, or `AGENTS.md`
 
 **Interfaces:**
-- Produces: documented example setting `MODEL_PROVIDER_IMAGE_CONCURRENCY=3`.
+- Produces: documented example setting `MODEL_PROVIDER_IMAGE_CONCURRENCY=6`.
 
 - [ ] **Step 1: Update example env files**
 
 In `.env.example` and `.env.production.example`, set or add:
 
 ```env
-MODEL_PROVIDER_IMAGE_CONCURRENCY=3
+MODEL_PROVIDER_IMAGE_CONCURRENCY=6
 ```
 
 Do not edit `.env` or `.env.production` in this task.
@@ -1245,5 +1244,5 @@ Expected: logs contain `image_generation_timing` entries for `image_brief`, `pro
 - [ ] Single image retry still sends `target_index`.
 - [ ] Whole方案 retry sends `target_indices`.
 - [ ] Backend logs timing stages without exposing technical statuses in the UI.
-- [ ] `MODEL_PROVIDER_IMAGE_CONCURRENCY=3` is documented in example env files only.
+- [ ] `MODEL_PROVIDER_IMAGE_CONCURRENCY=6` is documented in example env files.
 - [ ] Backend tests, frontend tests, frontend build, and local Docker health check pass.

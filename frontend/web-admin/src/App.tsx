@@ -45,7 +45,6 @@ import {
 } from "./lib/creativeKeyframes";
 import {
   activeImageGenerationTaskCachePayload,
-  keyframeTaskTargetGroups,
   normalizeActiveImageGenerationTaskCache,
   targetIndicesMax,
   type ActiveImageGenerationTaskCache,
@@ -2409,29 +2408,18 @@ function App() {
       }
 
       if (generationPlan.isKeyframeVariant) {
-        const targetGroups = keyframeTaskTargetGroups(
-          generationPlan.variantCount ?? DEFAULT_KEYFRAME_VARIANT_COUNT,
-          generationPlan.framesPerVariant ?? KEYFRAME_FRAMES_PER_VARIANT,
-        );
-        const tasks = await Promise.all(
-          targetGroups.map((targetIndices) =>
-            api.generateCreativesTask(
-              draft.id,
-              targetIndices.length,
-              generationPlan.size,
-              undefined,
-              {
-                modelId: selectedImageModelId,
-                storyboard: storyboardContext?.storyboard,
-                storyboardText: storyboardContext?.storyboardText,
-                generationMode: generationPlan.generationMode,
-                variantCount: generationPlan.variantCount,
-                framesPerVariant: generationPlan.framesPerVariant,
-                videoDurationSeconds: generationPlan.videoDurationSeconds,
-                targetIndices,
-              },
-            ),
-          ),
+        const tasks = await api.generateKeyframeCreativesTasks(
+          draft.id,
+          generationPlan.count,
+          generationPlan.size,
+          {
+            modelId: selectedImageModelId,
+            storyboard: storyboardContext?.storyboard,
+            storyboardText: storyboardContext?.storyboardText,
+            variantCount: generationPlan.variantCount,
+            framesPerVariant: generationPlan.framesPerVariant,
+            videoDurationSeconds: generationPlan.videoDurationSeconds,
+          },
         );
         saveActiveImageGenerationTaskCache({
           taskIds: tasks.map((task) => task.id),

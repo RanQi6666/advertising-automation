@@ -312,11 +312,12 @@ test("keyframe scheme cards use clear frame labels and blank rewrite feedback", 
 });
 
 test("keyframe image generation launches scheme tasks and stores multiple task ids", () => {
-  assert.match(appSource, /keyframeTaskTargetGroups/);
+  assert.match(appSource, /generateKeyframeCreativesTasks/);
+  assert.match(apiSource, /\/creatives\/generate\/keyframe-tasks/);
+  assert.match(apiSource, /generation_mode: "video_keyframe_variants"/);
   assert.match(appSource, /normalizeActiveImageGenerationTaskCache/);
   assert.match(appSource, /targetIndicesMax/);
   assert.match(appSource, /taskIds: tasks\.map\(\(task\) => task\.id\)/);
-  assert.match(appSource, /targetIndices,/);
 });
 
 test("active image tasks stay pending and continue polling after foreground timeout", () => {
