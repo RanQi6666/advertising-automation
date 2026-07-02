@@ -186,6 +186,37 @@ test("generation task helper merges single-slot retry without dropping other key
   );
 });
 
+test("generation task helper keeps six keyframe slots for pair task target indices", () => {
+  const currentSlots = [
+    { index: 1, status: "loading" as const },
+    { index: 2, status: "loading" as const },
+    { index: 3, status: "loading" as const },
+    { index: 4, status: "loading" as const },
+    { index: 5, status: "loading" as const },
+    { index: 6, status: "loading" as const },
+  ];
+  const taskSlots = [
+    { index: 3, status: "done" as const },
+    { index: 4, status: "done" as const },
+  ];
+
+  const merged = mergeCreativeGenerationTaskSlots(currentSlots, taskSlots, {
+    minimumSlotCount: 6,
+  });
+
+  assert.deepEqual(
+    merged.map((slot) => [slot.index, slot.status]),
+    [
+      [1, "loading"],
+      [2, "loading"],
+      [3, "done"],
+      [4, "done"],
+      [5, "loading"],
+      [6, "loading"],
+    ],
+  );
+});
+
 test("generation task helpers restore video asset from task result", () => {
   const videoTask = task("queued");
   videoTask.queue_name = "video_queue";

@@ -44,6 +44,13 @@ import {
   type KeyframeVariantCount,
 } from "./lib/creativeKeyframes";
 import {
+  activeImageGenerationTaskCachePayload,
+  keyframeTaskTargetGroups,
+  normalizeActiveImageGenerationTaskCache,
+  targetIndicesMax,
+  type ActiveImageGenerationTaskCache,
+} from "./lib/creativeGenerationTasks";
+import {
   generationAttemptIsFinal,
   generationAttemptIsRecoverable,
   generationAttemptLastSuccessEvent,
@@ -199,10 +206,6 @@ type AdGenerationIntegrationParams = {
   externalOrderId: string | null;
   returnUrl: string | null;
   callbackUrl: string | null;
-};
-type ActiveImageGenerationTaskCache = {
-  taskId: string;
-  draftId: string;
 };
 type ActiveVideoGenerationTaskCache = {
   taskId: string;
@@ -1045,26 +1048,27 @@ function App() {
 
   useEffect(() => {
     const cached = loadActiveImageGenerationTaskCache();
-    if (!cached || imageTaskResumeRef.current === cached.taskId) return;
+    if (!cached) return;
     if (!drafts.some((draft) => draft.id === cached.draftId)) return;
 
     let cancelled = false;
-    imageTaskResumeRef.current = cached.taskId;
-
-    const resumeImageTask = async () => {
+    const resumeImageTasks = async () => {
       setActiveView("creatives");
       setLoading("creatives");
       try {
-        const currentTask = await api.getGenerationTask(cached.taskId);
+        for (const taskId of cached.taskIds) {
+          if (cancelled) return;
+          imageTaskResumeRef.current = taskId;
+          const currentTask = await api.getGenerationTask(taskId);
         if (cancelled) return;
         if (currentTask.business_id !== cached.draftId) {
-          clearActiveImageGenerationTaskCache(cached.taskId);
-          return;
+          clearActiveImageGenerationTaskCache(taskId);
+          continue;
         }
         applyCreativeGenerationTask(currentTask);
         if (generationTaskIsFinal(currentTask)) {
           clearActiveImageGenerationTaskCache(currentTask.id);
-          return;
+          continue;
         }
         const completedTask = await waitForGenerationTask(
           currentTask.id,
@@ -1079,8 +1083,10 @@ function App() {
             clearActiveImageGenerationTaskCache(completedTask.id);
           }
         }
+        }
       } catch (caught) {
         if (!cancelled && !isTransientApiError(caught)) {
+          clearActiveImageGenerationTaskCache();
           setCaughtError("image", caught, "图片任务恢复失败");
         }
       } finally {
@@ -1091,10 +1097,10 @@ function App() {
       }
     };
 
-    void resumeImageTask();
+    void resumeImageTasks();
     return () => {
       cancelled = true;
-      if (imageTaskResumeRef.current === cached.taskId) {
+      if (imageTaskResumeRef.current && cached.taskIds.includes(imageTaskResumeRef.current)) {
         imageTaskResumeRef.current = null;
       }
     };
@@ -2300,6 +2306,70 @@ function App() {
         return;
       }
 
+      if (generationPlan.isKeyframeVariant) {
+        const targetGroups = keyframeTaskTargetGroups(
+          generationPlan.variantCount ?? DEFAULT_KEYFRAME_VARIANT_COUNT,
+          generationPlan.framesPerVariant ?? KEYFRAME_FRAMES_PER_VARIANT,
+        );
+        const tasks = await Promise.all(
+          targetGroups.map((targetIndices) =>
+            api.generateCreativesTask(
+              draft.id,
+              targetIndices.length,
+              generationPlan.size,
+              undefined,
+              {
+                modelId: selectedImageModelId,
+                storyboard: storyboardContext?.storyboard,
+                storyboardText: storyboardContext?.storyboardText,
+                generationMode: generationPlan.generationMode,
+                variantCount: generationPlan.variantCount,
+                framesPerVariant: generationPlan.framesPerVariant,
+                videoDurationSeconds: generationPlan.videoDurationSeconds,
+                targetIndices,
+              },
+            ),
+          ),
+        );
+        saveActiveImageGenerationTaskCache({
+          taskIds: tasks.map((task) => task.id),
+          draftId: draft.id,
+        });
+        for (const task of tasks) {
+          applyCreativeGenerationTask(task);
+        }
+        const completedTasks = await Promise.all(
+          tasks.map((task) =>
+            waitForGenerationTask(task.id, "图片", "image", applyCreativeGenerationTask),
+          ),
+        );
+        for (const completedTask of completedTasks) {
+          if (!completedTask) continue;
+          applyCreativeGenerationTask(completedTask);
+          if (generationTaskIsFinal(completedTask)) {
+            clearActiveImageGenerationTaskCache(completedTask.id);
+          }
+        }
+        const generatedAssets = completedTasks.flatMap((task) =>
+          task ? applyCreativeGenerationTask(task) : [],
+        );
+        if (!generatedAssets.length) {
+          setError("图片生成失败，请稍后重试。", "image");
+          markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
+          return;
+        }
+        const firstGroupIds = firstCompleteKeyframeGroupIds(generatedAssets);
+        if (firstGroupIds.length) setSelectedCreativeIds(firstGroupIds);
+        clearError("image");
+        setNotice(
+          generatedAssets.length === generationPlan.count
+            ? `${generationPlan.variantCount ?? DEFAULT_KEYFRAME_VARIANT_COUNT} 组关键帧方案已生成`
+            : `已生成 ${generatedAssets.length} 张关键帧，失败图片可单独重试`,
+        );
+        void saveWorkflowStage("image_review");
+        return;
+      }
+
       const task = await api.generateCreativesTask(
         draft.id,
         generationPlan.count,
@@ -2315,7 +2385,7 @@ function App() {
           videoDurationSeconds: generationPlan.videoDurationSeconds,
         },
       );
-      saveActiveImageGenerationTaskCache({ taskId: task.id, draftId: draft.id });
+      saveActiveImageGenerationTaskCache({ taskIds: [task.id], draftId: draft.id });
       applyCreativeGenerationTask(task);
       const completedTask = await waitForGenerationTask(
         task.id,
@@ -2585,7 +2655,7 @@ function App() {
           videoDurationSeconds: generationPlan.videoDurationSeconds,
         },
       );
-      saveActiveImageGenerationTaskCache({ taskId: task.id, draftId: draft.id });
+      saveActiveImageGenerationTaskCache({ taskIds: [task.id], draftId: draft.id });
       applyCreativeGenerationTask(task);
       const completedTask = await waitForGenerationTask(
         task.id,
@@ -8006,11 +8076,7 @@ function loadActiveImageGenerationTaskCache(): ActiveImageGenerationTaskCache | 
   try {
     const raw = window.sessionStorage.getItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!isRecord(parsed)) return null;
-    const taskId = typeof parsed.taskId === "string" ? parsed.taskId : "";
-    const draftId = typeof parsed.draftId === "string" ? parsed.draftId : "";
-    return taskId && draftId ? { taskId, draftId } : null;
+    return normalizeActiveImageGenerationTaskCache(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -8019,7 +8085,10 @@ function loadActiveImageGenerationTaskCache(): ActiveImageGenerationTaskCache | 
 function saveActiveImageGenerationTaskCache(entry: ActiveImageGenerationTaskCache) {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.setItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY, JSON.stringify(entry));
+    window.sessionStorage.setItem(
+      ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY,
+      activeImageGenerationTaskCachePayload(entry),
+    );
   } catch {
     // Local cache is an optimization only.
   }
@@ -8028,7 +8097,12 @@ function saveActiveImageGenerationTaskCache(entry: ActiveImageGenerationTaskCach
 function clearActiveImageGenerationTaskCache(taskId?: string) {
   if (typeof window === "undefined") return;
   const cached = loadActiveImageGenerationTaskCache();
-  if (taskId && cached?.taskId !== taskId) return;
+  if (taskId && cached && cached.taskIds.length > 1) {
+    const remainingTaskIds = cached.taskIds.filter((id) => id !== taskId);
+    saveActiveImageGenerationTaskCache({ taskIds: remainingTaskIds, draftId: cached.draftId });
+    return;
+  }
+  if (taskId && cached && !cached.taskIds.includes(taskId)) return;
   try {
     window.sessionStorage.removeItem(ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY);
   } catch {
@@ -8332,6 +8406,10 @@ function expectedCreativeTaskSlotCount(task: GenerationTask): number {
   if (task.task_type !== "image_generate") return 0;
   const generationMode = readText(task.payload.generation_mode) || readText(task.metadata.generation_mode);
   const targetIndex = numericMetadataValue(task.payload.target_index ?? task.metadata.target_index);
+  const targetIndicesMaximum = targetIndicesMax(
+    task.payload.target_indices ?? task.metadata.target_indices,
+  );
+  const targetSlotMaximum = Math.max(targetIndex, targetIndicesMaximum);
   if (generationMode === "video_keyframe_variants") {
     const variantCount =
       numericMetadataValue(task.payload.variant_count ?? task.metadata.variant_count) ||
@@ -8339,13 +8417,13 @@ function expectedCreativeTaskSlotCount(task: GenerationTask): number {
     const framesPerVariant =
       numericMetadataValue(task.payload.frames_per_variant ?? task.metadata.frames_per_variant) ||
       KEYFRAME_FRAMES_PER_VARIANT;
-    return Math.max(variantCount * framesPerVariant, targetIndex);
+    return Math.max(variantCount * framesPerVariant, targetSlotMaximum);
   }
   const count =
     numericMetadataValue(task.payload.count) ||
     numericMetadataValue(task.metadata.count) ||
     COPY_IMAGE_GENERATION_COUNT;
-  return Math.max(count, targetIndex);
+  return Math.max(count, targetSlotMaximum);
 }
 
 function buildCreativeSlots(
