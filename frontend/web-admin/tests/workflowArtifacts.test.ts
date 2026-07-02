@@ -6,6 +6,8 @@ import {
   adGenerationJobNumber,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
+  resolveWorkbenchBaseSelection,
+  shouldClearCampaignWorkflowBeforeRefresh,
   videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
   workflowRequiresVideo,
@@ -317,4 +319,37 @@ test("formats work order numbers as chronological three digit serials", () => {
 
   assert.equal(adGenerationJobNumber(first, [second, first]), "001");
   assert.equal(adGenerationJobNumber(second, [second, first]), "002");
+});
+
+test("keeps visible workflow state when refreshing the currently selected campaign", () => {
+  assert.equal(shouldClearCampaignWorkflowBeforeRefresh("campaign-1", "campaign-1"), false);
+  assert.equal(shouldClearCampaignWorkflowBeforeRefresh("campaign-1", "campaign-2"), true);
+  assert.equal(
+    shouldClearCampaignWorkflowBeforeRefresh("campaign-1", "campaign-2", { silent: true }),
+    false,
+  );
+});
+
+test("resolves browser reload base selection from the selected work order campaign", () => {
+  const selectedJob = adGenerationJob({
+    id: "job-selected",
+    result_payload: { metadata_json: { campaign_id: "campaign-selected" } },
+  });
+  const otherJob = adGenerationJob({
+    id: "job-other",
+    result_payload: { metadata_json: { campaign_id: "campaign-other" } },
+  });
+
+  const selection = resolveWorkbenchBaseSelection({
+    currentJobId: "job-selected",
+    currentCampaignId: null,
+    jobs: [otherJob, selectedJob],
+    campaigns: [{ id: "campaign-other" }, { id: "campaign-selected" }],
+  });
+
+  assert.deepEqual(selection, {
+    selectedJobId: "job-selected",
+    selectedCampaignId: "campaign-selected",
+    shouldClearWorkflowState: false,
+  });
 });

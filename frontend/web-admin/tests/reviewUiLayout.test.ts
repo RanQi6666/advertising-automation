@@ -68,14 +68,40 @@ test("video script generation does not depend on selected reference images", () 
   const rewriteSource = asyncFunctionSource("handleRewriteVideoStoryboard", "handleCreateVideo");
   const createVideoSource = asyncFunctionSource("handleCreateVideo", "selectedCreativeIdsForVideo");
 
-  assert.match(generateSource, /api\.streamVideoStoryboard\(\s*selectedCampaign\.id,\s*\[\],/s);
+  assert.match(generateSource, /api\.generateVideoStoryboardTask\(\s*selectedCampaign\.id,\s*\[\],/s);
   assert.doesNotMatch(
     generateSource,
-    /api\.streamVideoStoryboard\(\s*selectedCampaign\.id,\s*sourceIds,/s,
+    /api\.generateVideoStoryboardTask\(\s*selectedCampaign\.id,\s*sourceIds,/s,
   );
   assert.match(rewriteSource, /creativeAssetIds:\s*\[\]/);
   assert.doesNotMatch(rewriteSource, /creativeAssetIds:\s*sourceIds/);
   assert.match(createVideoSource, /creativeAssetIds:\s*sourceIds/);
+});
+
+test("video storyboard generation uses text queue tasks", () => {
+  const generateSource = asyncFunctionSource(
+    "handleGenerateVideoStoryboard",
+    "handleRewriteVideoStoryboard",
+  );
+  const rewriteSource = asyncFunctionSource("handleRewriteVideoStoryboard", "handleCreateVideo");
+
+  assert.match(apiSource, /generateVideoStoryboardTask:/);
+  assert.match(apiSource, /\/videos\/storyboard\/task/);
+  assert.match(apiSource, /rewriteVideoStoryboardTask:/);
+  assert.match(apiSource, /\/videos\/storyboard\/rewrite\/task/);
+  assert.match(appSource, /videoStoryboardFromGenerationTask/);
+  assert.match(appSource, /videoStoryboardTextFromGenerationTask/);
+
+  assert.match(generateSource, /api\.generateVideoStoryboardTask\(/);
+  assert.match(generateSource, /waitForGenerationTask\(\s*task\.id,\s*"创意脚本"/s);
+  assert.match(generateSource, /applyVideoStoryboardGenerationTask\(completedTask\)/);
+  assert.doesNotMatch(generateSource, /api\.streamVideoStoryboard\(/);
+  assert.doesNotMatch(generateSource, /confirmGenerationAttempt/);
+
+  assert.match(rewriteSource, /api\.rewriteVideoStoryboardTask\(/);
+  assert.match(rewriteSource, /waitForGenerationTask\(\s*task\.id,\s*"脚本改写"/s);
+  assert.match(rewriteSource, /applyVideoStoryboardGenerationTask\(completedTask\)/);
+  assert.doesNotMatch(rewriteSource, /api\.streamRewriteVideoStoryboard\(/);
 });
 
 test("video generation uses task polling and restore cache", () => {
@@ -207,6 +233,34 @@ test("topic generation progress is isolated per campaign", () => {
   assert.doesNotMatch(topicsViewSource, /loading === "topics"/);
 });
 
+test("campaign switching ignores stale artifact refresh responses", () => {
+  const refreshSource = asyncFunctionSource("refreshCampaignData", "handleSelectSampleWorkOrder");
+
+  assert.match(appSource, /const campaignDataRequestRef = useRef\(0\);/);
+  assert.match(appSource, /function clearVisibleCampaignWorkflowState\(\)/);
+  assert.match(refreshSource, /const requestId = \+\+campaignDataRequestRef\.current;/);
+  assert.match(refreshSource, /clearVisibleCampaignWorkflowState\(\);/);
+  assert.match(refreshSource, /requestId !== campaignDataRequestRef\.current/);
+});
+
+test("deleted work orders are removed from the visible task monitor immediately", () => {
+  const deleteSource = asyncFunctionSource("handleDeleteJob", "buildTopicGenerationSignals");
+
+  assert.match(appSource, /function removeGenerationTasksForDeletedJob\(jobId: string, campaignId: string \| null\)/);
+  assert.match(appSource, /function clearDeletedCampaignWorkflowState\(campaignId: string \| null, forceVisible: boolean\)/);
+  assert.match(deleteSource, /const deletedCampaignId = job \? adGenerationCampaignId\(job\) : null;/);
+  assert.match(deleteSource, /clearDeletedCampaignWorkflowState\(deletedCampaignId, selectedJobId === jobId\);/);
+  assert.match(deleteSource, /removeGenerationTasksForDeletedJob\(jobId, deletedCampaignId\);/);
+  assert.match(appSource, /slot\.campaignId !== campaignId/);
+  assert.match(appSource, /setSelectedCampaignId\(\(current\) => \(!campaignId \|\| current === campaignId \? null : current\)\)/);
+  assert.match(appSource, /task\.display_context\.ad_generation_job_id/);
+});
+
+test("active task monitor polling is responsive without becoming one-second polling", () => {
+  assert.match(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 3000;/);
+  assert.doesNotMatch(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 1000;/);
+});
+
 test("image-only jobs do not mark video or final review complete before prior stages are ready", () => {
   const summarySource = componentSource("buildWorkflowSummary", "stepSummary");
 
@@ -312,6 +366,7 @@ test("task monitor view lists generation tasks and exposes retry", () => {
   assert.match(appSource, /function TaskMonitorView\(/);
   assert.match(appSource, /className="task-monitor-layout"/);
   assert.match(appSource, /generationTaskMonitorStats/);
+  assert.match(appSource, /generationTaskStatusDisplay\(task\)/);
   assert.match(appSource, /api\.listGenerationTasks/);
   assert.match(appSource, /api\.retryGenerationTask\(taskId\)/);
   assert.match(apiSource, /listGenerationTasks:/);
@@ -335,10 +390,25 @@ test("task monitor rows use readable work order context before technical ids", (
   assert.match(taskMonitorSource, /display\.businessLabel/);
   assert.match(taskMonitorSource, /\u4efb\u52a1\u53f7 \{shortId\(task\.id\)\}/);
   assert.doesNotMatch(taskMonitorSource, /<span className="task-id">\{shortId\(task\.id\)\}<\/span>/);
+  assert.match(appSource, /task\.display_context/);
+  assert.doesNotMatch(appSource, /未关联工单/);
+});
+
+test("failed creative candidate retry is not blocked by unrelated loading state", () => {
+  const creativeSlotSource = componentSource("CreativeSlotCard", "VideosView");
+  const retryTaskSource = asyncFunctionSource("handleRetryCreativeSlotTask", "handleRetryCreativeSlot");
+
+  assert.match(creativeSlotSource, /const canRetrySlot =/);
+  assert.match(creativeSlotSource, /disabled=\{isRetrying\}/);
+  assert.match(retryTaskSource, /if \(imageGenerationActionIsBusy\(loading\)\) \{\s*setNotice\(/s);
+  assert.doesNotMatch(
+    creativeSlotSource,
+    /onClick=\{\(\) => onRetrySlot\(slot\.index\)\} disabled=\{Boolean\(loading\)\}/,
+  );
 });
 
 test("task monitor auto refreshes active tasks silently", () => {
-  assert.match(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 5000;/);
+  assert.match(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 3000;/);
   assert.match(appSource, /const TASK_MONITOR_IDLE_REFRESH_MS = 15000;/);
   assert.match(appSource, /const hasActiveGenerationTasks = useMemo\(/);
   assert.match(appSource, /generationTaskIsFinal\(task\)/);
@@ -380,4 +450,19 @@ test("task monitor shows queue pressure analytics for concurrent usage", () => {
   assert.match(stylesSource, /\.task-analytics-grid\s*\{/);
   assert.match(stylesSource, /\.task-queue-health-card\s*\{/);
   assert.match(stylesSource, /\.task-risk-badge\.high\s*\{/);
+});
+
+test("task monitor shows redis backlog and celery worker health", () => {
+  const taskMonitorSource = componentSource("TaskMonitorView", "TaskDetailDrawer");
+
+  assert.match(taskMonitorSource, /summary\.execution_backend/);
+  assert.match(taskMonitorSource, /summary\.redis_queues/);
+  assert.match(taskMonitorSource, /summary\.worker_health/);
+  assert.match(taskMonitorSource, /className="task-runtime-grid"/);
+  assert.match(taskMonitorSource, /className="task-runtime-worker-list"/);
+  assert.match(taskMonitorSource, /className="task-redis-depth"/);
+  assert.match(taskMonitorSource, /workerHealth\.missing_queues/);
+  assert.match(stylesSource, /\.task-runtime-grid\s*\{/);
+  assert.match(stylesSource, /\.task-runtime-worker-list\s*\{/);
+  assert.match(stylesSource, /\.task-redis-depth\s*\{/);
 });

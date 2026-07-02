@@ -1,11 +1,15 @@
+import asyncio
 import logging
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
@@ -15,6 +19,7 @@ from backend.app.db.models.agent_run import AgentRun
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.landing_page_snapshot import LandingPageSnapshot
 from backend.app.db.models.review import ReviewTask
 from backend.app.db.models.topic import ContentTopic
@@ -49,6 +54,12 @@ from backend.app.services.utils import get_required
 from backend.app.services.work_order_service import WorkOrderService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AdGenerationJobRecoveryResult:
+    rescheduled_job_ids: list[str]
+    stale_job_ids: list[str]
 
 DELIVERY_FIELD_ALIASES = {
     "landing_url": ("landing_url", "link", "destination_url", "url"),
@@ -322,6 +333,18 @@ class AdGenerationService:
             )
 
         if work_order_id:
+            entity_ids.add(work_order_id)
+
+        generation_task_conditions = [GenerationTask.business_id.in_(entity_ids)]
+        if campaign_id:
+            generation_task_conditions.append(GenerationTask.campaign_id == campaign_id)
+        await session.execute(
+            delete(GenerationTask)
+            .where(or_(*generation_task_conditions))
+            .execution_options(synchronize_session=False)
+        )
+
+        if work_order_id:
             await session.execute(
                 delete(LandingPageSnapshot)
                 .where(LandingPageSnapshot.work_order_id == work_order_id)
@@ -363,13 +386,9 @@ class AdGenerationService:
             await self.process_job(session, job_id)
 
     async def process_job(self, session: AsyncSession, job_id: str) -> AdGenerationJob:
-        job = await self.get_job(session, job_id)
-        job.status = "processing"
-        job.started_at = utcnow()
-        job.completed_at = None
-        job.error_message = None
-        await session.commit()
-        await session.refresh(job)
+        job = await self._claim_queued_job(session, job_id)
+        if job is None:
+            return await self.get_job(session, job_id)
 
         try:
             payload = PublishingAdGenerationJobCreate.model_validate(job.request_payload)
@@ -394,6 +413,108 @@ class AdGenerationService:
             await session.commit()
             await session.refresh(failed_job)
             return failed_job
+
+    async def _claim_queued_job(
+        self,
+        session: AsyncSession,
+        job_id: str,
+    ) -> AdGenerationJob | None:
+        now = utcnow()
+        result = await session.execute(
+            update(AdGenerationJob)
+            .where(AdGenerationJob.id == job_id, AdGenerationJob.status == "queued")
+            .values(
+                status="processing",
+                started_at=now,
+                completed_at=None,
+                error_message=None,
+                updated_at=now,
+            )
+            .returning(AdGenerationJob.id)
+        )
+        claimed_job_id = result.scalar_one_or_none()
+        if claimed_job_id is None:
+            await session.rollback()
+            return None
+
+        await session.commit()
+        job = await self.get_job(session, claimed_job_id)
+        await session.refresh(job)
+        return job
+
+    async def recover_stale_jobs(self, session: AsyncSession) -> AdGenerationJobRecoveryResult:
+        settings = get_settings()
+        now = utcnow()
+        queued_before = now - timedelta(seconds=settings.generation_task_queued_stale_seconds)
+        processing_before = now - timedelta(
+            seconds=settings.generation_task_running_stale_seconds
+        )
+        queued_jobs = await self._find_stale_queued_jobs(session, queued_before)
+        processing_jobs = await self._find_stale_processing_jobs(session, processing_before)
+
+        rescheduled_job_ids: list[str] = []
+        stale_job_ids: list[str] = []
+        for job in queued_jobs:
+            job.updated_at = now
+            job.metadata_json = {
+                **(job.metadata_json or {}),
+                "last_recovery_queued_at": now.isoformat(),
+            }
+            rescheduled_job_ids.append(job.id)
+        for job in processing_jobs:
+            job.status = "queued"
+            job.started_at = None
+            job.completed_at = None
+            job.error_message = None
+            job.updated_at = now
+            job.metadata_json = {
+                **(job.metadata_json or {}),
+                "last_recovery_queued_at": now.isoformat(),
+                "recovered_from_status": "processing",
+            }
+            rescheduled_job_ids.append(job.id)
+            stale_job_ids.append(job.id)
+
+        if rescheduled_job_ids:
+            await session.commit()
+        else:
+            await session.rollback()
+        return AdGenerationJobRecoveryResult(
+            rescheduled_job_ids=rescheduled_job_ids,
+            stale_job_ids=stale_job_ids,
+        )
+
+    async def _find_stale_queued_jobs(
+        self,
+        session: AsyncSession,
+        queued_before,
+    ) -> list[AdGenerationJob]:
+        result = await session.execute(
+            select(AdGenerationJob)
+            .where(
+                AdGenerationJob.status == "queued",
+                AdGenerationJob.started_at.is_(None),
+                AdGenerationJob.updated_at <= queued_before,
+            )
+            .order_by(AdGenerationJob.updated_at.asc(), AdGenerationJob.created_at.asc())
+        )
+        return list(result.scalars().all())
+
+    async def _find_stale_processing_jobs(
+        self,
+        session: AsyncSession,
+        processing_before,
+    ) -> list[AdGenerationJob]:
+        result = await session.execute(
+            select(AdGenerationJob)
+            .where(
+                AdGenerationJob.status == "processing",
+                AdGenerationJob.started_at.is_not(None),
+                AdGenerationJob.started_at <= processing_before,
+            )
+            .order_by(AdGenerationJob.started_at.asc(), AdGenerationJob.created_at.asc())
+        )
+        return list(result.scalars().all())
 
     async def update_review_payload(
         self,
@@ -474,6 +595,7 @@ class AdGenerationService:
             business_type="ad_generation_job",
             business_id=job.id,
             payload={"job_id": job.id},
+            owner_user_id=job.owner_user_id,
             max_attempts=3,
             metadata={
                 "callback_url": job.callback_url,
@@ -727,6 +849,64 @@ class AdGenerationService:
             },
         )
         return result
+
+
+async def recover_ad_generation_jobs_on_startup(
+    schedule_job: Callable[[str], Any] | None = None,
+) -> AdGenerationJobRecoveryResult:
+    service = AdGenerationService()
+    async with AsyncSessionLocal() as session:
+        result = await service.recover_stale_jobs(session)
+    for job_id in result.rescheduled_job_ids:
+        _schedule_recovered_ad_generation_job(job_id, schedule_job)
+    _log_ad_generation_job_recovery_result("startup", result)
+    return result
+
+
+async def run_ad_generation_job_recovery_loop(
+    schedule_job: Callable[[str], Any] | None = None,
+) -> None:
+    service = AdGenerationService()
+    while True:
+        await asyncio.sleep(get_settings().generation_task_recovery_interval_seconds)
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await service.recover_stale_jobs(session)
+            for job_id in result.rescheduled_job_ids:
+                _schedule_recovered_ad_generation_job(job_id, schedule_job)
+            _log_ad_generation_job_recovery_result("periodic", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ad generation job recovery loop failed.")
+
+
+def _schedule_recovered_ad_generation_job(
+    job_id: str,
+    schedule_job: Callable[[str], Any] | None,
+) -> None:
+    if schedule_job is not None:
+        schedule_job(job_id)
+        return
+    from backend.app.services.generation_task_dispatcher import schedule_ad_generation_job
+
+    schedule_ad_generation_job(job_id)
+
+
+def _log_ad_generation_job_recovery_result(
+    source: str,
+    result: AdGenerationJobRecoveryResult,
+) -> None:
+    if not result.rescheduled_job_ids and not result.stale_job_ids:
+        return
+    logger.info(
+        "Ad generation job recovery completed.",
+        extra={
+            "source": source,
+            "rescheduled_count": len(result.rescheduled_job_ids),
+            "stale_count": len(result.stale_job_ids),
+        },
+    )
 
 
 async def _ids_for_campaign(

@@ -31,6 +31,7 @@ import {
   type ManualAdPerformancePayload,
 } from "./lib/adPerformanceManualJson";
 import {
+  COPY_IMAGE_GENERATION_COUNT,
   DEFAULT_KEYFRAME_VARIANT_COUNT,
   KEYFRAME_FRAMES_PER_VARIANT,
   KEYFRAME_VARIANT_OPTIONS,
@@ -60,9 +61,13 @@ import {
   generationTaskQueueRiskLabel,
   generationTaskQueueLabel,
   generationTaskSummary,
+  generationTaskStatusDisplay,
   generationTaskStatusLabel,
   generationTaskTypeLabel,
+  mergeCreativeGenerationTaskSlots,
   videoAssetFromGenerationTask,
+  videoStoryboardFromGenerationTask,
+  videoStoryboardTextFromGenerationTask,
   type GenerationTask,
   type GenerationTaskListResponse,
 } from "./lib/generationTasks";
@@ -71,6 +76,8 @@ import {
   adPreviewCreativeOptions,
   buildCreativeReviewState,
   filterWorkflowArtifactsForTopic,
+  resolveWorkbenchBaseSelection,
+  shouldClearCampaignWorkflowBeforeRefresh,
   videoCreativeAssetIdsForSelection,
   videoCreativeReferenceOptions,
   workflowRequiresVideo,
@@ -211,7 +218,7 @@ const GENERATION_ATTEMPT_CONFIRM_TIMEOUT_MS = 90_000;
 const GENERATION_ATTEMPT_CONFIRM_INTERVAL_MS = 2_000;
 const GENERATION_TASK_CONFIRM_TIMEOUT_MS = 240_000;
 const GENERATION_TASK_CONFIRM_INTERVAL_MS = 2_000;
-const TASK_MONITOR_ACTIVE_REFRESH_MS = 5000;
+const TASK_MONITOR_ACTIVE_REFRESH_MS = 3000;
 const TASK_MONITOR_IDLE_REFRESH_MS = 15000;
 const ACTIVE_IMAGE_GENERATION_TASK_CACHE_KEY = "image_generation_task_v1:active";
 const ACTIVE_VIDEO_GENERATION_TASK_CACHE_KEY = "video_generation_task_v1:active";
@@ -432,6 +439,7 @@ function App() {
   const [messageHistory, setMessageHistory] = useState<MessageHistoryItem[]>([]);
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
   const selectedCampaignIdRef = useRef<string | null>(null);
+  const campaignDataRequestRef = useRef(0);
   const imageTaskResumeRef = useRef<string | null>(null);
   const videoTaskResumeRef = useRef<string | null>(null);
 
@@ -994,16 +1002,15 @@ function App() {
     const taskSlots = creativeSlotsFromGenerationTask(task);
     if (taskSlots.length) {
       setCreativeGenerationSlots((current) => {
-        const maxIndex = Math.max(...taskSlots.map((slot) => slot.index));
-        const baseSlots = current.length ? current : initialCreativeSlots(maxIndex);
-        const taskSlotsByIndex = new Map(taskSlots.map((slot) => [slot.index, slot]));
-        const merged = baseSlots.map((slot) => {
-          const taskSlot = taskSlotsByIndex.get(slot.index);
-          return taskSlot ? { ...slot, ...taskSlot } : slot;
+        const expectedSlotCount = expectedCreativeTaskSlotCount(task);
+        const fallbackSlots = buildCreativeReviewState<CreativeGenerationSlot>(
+          topicCreatives,
+          [],
+        ).visibleSlots;
+        return mergeCreativeGenerationTaskSlots(current, taskSlots, {
+          minimumSlotCount: expectedSlotCount,
+          fallbackSlots,
         });
-        const knownIndices = new Set(merged.map((slot) => slot.index));
-        const extras = taskSlots.filter((slot) => !knownIndices.has(slot.index));
-        return [...merged, ...extras].sort((left, right) => left.index - right.index);
       });
     }
     return taskAssets;
@@ -1016,6 +1023,24 @@ function App() {
     setSelectedVideoId(taskVideo.id);
     clearVideoPollWarning(taskVideo.id);
     return taskVideo;
+  }
+
+  function applyVideoStoryboardGenerationTask(task: GenerationTask): boolean {
+    const generated = videoStoryboardFromGenerationTask(task);
+    const storyboardText = videoStoryboardTextFromGenerationTask(task);
+    if (!generated && !storyboardText.trim()) return false;
+    if (generated) {
+      setVideoAspectRatio(generated.aspect_ratio);
+      setVideoDurationSeconds(generated.duration_seconds);
+      setVideoStoryboard(generated.storyboard);
+    }
+    if (storyboardText.trim()) {
+      setVideoStoryboardText(storyboardText);
+    } else if (generated) {
+      setVideoStoryboardText(formatStoryboard(generated.storyboard));
+    }
+    setVideoStoryboardDirty(false);
+    return true;
   }
 
   useEffect(() => {
@@ -1304,9 +1329,8 @@ function App() {
     return analysis;
   }
 
-  function clearCampaignWorkflowState() {
+  function clearVisibleCampaignWorkflowState() {
     setTopics([]);
-    setTopicGenerationSlots([]);
     setSelectedTopicId(null);
     setDrafts([]);
     setSelectedDraftId(null);
@@ -1327,6 +1351,24 @@ function App() {
     setFinalPackageOpen(false);
   }
 
+  function clearCampaignWorkflowState() {
+    clearVisibleCampaignWorkflowState();
+    setTopicGenerationSlots([]);
+  }
+
+  function clearDeletedCampaignWorkflowState(campaignId: string | null, forceVisible: boolean) {
+    campaignDataRequestRef.current += 1;
+    if (forceVisible || !campaignId || selectedCampaignIdRef.current === campaignId) {
+      clearVisibleCampaignWorkflowState();
+    }
+    if (campaignId) {
+      setTopicGenerationSlots((current) => current.filter((slot) => slot.campaignId !== campaignId));
+    } else {
+      setTopicGenerationSlots([]);
+    }
+    setSelectedCampaignId((current) => (!campaignId || current === campaignId ? null : current));
+  }
+
   async function refreshBaseData() {
     if (!currentOperatorId) return;
     await run("refresh", async () => {
@@ -1343,25 +1385,25 @@ function App() {
         api.getModelOptions(),
         api.listGenerationTasks(generationTaskListFilters()),
       ]);
+      const selection = resolveWorkbenchBaseSelection({
+        currentJobId: selectedJobId,
+        currentCampaignId: selectedCampaignIdRef.current ?? selectedCampaignId,
+        jobs: nextJobs,
+        campaigns: nextCampaigns,
+      });
       setJobs(nextJobs);
       setCampaigns(nextCampaigns);
       setPerformanceAnalyses(nextPerformanceAnalyses);
       applyModelOptions(nextModelOptions);
       applyGenerationTaskList(nextGenerationTasks);
-      setSelectedJobId((current) =>
-        current && nextJobs.some((item) => item.id === current) ? current : nextJobs[0]?.id ?? null,
-      );
+      setSelectedJobId(selection.selectedJobId);
       setSelectedPerformanceAnalysisId((current) =>
         current && nextPerformanceAnalyses.some((item) => item.id === current)
           ? current
           : nextPerformanceAnalyses[0]?.id ?? null,
       );
-      setSelectedCampaignId((current) =>
-        current && nextCampaigns.some((item) => item.id === current)
-          ? current
-          : nextCampaigns[0]?.id ?? null,
-      );
-      if (!selectedCampaignId || !nextCampaigns.some((item) => item.id === selectedCampaignId)) {
+      setSelectedCampaignId(selection.selectedCampaignId);
+      if (selection.shouldClearWorkflowState) {
         clearCampaignWorkflowState();
       }
     });
@@ -1404,6 +1446,32 @@ function App() {
     setGenerationTaskList((current) => upsertById(current, retriedTask));
     const refreshed = await refreshGenerationTasks();
     if (refreshed) setNotice("任务已重新入队");
+  }
+
+  function removeGenerationTasksForDeletedJob(jobId: string, campaignId: string | null) {
+    const matchesDeletedJob = (task: GenerationTask) => {
+      if (
+        task.business_id === jobId ||
+        readText(task.payload.job_id) === jobId ||
+        readText(task.metadata.job_id) === jobId ||
+        readText(task.display_context.ad_generation_job_id) === jobId ||
+        readText(task.display_context.job_id) === jobId
+      ) {
+        return true;
+      }
+      if (!campaignId) return false;
+      return (
+        task.campaign_id === campaignId ||
+        task.business_id === campaignId ||
+        readText(task.payload.campaign_id) === campaignId ||
+        readText(task.metadata.campaign_id) === campaignId ||
+        readText(task.display_context.campaign_id) === campaignId
+      );
+    };
+    const removedCount = generationTaskList.filter(matchesDeletedJob).length;
+    if (!removedCount) return;
+    setGenerationTaskList((current) => current.filter((task) => !matchesDeletedJob(task)));
+    setGenerationTaskTotal((current) => Math.max(0, current - removedCount));
   }
 
   function applyModelOptions(nextOptions: ModelOptions) {
@@ -1491,6 +1559,12 @@ function App() {
   }
 
   async function refreshCampaignData(campaignId: string, options: { silent?: boolean } = {}) {
+    const requestId = ++campaignDataRequestRef.current;
+    const currentCampaignId = selectedCampaignIdRef.current ?? selectedCampaignId;
+    if (shouldClearCampaignWorkflowBeforeRefresh(currentCampaignId, campaignId, options)) {
+      clearVisibleCampaignWorkflowState();
+    }
+
     const refresh = async () => {
       const [nextTopics, nextDrafts, nextCreatives, nextVideos] = await Promise.all([
         api.listTopics(campaignId),
@@ -1498,6 +1572,7 @@ function App() {
         api.listCreatives(campaignId),
         api.listVideos(campaignId),
       ]);
+      if (requestId !== campaignDataRequestRef.current) return false;
       setTopics(nextTopics);
       setDrafts(nextDrafts);
       setCreatives(nextCreatives);
@@ -1530,12 +1605,13 @@ function App() {
         creatives: nextCreatives,
         videos: nextVideos,
       });
+      return true;
     };
 
     if (options.silent) {
       try {
-        await refresh();
-        clearError("refresh");
+        const applied = await refresh();
+        if (applied) clearError("refresh");
       } catch (caught) {
         setCaughtError("refresh", caught, "Campaign data refresh failed.");
       }
@@ -1638,6 +1714,7 @@ function App() {
       setError("只有负责人或管理员可以删除工单", "work-order");
       return;
     }
+    const deletedCampaignId = job ? adGenerationCampaignId(job) : null;
     const title = job ? adGenerationJobTitle(job) : "该工单";
     const confirmed = window.confirm(
       `确认删除 AI 工单「${title}」吗？删除后将同时清理该工单生成的活动、文案、图片、视频和生产记录。`,
@@ -1651,6 +1728,8 @@ function App() {
     );
     if (deleted === null) return;
 
+    clearDeletedCampaignWorkflowState(deletedCampaignId, selectedJobId === jobId);
+    removeGenerationTasksForDeletedJob(jobId, deletedCampaignId);
     setJobs((current) => {
       const nextJobs = current.filter((item) => item.id !== jobId);
       if (selectedJobId === jobId) {
@@ -2454,7 +2533,10 @@ function App() {
       setError("请先生成并审核通过一条文案。", "image");
       return;
     }
-    if (loading?.startsWith("creative-retry-")) return;
+    if (imageGenerationActionIsBusy(loading)) {
+      setNotice("已有图片任务正在处理，请稍后再重试此候选。");
+      return;
+    }
     const generationPlan = imageGenerationPlanForMode(
       creativeGenerationMode,
       videoDurationSeconds,
@@ -2468,7 +2550,7 @@ function App() {
       )?.asset?.id;
     setLoading(`creative-retry-${slotIndex}`);
     clearError("image");
-    setNotice(null);
+    setNotice(`图片 ${slotIndex} 已重新入队，正在生成。`);
     updateCreativeGenerationSlot(slotIndex, {
       status: "loading",
       asset: undefined,
@@ -2559,7 +2641,10 @@ function App() {
       setError("请先生成并审核通过一条文案。", "image");
       return;
     }
-    if (loading?.startsWith("creative-retry-")) return;
+    if (imageGenerationActionIsBusy(loading)) {
+      setNotice("已有图片任务正在处理，请稍后再重试此候选。");
+      return;
+    }
     const generationPlan = imageGenerationPlanForMode(
       creativeGenerationMode,
       videoDurationSeconds,
@@ -2807,9 +2892,6 @@ function App() {
       setError("请先生成并审核通过文案。", "video");
       return;
     }
-    const previousText = videoStoryboardText;
-    let streamedText = "";
-    let attemptId: string | null = null;
     setLoading("video-storyboard");
     clearError("video");
     setNotice(null);
@@ -2817,61 +2899,27 @@ function App() {
     setVideoStoryboardText("");
     setVideoStoryboardDirty(true);
     try {
-      await api.streamVideoStoryboard(
+      const task = await api.generateVideoStoryboardTask(
         selectedCampaign.id,
         [],
         draftId,
         videoDurationSeconds,
         videoAspectRatio,
         videoInstructions,
-        (event: VideoStoryboardTextStreamEvent) => {
-          if (event.type === "start") {
-            attemptId = event.attempt_id ?? attemptId;
-            setVideoAspectRatio(event.aspect_ratio);
-            setVideoDurationSeconds(event.duration_seconds);
-            return;
-          }
-          if (event.type === "delta") {
-            streamedText += event.text;
-            setVideoStoryboardText(streamedText);
-            return;
-          }
-          if (event.type === "done") {
-            streamedText = event.text ?? streamedText;
-            setVideoStoryboardText(streamedText);
-            setVideoAspectRatio(event.aspect_ratio);
-            setVideoDurationSeconds(event.duration_seconds);
-            return;
-          }
-          if (event.type === "error") {
-            throw new Error(event.message);
-          }
-        },
         selectedCopyModelId,
       );
-      if (!streamedText.trim()) {
-        const attempt = await confirmGenerationAttempt(attemptId, "创意脚本", "video");
-        if (attempt && generationAttemptIsRecoverable(attempt) && recoverVideoStoryboardFromAttempt(attempt)) {
-          return;
-        }
+      setGenerationTaskList((current) => upsertById(current, task));
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        "创意脚本",
+        "video",
+      );
+      if (!completedTask || !applyVideoStoryboardGenerationTask(completedTask)) {
         throw new Error("模型未返回创意脚本，请重试。");
       }
       setNotice("创意脚本已生成");
     } catch (caught) {
-      const attempt = await confirmGenerationAttempt(attemptId, "创意脚本", "video");
-      if (attempt && generationAttemptIsRecoverable(attempt) && recoverVideoStoryboardFromAttempt(attempt)) {
-        return;
-      }
-      const message = apiErrorMessage(caught, "创意脚本生成失败");
-      if (streamedText.trim() && isTransientApiError(caught)) {
-        clearError("video");
-        setNotice(`已保留当前脚本内容。${message}`);
-      } else {
-        setCaughtError("video", caught, "创意脚本生成失败");
-      }
-      if (!streamedText.trim() && previousText.trim()) {
-        setVideoStoryboardText(previousText);
-      }
+      setCaughtError("video", caught, "创意脚本生成失败");
     } finally {
       setLoading((current) => (current === "video-storyboard" ? null : current));
     }
@@ -2897,7 +2945,6 @@ function App() {
       ? storyboardPayloadFromText(videoStoryboardText, videoStoryboard)
       : videoStoryboard;
     const previousText = videoStoryboardText;
-    let streamedText = "";
     setLoading("video-storyboard-rewrite");
     clearError("video");
     setNotice(null);
@@ -2905,57 +2952,31 @@ function App() {
     setVideoStoryboardText("");
     setVideoStoryboardDirty(true);
     try {
-      await api.streamRewriteVideoStoryboard(
-        {
-          campaignId: selectedCampaign.id,
-          creativeAssetIds: [],
-          draftId,
-          durationSeconds: videoDurationSeconds,
-          aspectRatio: videoAspectRatio,
-          storyboard: storyboardPayload,
-          storyboardText: previousText,
-          feedback,
-          modelId: selectedCopyModelId,
-        },
-        (event: VideoStoryboardTextStreamEvent) => {
-          if (event.type === "start") {
-            setVideoAspectRatio(event.aspect_ratio);
-            setVideoDurationSeconds(event.duration_seconds);
-            return;
-          }
-          if (event.type === "delta") {
-            streamedText += event.text;
-            setVideoStoryboardText(streamedText);
-            return;
-          }
-          if (event.type === "done") {
-            streamedText = event.text ?? streamedText;
-            setVideoStoryboardText(streamedText);
-            setVideoAspectRatio(event.aspect_ratio);
-            setVideoDurationSeconds(event.duration_seconds);
-            return;
-          }
-          if (event.type === "error") {
-            throw new Error(event.message);
-          }
-        },
+      const task = await api.rewriteVideoStoryboardTask({
+        campaignId: selectedCampaign.id,
+        creativeAssetIds: [],
+        draftId,
+        durationSeconds: videoDurationSeconds,
+        aspectRatio: videoAspectRatio,
+        storyboard: storyboardPayload,
+        storyboardText: previousText,
+        feedback,
+        modelId: selectedCopyModelId,
+      });
+      setGenerationTaskList((current) => upsertById(current, task));
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        "脚本改写",
+        "video",
       );
-      if (!streamedText.trim()) {
+      if (!completedTask || !applyVideoStoryboardGenerationTask(completedTask)) {
         throw new Error("模型未返回改写脚本，请重试。");
       }
       setVideoStoryboardFeedback("");
       setNotice("脚本已按意见改写");
     } catch (caught) {
-      const message = apiErrorMessage(caught, "创意脚本改写失败");
-      if (streamedText.trim() && isTransientApiError(caught)) {
-        clearError("video");
-        setNotice(`已保留当前改写内容。${message}`);
-      } else {
-        setCaughtError("video", caught, "创意脚本改写失败");
-      }
-      if (!streamedText.trim()) {
-        setVideoStoryboardText(previousText);
-      }
+      setCaughtError("video", caught, "创意脚本改写失败");
+      setVideoStoryboardText(previousText);
     } finally {
       setLoading((current) => (current === "video-storyboard-rewrite" ? null : current));
     }
@@ -5232,6 +5253,7 @@ function CreativeSlotCard({
   const isLoading = slot.status === "loading";
   const isRetrying = loading === `creative-retry-${slot.index}`;
   const isRegenerating = asset ? loading === `creative-regenerate-${asset.id}` : false;
+  const canRetrySlot = !isRetrying;
 
   if (isLoading && !asset) {
     return (
@@ -5258,7 +5280,12 @@ function CreativeSlotCard({
         </div>
         <div className="asset-card-body">
           <strong>候选 {slot.index} 生成失败</strong>
-          <button className="secondary-button" onClick={() => onRetrySlot(slot.index)} disabled={Boolean(loading)}>
+          <button
+            className="secondary-button"
+            onClick={() => onRetrySlot(slot.index)}
+            disabled={isRetrying}
+            title={canRetrySlot ? "重试此候选" : "正在重试此候选"}
+          >
             {isRetrying ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
             <span>重试此候选</span>
           </button>
@@ -5981,10 +6008,16 @@ function TaskMonitorView({
   const resumableQueuedCount = summary.resumable_queued_count ?? byStatus.queued ?? 0;
   const interruptedFailedCount = summary.interrupted_failed_count ?? 0;
   const queueHealth = summary.queue_health ?? {};
+  const providerConcurrency = summary.provider_concurrency ?? {};
   const failureCodes = summary.failure_codes ?? [];
   const slowestQueues = summary.slowest_queues ?? [];
   const targetConcurrentUsers = summary.target_concurrent_users ?? 30;
   const totalActiveCapacity = summary.total_active_capacity ?? 0;
+  const executionBackend = summary.execution_backend ?? "background_tasks";
+  const redisQueues = summary.redis_queues ?? null;
+  const workerHealth = summary.worker_health ?? null;
+  const missingWorkerQueues = workerHealth ? workerHealth.missing_queues : [];
+  const runtimeStatus = workerHealth?.status ?? redisQueues?.status ?? "disabled";
   const isRefreshing = loading === "generation-task-list";
   const queueOptions = ["text_queue", "image_queue", "video_queue", "callback_queue"];
   const statusOptions = ["queued", "running", "failed", "succeeded"];
@@ -6038,6 +6071,9 @@ function TaskMonitorView({
                       并发 <strong>{health?.concurrency ?? 0}</strong>
                     </span>
                     <span>
+                      模型 <strong>{providerConcurrency[queueName] ?? "-"}</strong>
+                    </span>
+                    <span>
                       积压 <strong>{health?.backlog ?? 0}</strong>
                     </span>
                   </div>
@@ -6086,6 +6122,76 @@ function TaskMonitorView({
               )}
             </div>
           </div>
+        </section>
+      </section>
+
+      <section className="task-runtime-grid">
+        <section className="panel task-runtime-panel">
+          <div className="panel-header task-analytics-header">
+            <div>
+              <h2>Redis 队列</h2>
+              <span className="panel-note">执行后端：{executionBackendLabel(executionBackend)}</span>
+            </div>
+            <span className={`task-runtime-status ${runtimeStatusClass(redisQueues?.status)}`}>
+              {runtimeStatusLabel(redisQueues?.status)}
+            </span>
+          </div>
+          <div className="task-redis-depth-list">
+            {queueOptions.map((queueName) => {
+              const redisQueue = redisQueues?.queues?.[queueName];
+              const health = queueHealth[queueName];
+              return (
+                <article className="task-redis-depth" key={queueName}>
+                  <strong>{generationTaskQueueLabel(queueName)}</strong>
+                  <span>
+                    Redis <b>{redisQueue?.depth ?? 0}</b>
+                  </span>
+                  <span>
+                    数据库等待 <b>{health?.queued ?? 0}</b>
+                  </span>
+                  <span>
+                    堵塞 <b>{redisQueue?.backlog ?? 0}</b>
+                  </span>
+                </article>
+              );
+            })}
+          </div>
+          {redisQueues?.error && <div className="task-runtime-warning">{redisQueues.error}</div>}
+        </section>
+
+        <section className="panel task-runtime-panel">
+          <div className="panel-header task-analytics-header">
+            <div>
+              <h2>Celery Worker</h2>
+              <span className="panel-note">
+                在线 {workerHealth?.online_count ?? 0} 个 / 活跃任务 {workerHealth?.total_active_tasks ?? 0}
+              </span>
+            </div>
+            <span className={`task-runtime-status ${runtimeStatusClass(workerHealth?.status)}`}>
+              {runtimeStatusLabel(workerHealth?.status)}
+            </span>
+          </div>
+          {missingWorkerQueues.length > 0 && (
+            <div className="task-runtime-warning">
+              缺少监听：{missingWorkerQueues.map(generationTaskQueueLabel).join("、")}
+            </div>
+          )}
+          <div className="task-runtime-worker-list">
+            {workerHealth?.workers.length ? (
+              workerHealth.workers.map((worker) => (
+                <article className="task-runtime-worker" key={worker.name}>
+                  <strong>{worker.name}</strong>
+                  <span>{worker.queues.map(generationTaskQueueLabel).join("、") || "-"}</span>
+                  <em>
+                    并发 {worker.concurrency ?? "-"} / 活跃 {worker.active_tasks}
+                  </em>
+                </article>
+              ))
+            ) : (
+              <div className="task-analytics-empty">暂无 worker 响应</div>
+            )}
+          </div>
+          {workerHealth?.error && <div className="task-runtime-warning">{workerHealth.error}</div>}
         </section>
       </section>
 
@@ -6187,7 +6293,7 @@ function TaskMonitorView({
                       <span className="task-subline">{display.businessDetail}</span>
                     </td>
                     <td>
-                      <span className={`status ${task.status}`}>{generationTaskStatusLabel(task.status)}</span>
+                      <span className={`status ${task.status}`}>{generationTaskStatusDisplay(task)}</span>
                     </td>
                     <td>
                       <span className="task-error-text">{task.error_message || "-"}</span>
@@ -6257,12 +6363,28 @@ function taskMonitorDisplayContext(
   task: GenerationTask,
   lookups: TaskMonitorLookupData,
 ): TaskMonitorDisplayContext {
+  const displayContext = task.display_context ?? {};
   const job = taskMonitorJobForTask(task, lookups);
   const campaign = taskMonitorCampaignForTask(task, lookups);
   const business = taskMonitorBusinessContext(task, lookups);
+  const contextJobId = readText(displayContext.ad_generation_job_id);
+  const contextJobNumber = readText(displayContext.ad_generation_job_number);
+  const contextWorkOrderId = readText(displayContext.work_order_id);
+  const contextTitle =
+    readText(displayContext.work_order_title) ||
+    readText(displayContext.campaign_name) ||
+    campaign?.name;
   return {
-    workOrderLabel: job ? `工单${adGenerationJobNumber(job, lookups.jobs)}` : "未关联工单",
-    workOrderTitle: job ? adGenerationJobTitle(job) : campaign?.name ?? "未匹配到工单",
+    workOrderLabel: job
+      ? `工单${adGenerationJobNumber(job, lookups.jobs)}`
+      : contextJobNumber
+        ? `工单${contextJobNumber}`
+        : contextJobId
+        ? `工单${shortId(contextJobId)}`
+        : contextWorkOrderId
+          ? `工单${shortId(contextWorkOrderId)}`
+          : "工单匹配中",
+    workOrderTitle: job ? adGenerationJobTitle(job) : contextTitle ?? "项目匹配中",
     taskTypeLabel: generationTaskTypeLabel(task.task_type),
     businessLabel: business.label,
     businessDetail: business.detail,
@@ -6273,6 +6395,11 @@ function taskMonitorJobForTask(
   task: GenerationTask,
   lookups: TaskMonitorLookupData,
 ): AdGenerationJob | null {
+  const contextJobId = readText(task.display_context?.ad_generation_job_id);
+  if (contextJobId) {
+    const job = lookups.jobs.find((item) => item.id === contextJobId) ?? null;
+    if (job) return job;
+  }
   if (task.business_type === "ad_generation_job") {
     return lookups.jobs.find((job) => job.id === task.business_id) ?? null;
   }
@@ -6292,6 +6419,9 @@ function taskMonitorCampaignForTask(
 
 function taskMonitorCampaignId(task: GenerationTask, lookups: TaskMonitorLookupData): string | null {
   if (task.campaign_id) return task.campaign_id;
+
+  const contextCampaignId = readText(task.display_context?.campaign_id);
+  if (contextCampaignId) return contextCampaignId;
 
   const payloadCampaignId = readText(task.payload.campaign_id);
   if (payloadCampaignId) return payloadCampaignId;
@@ -6327,11 +6457,15 @@ function taskMonitorBusinessContext(
 ): { label: string; detail: string } {
   const fallbackId = task.business_id ? shortId(task.business_id) : "-";
   const campaign = taskMonitorCampaignForTask(task, lookups);
+  const displayContext = task.display_context ?? {};
+  const contextCampaignName = readText(displayContext.campaign_name);
+  const contextWorkOrderTitle = readText(displayContext.work_order_title);
+  const contextJobNumber = readText(displayContext.ad_generation_job_number);
 
   if (task.business_type === "campaign") {
     const matchedCampaign = lookups.campaigns.find((item) => item.id === task.business_id) ?? campaign;
     return {
-      label: `项目：${matchedCampaign?.name ?? "未加载项目"}`,
+      label: `项目：${matchedCampaign?.name ?? contextCampaignName ?? contextWorkOrderTitle ?? "项目匹配中"}`,
       detail: `项目号 ${fallbackId}`,
     };
   }
@@ -6340,7 +6474,11 @@ function taskMonitorBusinessContext(
     const topic = lookups.topics.find((item) => item.id === task.business_id) ?? null;
     return {
       label: `选题：${topic?.title ?? "未加载选题"}`,
-      detail: campaign ? `项目：${campaign.name}` : `选题号 ${fallbackId}`,
+      detail: campaign
+        ? `项目：${campaign.name}`
+        : contextCampaignName
+          ? `项目：${contextCampaignName}`
+          : `选题号 ${fallbackId}`,
     };
   }
 
@@ -6364,8 +6502,12 @@ function taskMonitorBusinessContext(
   if (task.business_type === "ad_generation_job") {
     const job = lookups.jobs.find((item) => item.id === task.business_id) ?? null;
     return {
-      label: job ? `工单：工单${adGenerationJobNumber(job, lookups.jobs)}` : "工单：未加载工单",
-      detail: job ? adGenerationJobTitle(job) : `工单号 ${fallbackId}`,
+      label: job
+        ? `工单：工单${adGenerationJobNumber(job, lookups.jobs)}`
+        : contextJobNumber
+          ? `工单：工单${contextJobNumber}`
+          : "工单：匹配中",
+      detail: job ? adGenerationJobTitle(job) : contextWorkOrderTitle ?? `工单号 ${fallbackId}`,
     };
   }
 
@@ -6428,7 +6570,7 @@ function TaskDetailDrawer({
         <div className="task-detail-grid">
           <TaskDetailField label="所属工单" value={`${display.workOrderLabel} / ${display.workOrderTitle}`} />
           <TaskDetailField label="关联内容" value={`${display.businessLabel} / ${display.businessDetail}`} />
-          <TaskDetailField label="任务状态" value={generationTaskStatusLabel(task.status)} />
+          <TaskDetailField label="任务状态" value={generationTaskStatusDisplay(task)} />
           <TaskDetailField label="任务号" value={task.id} mono />
           <TaskDetailField label="业务对象" value={`${task.business_type} / ${task.business_id}`} mono />
           <TaskDetailField label="错误码" value={task.error_code || "-"} mono />
@@ -8186,6 +8328,26 @@ function initialCreativeSlots(limit: number): CreativeGenerationSlot[] {
   }));
 }
 
+function expectedCreativeTaskSlotCount(task: GenerationTask): number {
+  if (task.task_type !== "image_generate") return 0;
+  const generationMode = readText(task.payload.generation_mode) || readText(task.metadata.generation_mode);
+  const targetIndex = numericMetadataValue(task.payload.target_index ?? task.metadata.target_index);
+  if (generationMode === "video_keyframe_variants") {
+    const variantCount =
+      numericMetadataValue(task.payload.variant_count ?? task.metadata.variant_count) ||
+      DEFAULT_KEYFRAME_VARIANT_COUNT;
+    const framesPerVariant =
+      numericMetadataValue(task.payload.frames_per_variant ?? task.metadata.frames_per_variant) ||
+      KEYFRAME_FRAMES_PER_VARIANT;
+    return Math.max(variantCount * framesPerVariant, targetIndex);
+  }
+  const count =
+    numericMetadataValue(task.payload.count) ||
+    numericMetadataValue(task.metadata.count) ||
+    COPY_IMAGE_GENERATION_COUNT;
+  return Math.max(count, targetIndex);
+}
+
 function buildCreativeSlots(
   creatives: CreativeAsset[],
   activeSlots: CreativeGenerationSlot[],
@@ -8229,7 +8391,8 @@ function syncCreativeSlotsWithAssets(
   slots: CreativeGenerationSlot[],
   creatives: CreativeAsset[],
 ): CreativeGenerationSlot[] {
-  if (!slots.length || !creatives.length) return slots;
+  if (!creatives.length) return slots;
+  if (!slots.length) return buildCreativeSlots(creatives, []);
   return slots.map((slot) => {
     if (!slot.asset) return slot;
     const latestAsset = creatives.find((asset) => asset.id === slot.asset?.id);
@@ -8335,6 +8498,14 @@ function numericMetadataValue(value: unknown): number {
         ? Number.parseInt(value, 10)
         : Number.NaN;
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : 0;
+}
+
+function imageGenerationActionIsBusy(loading: string | null): boolean {
+  return (
+    loading === "creatives" ||
+    Boolean(loading?.startsWith("creative-retry-")) ||
+    Boolean(loading?.startsWith("creative-regenerate-"))
+  );
 }
 
 function adGenerationCampaignId(job: AdGenerationJob): string | null {
@@ -8601,6 +8772,25 @@ function formatDuration(seconds: number): string {
 function formatTaskDurationMs(durationMs: number | null): string {
   if (durationMs === null) return "-";
   return formatDuration(Math.max(1, Math.round(durationMs / 1000)));
+}
+
+function executionBackendLabel(backend: string): string {
+  if (backend === "celery") return "Redis + Celery";
+  return "BackgroundTasks";
+}
+
+function runtimeStatusLabel(status: string | undefined): string {
+  if (status === "ok") return "正常";
+  if (status === "degraded") return "降级";
+  if (status === "unavailable") return "不可用";
+  return "未启用";
+}
+
+function runtimeStatusClass(status: string | undefined): string {
+  if (status === "ok") return "ok";
+  if (status === "degraded") return "degraded";
+  if (status === "unavailable") return "unavailable";
+  return "disabled";
 }
 
 function copyPreviewCreatives(creatives: CreativeAsset[], selectedDraft: CopyDraft | null): CreativeAsset[] {

@@ -12,7 +12,11 @@ import {
   generationTaskQueueRiskLabel,
   generationTaskQueueLabel,
   generationTaskSummary,
+  generationTaskStatusDisplay,
   generationTaskStatusLabel,
+  mergeCreativeGenerationTaskSlots,
+  videoStoryboardFromGenerationTask,
+  videoStoryboardTextFromGenerationTask,
   videoAssetFromGenerationTask,
   type GenerationTask,
 } from "../src/lib/generationTasks.ts";
@@ -39,6 +43,7 @@ function task(status: GenerationTask["status"], errorMessage: string | null = nu
     finished_at: null,
     duration_ms: null,
     metadata: {},
+    display_context: {},
     reused_existing: false,
     created_at: "2026-07-01T00:00:00Z",
     updated_at: "2026-07-01T00:00:00Z",
@@ -55,6 +60,33 @@ test("generation task helpers summarize text queue statuses", () => {
   assert.equal(
     generationTaskSummary({ ...task("running"), reused_existing: true }, "选题"),
     "选题已有生成任务在处理，正在继续跟进原任务。",
+  );
+});
+
+test("generation task helpers show automatic retry state before final failure", () => {
+  const retryingTask = {
+    ...task("queued", "Gateway image API request timed out"),
+    queue_name: "image_queue",
+    task_type: "image_generate",
+    attempt_count: 1,
+    max_attempts: 3,
+    metadata: {
+      auto_retry: {
+        status: "scheduled",
+        next_attempt: 2,
+        max_attempts: 3,
+        remaining_attempts: 2,
+        delay_seconds: 10,
+        last_error_code: "provider_timeout",
+        last_error_message: "Gateway image API request timed out",
+      },
+    },
+  } satisfies GenerationTask;
+
+  assert.equal(generationTaskStatusDisplay(retryingTask), "\u81ea\u52a8\u91cd\u8bd5\u4e2d");
+  assert.equal(
+    generationTaskSummary(retryingTask, "\u56fe\u7247"),
+    "\u56fe\u7247\u4e0a\u6b21\u751f\u6210\u9047\u5230\u6a21\u578b\u54cd\u5e94\u8d85\u65f6\uff0c\u5df2\u81ea\u52a8\u6392\u961f\u7b2c 2/3 \u6b21\u5c1d\u8bd5\u3002",
   );
 });
 
@@ -126,6 +158,34 @@ test("generation task helpers restore image slots from task result", () => {
   assert.equal(slots[2].asset?.id, "creative-3");
 });
 
+test("generation task helper merges single-slot retry without dropping other keyframe slots", () => {
+  const currentSlots = Array.from({ length: 6 }, (_, index) => ({
+    index: index + 1,
+    status: index === 1 ? ("error" as const) : ("done" as const),
+    message: index === 1 ? "provider failed" : undefined,
+  }));
+  const taskSlots = [
+    {
+      index: 2,
+      status: "loading" as const,
+    },
+  ];
+
+  const merged = mergeCreativeGenerationTaskSlots(currentSlots, taskSlots, {
+    minimumSlotCount: 6,
+  });
+
+  assert.equal(merged.length, 6);
+  assert.equal(merged[0].index, 1);
+  assert.equal(merged[0].status, "done");
+  assert.equal(merged[1].index, 2);
+  assert.equal(merged[1].status, "loading");
+  assert.deepEqual(
+    merged.map((slot) => slot.index),
+    [1, 2, 3, 4, 5, 6],
+  );
+});
+
 test("generation task helpers restore video asset from task result", () => {
   const videoTask = task("queued");
   videoTask.queue_name = "video_queue";
@@ -166,6 +226,36 @@ test("generation task helpers restore video asset from task result", () => {
   assert.equal(video?.id, "video-1");
   assert.equal(video?.status, "generating");
   assert.equal(video?.provider_job_id, "provider-video-job-1");
+});
+
+test("generation task helpers restore video storyboard from task result", () => {
+  const storyboardTask = task("succeeded");
+  storyboardTask.task_type = "video_storyboard_generate";
+  storyboardTask.business_type = "copy_draft";
+  storyboardTask.business_id = "draft-1";
+  storyboardTask.result = {
+    video_storyboard: {
+      campaign_id: "campaign-1",
+      draft_id: "draft-1",
+      creative_asset_ids: [],
+      duration_seconds: 12,
+      aspect_ratio: "9:16",
+      storyboard: [{ scene_index: 1, visual: "Open with the app benefit." }],
+      prompt: "Scene 1: Open with the app benefit.",
+      metadata_json: { provider: "fake" },
+    },
+    storyboard_text: "镜头 1\n画面：Open with the app benefit.",
+  };
+
+  const storyboard = videoStoryboardFromGenerationTask(storyboardTask);
+
+  assert.equal(storyboard?.campaign_id, "campaign-1");
+  assert.equal(storyboard?.duration_seconds, 12);
+  assert.equal(storyboard?.storyboard[0].visual, "Open with the app benefit.");
+  assert.equal(
+    videoStoryboardTextFromGenerationTask(storyboardTask),
+    "镜头 1\n画面：Open with the app benefit.",
+  );
 });
 
 test("generation task monitor helpers label queues and count retryable failures", () => {
@@ -221,6 +311,8 @@ test("generation task helpers label task types in business language", () => {
   assert.equal(typeLabel?.("topic_generate"), "\u9009\u9898\u751f\u6210");
   assert.equal(typeLabel?.("copy_generate"), "\u6587\u6848\u751f\u6210");
   assert.equal(typeLabel?.("copy_revise"), "\u6587\u6848\u6539\u5199");
+  assert.equal(typeLabel?.("video_storyboard_generate"), "\u811a\u672c\u751f\u6210");
+  assert.equal(typeLabel?.("video_storyboard_rewrite"), "\u811a\u672c\u6539\u5199");
   assert.equal(typeLabel?.("image_generate"), "\u56fe\u7247\u751f\u6210");
   assert.equal(typeLabel?.("video_generate"), "\u89c6\u9891\u751f\u6210");
   assert.equal(typeLabel?.("ad_generation_callback"), "\u56de\u8c03\u5916\u90e8\u7cfb\u7edf");

@@ -14,6 +14,7 @@ class GenerationTask(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     business_type: Mapped[str] = mapped_column(String(64), index=True)
     business_id: Mapped[str] = mapped_column(String(128), index=True)
     campaign_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
     payload_json: Mapped[dict] = mapped_column("payload", JSON, default=json_default)

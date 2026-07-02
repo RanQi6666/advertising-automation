@@ -596,6 +596,24 @@ export const api = {
       ...(instructions?.trim() ? { instructions } : {}),
       ...(modelId ? { model_id: modelId } : {}),
     }),
+  generateVideoStoryboardTask: (
+    campaignId: string,
+    creativeAssetIds: string[],
+    draftId: string | null,
+    durationSeconds: number,
+    aspectRatio: string,
+    instructions?: string,
+    modelId?: string | null,
+  ) =>
+    post<GenerationTask>("/videos/storyboard/task", {
+      campaign_id: campaignId,
+      creative_asset_ids: creativeAssetIds,
+      draft_id: draftId,
+      duration_seconds: durationSeconds,
+      aspect_ratio: aspectRatio,
+      ...(instructions?.trim() ? { instructions } : {}),
+      ...(modelId ? { model_id: modelId } : {}),
+    }),
   streamVideoStoryboard: (
     campaignId: string,
     creativeAssetIds: string[],
@@ -631,6 +649,28 @@ export const api = {
     modelId?: string | null;
   }) =>
     post<VideoStoryboardResponse>("/videos/storyboard/rewrite", {
+      campaign_id: payload.campaignId,
+      creative_asset_ids: payload.creativeAssetIds,
+      draft_id: payload.draftId,
+      duration_seconds: payload.durationSeconds,
+      aspect_ratio: payload.aspectRatio,
+      storyboard: payload.storyboard,
+      storyboard_text: payload.storyboardText,
+      feedback: payload.feedback,
+      ...(payload.modelId ? { model_id: payload.modelId } : {}),
+    }),
+  rewriteVideoStoryboardTask: (payload: {
+    campaignId: string;
+    creativeAssetIds: string[];
+    draftId: string | null;
+    durationSeconds: number;
+    aspectRatio: string;
+    storyboard: Record<string, unknown>[];
+    storyboardText: string;
+    feedback: string;
+    modelId?: string | null;
+  }) =>
+    post<GenerationTask>("/videos/storyboard/rewrite/task", {
       campaign_id: payload.campaignId,
       creative_asset_ids: payload.creativeAssetIds,
       draft_id: payload.draftId,

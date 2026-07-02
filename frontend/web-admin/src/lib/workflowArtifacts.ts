@@ -44,6 +44,59 @@ export type VideoCreativeReferenceOption = {
   approved: boolean;
 };
 
+export type WorkbenchBaseSelection = {
+  selectedJobId: string | null;
+  selectedCampaignId: string | null;
+  shouldClearWorkflowState: boolean;
+};
+
+export function shouldClearCampaignWorkflowBeforeRefresh(
+  currentCampaignId: string | null,
+  refreshCampaignId: string,
+  options: { silent?: boolean } = {},
+): boolean {
+  if (options.silent) return false;
+  return currentCampaignId !== refreshCampaignId;
+}
+
+export function resolveWorkbenchBaseSelection({
+  currentJobId,
+  currentCampaignId,
+  jobs,
+  campaigns,
+}: {
+  currentJobId: string | null;
+  currentCampaignId: string | null;
+  jobs: AdGenerationJob[];
+  campaigns: Array<{ id: string }>;
+}): WorkbenchBaseSelection {
+  const selectedJob = currentJobId
+    ? jobs.find((item) => item.id === currentJobId) ?? jobs[0] ?? null
+    : jobs[0] ?? null;
+  const selectedJobChanged = Boolean(
+    currentJobId && selectedJob?.id && selectedJob.id !== currentJobId,
+  );
+  const selectedJobCampaignId = selectedJob ? adGenerationJobCampaignId(selectedJob) : null;
+  const preferredCampaignIds = [selectedJobCampaignId, currentCampaignId].filter(
+    (item): item is string => Boolean(item),
+  );
+  const selectedCampaign =
+    preferredCampaignIds
+      .map((id) => campaigns.find((item) => item.id === id) ?? null)
+      .find((item): item is { id: string } => Boolean(item)) ??
+    campaigns[0] ??
+    null;
+  const selectedCampaignMissing = Boolean(
+    currentCampaignId && !campaigns.some((item) => item.id === currentCampaignId),
+  );
+
+  return {
+    selectedJobId: selectedJob?.id ?? null,
+    selectedCampaignId: selectedCampaign?.id ?? null,
+    shouldClearWorkflowState: !selectedCampaign || selectedCampaignMissing || selectedJobChanged,
+  };
+}
+
 export function filterWorkflowArtifactsForTopic({
   selectedCampaignId,
   selectedTopic,
@@ -211,6 +264,12 @@ export function adGenerationJobNumber(job: AdGenerationJob, jobs: AdGenerationJo
   });
   const index = ordered.findIndex((item) => item.id === job.id);
   return String(index >= 0 ? index + 1 : 1).padStart(3, "0");
+}
+
+function adGenerationJobCampaignId(job: AdGenerationJob): string | null {
+  const result = job.result_payload ?? {};
+  const metadata = isRecord(result.metadata_json) ? result.metadata_json : {};
+  return readText(metadata.campaign_id);
 }
 
 export function currentCreativeAssets(creatives: CreativeAsset[]): CreativeAsset[] {

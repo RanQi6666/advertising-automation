@@ -1,6 +1,8 @@
 from fastapi import APIRouter, BackgroundTasks, Query, status
 
-from backend.app.api.deps import DbSession
+from backend.app.api.deps import CurrentOperator, DbSession
+from backend.app.db.models.copy_draft import CopyDraft
+from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.copywriting import CopyDraftRead, CopyGenerateRequest, CopyReviseRequest
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services.copywriting_service import CopywritingService
@@ -9,6 +11,7 @@ from backend.app.services.generation_task_service import (
     TEXT_QUEUE_NAME,
     GenerationTaskService,
 )
+from backend.app.services.utils import get_required
 
 router = APIRouter()
 service = CopywritingService()
@@ -30,15 +33,19 @@ async def generate_copy(payload: CopyGenerateRequest, session: DbSession):
 async def queue_generate_copy(
     payload: CopyGenerateRequest,
     session: DbSession,
+    operator: CurrentOperator,
     background_tasks: BackgroundTasks,
 ):
+    topic = await get_required(session, ContentTopic, payload.topic_id)
     task = await task_service.create_task(
         session,
         queue_name=TEXT_QUEUE_NAME,
         task_type="copy_generate",
         business_type="topic",
         business_id=payload.topic_id,
+        campaign_id=topic.campaign_id,
         payload=payload.model_dump(mode="json"),
+        owner_user_id=operator.id,
     )
     schedule_generation_task(task, background_tasks)
     return GenerationTaskRead.from_model(task)
@@ -58,15 +65,19 @@ async def queue_revise_copy(
     draft_id: str,
     payload: CopyReviseRequest,
     session: DbSession,
+    operator: CurrentOperator,
     background_tasks: BackgroundTasks,
 ):
+    draft = await get_required(session, CopyDraft, draft_id)
     task = await task_service.create_task(
         session,
         queue_name=TEXT_QUEUE_NAME,
         task_type="copy_revise",
         business_type="copy_draft",
         business_id=draft_id,
+        campaign_id=draft.campaign_id,
         payload={"draft_id": draft_id, "request": payload.model_dump(mode="json")},
+        owner_user_id=operator.id,
     )
     schedule_generation_task(task, background_tasks)
     return GenerationTaskRead.from_model(task)

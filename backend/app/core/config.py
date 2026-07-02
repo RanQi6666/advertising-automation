@@ -46,10 +46,19 @@ class Settings(BaseSettings):
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     generation_task_target_concurrent_users: int = Field(default=30, ge=1, le=1000)
+    generation_runtime_monitor_timeout_seconds: float = Field(default=1.0, ge=0.1, le=10)
+    generation_runtime_monitor_cache_seconds: float = Field(default=2.0, ge=0, le=30)
     generation_task_recovery_enabled: bool = True
     generation_task_recovery_interval_seconds: float = Field(default=60.0, ge=5, le=3600)
     generation_task_queued_stale_seconds: float = Field(default=60.0, ge=1, le=3600)
     generation_task_running_stale_seconds: float = Field(default=1800.0, ge=60, le=86400)
+    generation_task_auto_retry_enabled: bool = True
+    generation_task_auto_retry_delays_seconds: Annotated[list[int], NoDecode] = Field(
+        default_factory=lambda: [10, 30, 60]
+    )
+    model_provider_text_concurrency: int = Field(default=6, ge=1, le=64)
+    model_provider_image_concurrency: int = Field(default=2, ge=1, le=32)
+    model_provider_video_concurrency: int = Field(default=1, ge=1, le=16)
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"
     model_gateway_image_response_format: str | None = None
@@ -104,6 +113,17 @@ class Settings(BaseSettings):
     def parse_model_gateway_models(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [model.strip() for model in value.split(",") if model.strip()]
+        return value
+
+    @field_validator("generation_task_auto_retry_delays_seconds", mode="before")
+    @classmethod
+    def parse_auto_retry_delays(cls, value: str | list[int]) -> list[int]:
+        if isinstance(value, str):
+            return [
+                int(part.strip())
+                for part in value.split(",")
+                if part.strip() and int(part.strip()) >= 0
+            ]
         return value
 
 @lru_cache

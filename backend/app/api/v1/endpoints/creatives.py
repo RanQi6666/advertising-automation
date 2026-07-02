@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
-from backend.app.api.deps import DbSession
+from backend.app.api.deps import CurrentOperator, DbSession
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.schemas.creative import (
     CreativeAssetRead,
@@ -43,6 +43,7 @@ async def generate_creatives(payload: CreativeGenerateRequest, session: DbSessio
 async def queue_generate_creatives(
     payload: CreativeGenerateRequest,
     session: DbSession,
+    operator: CurrentOperator,
     background_tasks: BackgroundTasks,
 ):
     draft = await get_required(session, CopyDraft, payload.draft_id)
@@ -54,6 +55,8 @@ async def queue_generate_creatives(
         business_id=payload.draft_id,
         campaign_id=draft.campaign_id,
         payload=payload.model_dump(mode="json"),
+        owner_user_id=operator.id,
+        max_attempts=3,
         metadata={
             "size": payload.size,
             "target_index": payload.target_index,

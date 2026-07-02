@@ -1,10 +1,12 @@
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import get_settings
-from backend.app.db.base import Base
+from backend.app.db.base import Base, utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.agent_run import AgentRun
 from backend.app.db.models.campaign import Campaign
@@ -24,6 +26,7 @@ from backend.app.schemas.ad_generation import (
     PublishingAdGenerationReviewUpdate,
     PublishingWorkOrderPayload,
 )
+from backend.app.services import ad_generation_service as ad_job_module
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.ad_generation_service import AdGenerationService
 from backend.app.services.generation_task_service import GenerationTaskService
@@ -63,6 +66,68 @@ def mock_generation_providers(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("IMAGE_PROVIDER", "placeholder")
     get_settings.cache_clear()
     yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_ad_generation_job_startup_recovery_reschedules_stale_queued_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    monkeypatch.setenv("GENERATION_TASK_QUEUED_STALE_SECONDS", "60")
+    get_settings.cache_clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(ad_job_module, "AsyncSessionLocal", session_factory)
+    scheduled_job_ids: list[str] = []
+
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-stale-queued-recovery",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: recovery\n"
+                        "Country: US\n"
+                        "Audience: age 25-45\n"
+                        "Event: purchase\n"
+                        "Landing: https://example.com/recovery"
+                    ),
+                    structured_fields={
+                        "project_name": "Recovery",
+                        "country": "US",
+                        "age_min": 25,
+                        "age_max": 45,
+                        "event_name": "purchase",
+                        "landing_url": "https://example.com/recovery",
+                    },
+                ),
+                preferences=PublishingAdGenerationPreferences(image_count=1),
+            ),
+        )
+        job.updated_at = utcnow() - timedelta(minutes=5)
+        await session.commit()
+
+    recovery = await ad_job_module.recover_ad_generation_jobs_on_startup(
+        schedule_job=scheduled_job_ids.append,
+    )
+
+    async with session_factory() as session:
+        stored = await session.get(AdGenerationJob, job.id)
+
+    assert recovery.rescheduled_job_ids == [job.id]
+    assert scheduled_job_ids == [job.id]
+    assert stored is not None
+    assert stored.status == "queued"
+    assert stored.started_at is None
+
+    await engine.dispose()
     get_settings.cache_clear()
 
 
@@ -607,7 +672,61 @@ async def test_publishing_ad_generation_delete_job_removes_generated_records_and
             campaign_id=campaign_id,
             graph_name="delete-cascade",
         )
-        session.add_all([review, agent_run])
+        task_queued_at = utcnow()
+        related_campaign_task = GenerationTask(
+            queue_name="text_queue",
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign_id,
+            campaign_id=campaign_id,
+            owner_user_id=generated.owner_user_id,
+            status="succeeded",
+            payload_json={"campaign_id": campaign_id},
+            queued_at=task_queued_at,
+        )
+        related_job_task = GenerationTask(
+            queue_name="callback_queue",
+            task_type="ad_generation_callback",
+            business_type="ad_generation_job",
+            business_id=generated.id,
+            campaign_id=None,
+            owner_user_id=generated.owner_user_id,
+            status="queued",
+            payload_json={"job_id": generated.id},
+            queued_at=task_queued_at,
+        )
+        related_entity_task = GenerationTask(
+            queue_name="image_queue",
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id=draft.id,
+            campaign_id=None,
+            owner_user_id=generated.owner_user_id,
+            status="failed",
+            payload_json={"draft_id": draft.id},
+            queued_at=task_queued_at,
+        )
+        unrelated_task = GenerationTask(
+            queue_name="text_queue",
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id="campaign-unrelated",
+            campaign_id="campaign-unrelated",
+            owner_user_id=generated.owner_user_id,
+            status="queued",
+            payload_json={"campaign_id": "campaign-unrelated"},
+            queued_at=task_queued_at,
+        )
+        session.add_all(
+            [
+                review,
+                agent_run,
+                related_campaign_task,
+                related_job_task,
+                related_entity_task,
+                unrelated_task,
+            ]
+        )
         await session.commit()
 
         assert image_path.exists()
@@ -625,6 +744,13 @@ async def test_publishing_ad_generation_delete_job_removes_generated_records_and
         assert await session.get(VideoAsset, video.id) is None
         assert await session.scalar(select(ReviewTask.id).where(ReviewTask.id == review.id)) is None
         assert await session.scalar(select(AgentRun.id).where(AgentRun.id == agent_run.id)) is None
+        remaining_task_ids = set(
+            (await session.execute(select(GenerationTask.id))).scalars().all()
+        )
+        assert related_campaign_task.id not in remaining_task_ids
+        assert related_job_task.id not in remaining_task_ids
+        assert related_entity_task.id not in remaining_task_ids
+        assert unrelated_task.id in remaining_task_ids
 
     assert not image_path.exists()
     assert not video_path.exists()
@@ -1225,10 +1351,13 @@ async def test_publishing_ad_generation_callback_failure_does_not_block_returned
         processed_job = await session.get(AdGenerationJob, returned.id)
 
     assert task is not None
-    assert task.status == "failed"
-    assert task.retryable is True
+    assert task.status == "queued"
+    assert task.retryable is False
     assert task.error_code == "unknown_provider_error"
     assert task.error_message == "Callback endpoint returned HTTP 500."
+    assert task.metadata_json["auto_retry"]["status"] == "scheduled"
+    assert task.metadata_json["auto_retry"]["next_attempt"] == 2
+    assert task.metadata_json["auto_retry"]["last_error_code"] == "unknown_provider_error"
 
     assert processed_job is not None
     assert processed_job.status == "returned"

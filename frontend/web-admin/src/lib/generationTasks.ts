@@ -1,4 +1,4 @@
-import type { CreativeAsset, VideoAsset } from "../types/domain";
+import type { CreativeAsset, VideoAsset, VideoStoryboardResponse } from "../types/domain";
 
 export type GenerationTaskStatus = "queued" | "running" | "succeeded" | "failed";
 export type GenerationTaskQueueRiskLevel = "low" | "medium" | "high";
@@ -17,6 +17,7 @@ export type GenerationTask = {
   business_type: string;
   business_id: string;
   campaign_id: string | null;
+  owner_user_id: string | null;
   status: GenerationTaskStatus;
   priority: number;
   payload: Record<string, unknown>;
@@ -31,6 +32,7 @@ export type GenerationTask = {
   finished_at: string | null;
   duration_ms: number | null;
   metadata: Record<string, unknown>;
+  display_context: Record<string, string>;
   reused_existing: boolean;
   created_at: string;
   updated_at: string;
@@ -67,6 +69,37 @@ export type GenerationTaskSlowQueueSummary = {
   risk_level: GenerationTaskQueueRiskLevel;
 };
 
+export type GenerationTaskRedisQueueRuntime = {
+  depth: number;
+  concurrency: number;
+  backlog: number;
+  pressure_ratio: number;
+};
+
+export type GenerationTaskRedisQueuesRuntime = {
+  status: "ok" | "disabled" | "unavailable";
+  total_depth: number;
+  queues: Record<string, GenerationTaskRedisQueueRuntime>;
+  error: string | null;
+};
+
+export type GenerationTaskWorkerRuntime = {
+  name: string;
+  queues: string[];
+  concurrency: number | null;
+  active_tasks: number;
+};
+
+export type GenerationTaskWorkerHealthRuntime = {
+  status: "ok" | "degraded" | "disabled" | "unavailable";
+  online_count: number;
+  expected_queues: string[];
+  missing_queues: string[];
+  total_active_tasks: number;
+  workers: GenerationTaskWorkerRuntime[];
+  error: string | null;
+};
+
 export type GenerationTaskListResponse = {
   items: GenerationTask[];
   total: number;
@@ -85,9 +118,13 @@ export type GenerationTaskListResponse = {
     target_concurrent_users?: number;
     total_active_capacity?: number;
     queue_concurrency?: Record<string, number>;
+    provider_concurrency?: Record<string, number>;
     queue_health?: Record<string, GenerationTaskQueueHealth>;
     failure_codes?: GenerationTaskFailureCodeSummary[];
     slowest_queues?: GenerationTaskSlowQueueSummary[];
+    execution_backend?: "background_tasks" | "celery";
+    redis_queues?: GenerationTaskRedisQueuesRuntime;
+    worker_health?: GenerationTaskWorkerHealthRuntime;
   };
 };
 
@@ -122,6 +159,8 @@ const generationTaskTypeLabels: Record<string, string> = {
   topic_generate: "选题生成",
   copy_generate: "文案生成",
   copy_revise: "文案改写",
+  video_storyboard_generate: "脚本生成",
+  video_storyboard_rewrite: "脚本改写",
   image_generate: "图片生成",
   video_generate: "视频生成",
   ad_generation_callback: "回调外部系统",
@@ -133,6 +172,17 @@ export function generationTaskQueueLabel(queueName: string): string {
 
 export function generationTaskStatusLabel(status: string): string {
   return generationTaskStatusLabels[status] ?? status;
+}
+
+export function generationTaskStatusDisplay(task: GenerationTask): string {
+  const autoRetry = generationTaskAutoRetry(task);
+  if (
+    (task.status === "queued" || task.status === "running") &&
+    autoRetry?.status === "scheduled"
+  ) {
+    return "自动重试中";
+  }
+  return generationTaskStatusLabel(task.status);
 }
 
 export function generationTaskTypeLabel(taskType: string): string {
@@ -240,6 +290,20 @@ export function generationTaskSummary(task: GenerationTask, label: string): stri
       : task.queue_name === "video_queue"
         ? "视频队列"
         : "文本队列";
+  const autoRetry = generationTaskAutoRetry(task);
+  if (
+    (task.status === "queued" || task.status === "running") &&
+    autoRetry?.status === "scheduled"
+  ) {
+    const failureTitle = generationTaskFailureAdvice({
+      error_code: autoRetry.last_error_code ?? task.error_code,
+      error_message: autoRetry.last_error_message ?? task.error_message,
+      retryable: true,
+    }).title;
+    const nextAttempt = autoRetry.next_attempt ?? Math.min(task.attempt_count + 1, task.max_attempts);
+    const maxAttempts = autoRetry.max_attempts ?? task.max_attempts;
+    return `${label}上次生成遇到${failureTitle}，已自动排队第 ${nextAttempt}/${maxAttempts} 次尝试。`;
+  }
   if (task.reused_existing && (task.status === "queued" || task.status === "running")) {
     return `${label}已有生成任务在处理，正在继续跟进原任务。`;
   }
@@ -250,9 +314,42 @@ export function generationTaskSummary(task: GenerationTask, label: string): stri
   return `${label}生成失败，请重试。`;
 }
 
+function generationTaskAutoRetry(task: GenerationTask): {
+  status?: string;
+  next_attempt?: number;
+  max_attempts?: number;
+  remaining_attempts?: number;
+  delay_seconds?: number;
+  last_error_code?: string;
+  last_error_message?: string;
+} | null {
+  const autoRetry = task.metadata.auto_retry;
+  if (!isRecord(autoRetry)) return null;
+  return {
+    status: typeof autoRetry.status === "string" ? autoRetry.status : undefined,
+    next_attempt: numericValue(autoRetry.next_attempt) ?? undefined,
+    max_attempts: numericValue(autoRetry.max_attempts) ?? undefined,
+    remaining_attempts: numericValue(autoRetry.remaining_attempts) ?? undefined,
+    delay_seconds: numericValue(autoRetry.delay_seconds) ?? undefined,
+    last_error_code: typeof autoRetry.last_error_code === "string" ? autoRetry.last_error_code : undefined,
+    last_error_message:
+      typeof autoRetry.last_error_message === "string" ? autoRetry.last_error_message : undefined,
+  };
+}
+
 export function videoAssetFromGenerationTask(task: GenerationTask): VideoAsset | null {
   const video = task.result?.video;
   return isVideoAsset(video) ? video : null;
+}
+
+export function videoStoryboardFromGenerationTask(task: GenerationTask): VideoStoryboardResponse | null {
+  const storyboard = task.result?.video_storyboard;
+  return isVideoStoryboard(storyboard) ? storyboard : null;
+}
+
+export function videoStoryboardTextFromGenerationTask(task: GenerationTask): string {
+  const storyboardText = task.result?.storyboard_text;
+  return typeof storyboardText === "string" ? storyboardText : "";
 }
 
 export function creativeAssetsFromGenerationTask(task: GenerationTask): CreativeAsset[] {
@@ -304,6 +401,53 @@ export function creativeSlotsFromGenerationTask(task: GenerationTask): CreativeG
     .sort((left, right) => left.index - right.index);
 }
 
+export function mergeCreativeGenerationTaskSlots<TSlot extends CreativeGenerationTaskSlot>(
+  currentSlots: TSlot[],
+  taskSlots: CreativeGenerationTaskSlot[],
+  options: {
+    minimumSlotCount?: number;
+    fallbackSlots?: TSlot[];
+  } = {},
+): TSlot[] {
+  if (!taskSlots.length) return currentSlots;
+  const maxTaskIndex = Math.max(...taskSlots.map((slot) => slot.index));
+  const maxCurrentIndex = currentSlots.length
+    ? Math.max(...currentSlots.map((slot) => slot.index))
+    : 0;
+  const maxFallbackIndex = options.fallbackSlots?.length
+    ? Math.max(...options.fallbackSlots.map((slot) => slot.index))
+    : 0;
+  const minimumSlotCount = Math.max(
+    options.minimumSlotCount ?? 0,
+    maxTaskIndex,
+    maxCurrentIndex,
+    maxFallbackIndex,
+  );
+  const baseSlots = currentSlots.length
+    ? currentSlots
+    : options.fallbackSlots?.length
+      ? options.fallbackSlots
+      : Array.from({ length: minimumSlotCount }, (_, index) => ({
+          index: index + 1,
+          status: "loading" as const,
+        }) as TSlot);
+  const baseIndices = new Set(baseSlots.map((slot) => slot.index));
+  const expandedBaseSlots = [
+    ...baseSlots,
+    ...Array.from({ length: minimumSlotCount }, (_, index) => index + 1)
+      .filter((index) => !baseIndices.has(index))
+      .map((index) => ({ index, status: "loading" as const }) as TSlot),
+  ];
+  const taskSlotsByIndex = new Map(taskSlots.map((slot) => [slot.index, slot]));
+  const merged = expandedBaseSlots.map((slot) => {
+    const taskSlot = taskSlotsByIndex.get(slot.index);
+    return taskSlot ? ({ ...slot, ...taskSlot } as TSlot) : slot;
+  });
+  const knownIndices = new Set(merged.map((slot) => slot.index));
+  const extras = taskSlots.filter((slot) => !knownIndices.has(slot.index)) as TSlot[];
+  return [...merged, ...extras].sort((left, right) => left.index - right.index);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -314,6 +458,17 @@ function isCreativeAsset(value: unknown): value is CreativeAsset {
 
 function isVideoAsset(value: unknown): value is VideoAsset {
   return isRecord(value) && typeof value.id === "string";
+}
+
+function isVideoStoryboard(value: unknown): value is VideoStoryboardResponse {
+  return (
+    isRecord(value) &&
+    typeof value.campaign_id === "string" &&
+    typeof value.duration_seconds === "number" &&
+    typeof value.aspect_ratio === "string" &&
+    Array.isArray(value.storyboard) &&
+    typeof value.prompt === "string"
+  );
 }
 
 function numericValue(value: unknown): number | null {

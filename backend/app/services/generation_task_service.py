@@ -9,18 +9,37 @@ from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError
 from backend.app.db.base import utcnow
+from backend.app.db.models.ad_generation_job import AdGenerationJob
+from backend.app.db.models.campaign import Campaign
+from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.generation_task import GenerationTask
+from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.video_asset import VideoAsset
+from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import AsyncSessionLocal
 from backend.app.schemas.copywriting import CopyDraftRead, CopyGenerateRequest, CopyReviseRequest
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
+from backend.app.schemas.video import (
+    VideoStoryboardGenerateRequest,
+    VideoStoryboardRead,
+    VideoStoryboardRewriteRequest,
+)
+from backend.app.services.collaboration import (
+    OperatorContext,
+    filter_for_operator,
+    require_read_access,
+    require_write_access,
+)
 from backend.app.services.copywriting_service import CopywritingService
 from backend.app.services.generation_attempt_service import classify_generation_error
+from backend.app.services.generation_runtime_monitor import GenerationRuntimeMonitor
 from backend.app.services.topic_service import TopicService
 from backend.app.services.utils import get_required
 
@@ -28,12 +47,19 @@ TEXT_QUEUE_NAME = "text_queue"
 IMAGE_QUEUE_NAME = "image_queue"
 VIDEO_QUEUE_NAME = "video_queue"
 CALLBACK_QUEUE_NAME = "callback_queue"
-TEXT_TASK_TYPES = {"topic_generate", "copy_generate", "copy_revise"}
+TEXT_TASK_TYPES = {
+    "topic_generate",
+    "copy_generate",
+    "copy_revise",
+    "video_storyboard_generate",
+    "video_storyboard_rewrite",
+}
 IMAGE_TASK_TYPES = {"image_generate"}
 VIDEO_TASK_TYPES = {"video_generate"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 IDEMPOTENCY_KEY_METADATA_FIELD = "idempotency_key"
+AUTO_RETRY_METADATA_FIELD = "auto_retry"
 RETRYABLE_TASK_ERROR_CODES = {
     "provider_timeout",
     "provider_429",
@@ -54,6 +80,8 @@ _video_queue_semaphore: asyncio.Semaphore | None = None
 _video_queue_limit: int | None = None
 _callback_queue_semaphore: asyncio.Semaphore | None = None
 _callback_queue_limit: int | None = None
+_model_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+_model_provider_limits: dict[str, int] = {}
 _idempotency_locks_guard = Lock()
 _idempotency_locks: dict[str, "_GenerationTaskIdempotencyLock"] = {}
 
@@ -88,6 +116,15 @@ class GenerationTaskRecoveryResult:
     rescheduled_tasks: list[GenerationTaskRecoveryTask] = field(default_factory=list)
 
 
+@dataclass
+class _GenerationTaskBusinessReferences:
+    campaign_ids: set[str] = field(default_factory=set)
+    topic_ids: set[str] = field(default_factory=set)
+    draft_ids: set[str] = field(default_factory=set)
+    video_ids: set[str] = field(default_factory=set)
+    job_ids: set[str] = field(default_factory=set)
+
+
 class GenerationTaskService:
     async def create_task(
         self,
@@ -99,6 +136,7 @@ class GenerationTaskService:
         business_id: str,
         payload: dict[str, Any],
         campaign_id: str | None = None,
+        owner_user_id: str | None = None,
         priority: int = 0,
         max_attempts: int = 2,
         metadata: dict[str, Any] | None = None,
@@ -108,6 +146,7 @@ class GenerationTaskService:
             task_type=task_type,
             business_type=business_type,
             business_id=business_id,
+            owner_user_id=owner_user_id,
             payload=payload,
         )
         async with _generation_task_idempotency_scope(idempotency_key):
@@ -117,6 +156,7 @@ class GenerationTaskService:
                 task_type=task_type,
                 business_type=business_type,
                 business_id=business_id,
+                owner_user_id=owner_user_id,
                 idempotency_key=idempotency_key,
                 payload=payload,
             )
@@ -130,6 +170,7 @@ class GenerationTaskService:
                 business_type=business_type,
                 business_id=business_id,
                 campaign_id=campaign_id,
+                owner_user_id=owner_user_id,
                 status="queued",
                 priority=priority,
                 payload_json=payload,
@@ -148,8 +189,18 @@ class GenerationTaskService:
             _set_generation_task_reused(task, False)
             return task
 
-    async def get_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
-        return await get_required(session, GenerationTask, task_id)  # type: ignore[return-value]
+    async def get_task(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        *,
+        operator: OperatorContext | None = None,
+    ) -> GenerationTask:
+        task = await get_required(session, GenerationTask, task_id)
+        if operator is not None:
+            require_read_access(task, operator)
+        await self._attach_display_context(session, [task], operator=operator)
+        return task  # type: ignore[return-value]
 
     async def _find_active_duplicate_task(
         self,
@@ -159,6 +210,7 @@ class GenerationTaskService:
         task_type: str,
         business_type: str,
         business_id: str,
+        owner_user_id: str | None,
         idempotency_key: str,
         payload: dict[str, Any],
     ) -> GenerationTask | None:
@@ -171,6 +223,11 @@ class GenerationTaskService:
                         GenerationTask.task_type == task_type,
                         GenerationTask.business_type == business_type,
                         GenerationTask.business_id == business_id,
+                        (
+                            GenerationTask.owner_user_id.is_(None)
+                            if owner_user_id is None
+                            else GenerationTask.owner_user_id == owner_user_id
+                        ),
                         GenerationTask.status.in_(ACTIVE_TASK_STATUSES),
                     )
                     .order_by(GenerationTask.queued_at.asc(), GenerationTask.created_at.asc())
@@ -218,9 +275,12 @@ class GenerationTaskService:
         status: str | None = None,
         task_type: str | None = None,
         business_id: str | None = None,
+        operator: OperatorContext | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> GenerationTaskListResult:
+        await self.prune_orphaned_business_tasks(session, operator=operator)
+
         conditions = []
         if queue_name:
             conditions.append(GenerationTask.queue_name == queue_name)
@@ -234,7 +294,10 @@ class GenerationTaskService:
         total = int(
             (
                 await session.execute(
-                    select(func.count()).select_from(GenerationTask).where(*conditions)
+                    _scope_generation_task_statement(
+                        select(func.count()).select_from(GenerationTask).where(*conditions),
+                        operator,
+                    )
                 )
             ).scalar_one()
             or 0
@@ -242,8 +305,10 @@ class GenerationTaskService:
         items = list(
             (
                 await session.execute(
-                    select(GenerationTask)
-                    .where(*conditions)
+                    _scope_generation_task_statement(
+                        select(GenerationTask).where(*conditions),
+                        operator,
+                    )
                     .order_by(GenerationTask.queued_at.desc(), GenerationTask.created_at.desc())
                     .offset(max(offset, 0))
                     .limit(max(min(limit, 200), 1))
@@ -252,42 +317,254 @@ class GenerationTaskService:
             .scalars()
             .all()
         )
+        await self._attach_display_context(session, items, operator=operator)
         return GenerationTaskListResult(
             items=items,
             total=total,
             limit=max(min(limit, 200), 1),
             offset=max(offset, 0),
-            summary=await self.task_summary(session),
+            summary=await self.task_summary(session, operator=operator, prune_orphans=False),
         )
 
-    async def task_summary(self, session: AsyncSession) -> dict[str, Any]:
+    async def prune_orphaned_business_tasks(
+        self,
+        session: AsyncSession,
+        *,
+        operator: OperatorContext | None = None,
+    ) -> int:
+        tasks = list(
+            (
+                await session.execute(
+                    _scope_generation_task_statement(select(GenerationTask), operator)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not tasks:
+            return 0
+
+        references_by_task = {
+            task.id: _generation_task_business_references(task) for task in tasks
+        }
+        campaign_ids: set[str] = set()
+        topic_ids: set[str] = set()
+        draft_ids: set[str] = set()
+        video_ids: set[str] = set()
+        job_ids: set[str] = set()
+        for references in references_by_task.values():
+            campaign_ids.update(references.campaign_ids)
+            topic_ids.update(references.topic_ids)
+            draft_ids.update(references.draft_ids)
+            video_ids.update(references.video_ids)
+            job_ids.update(references.job_ids)
+
+        topics = await _records_by_id(session, ContentTopic, topic_ids)
+        drafts = await _records_by_id(session, CopyDraft, draft_ids)
+        videos = await _records_by_id(session, VideoAsset, video_ids)
+        jobs = await _records_by_id(session, AdGenerationJob, job_ids)
+        for topic in topics.values():
+            campaign_ids.add(topic.campaign_id)
+        for draft in drafts.values():
+            campaign_ids.add(draft.campaign_id)
+        for video in videos.values():
+            campaign_ids.add(video.campaign_id)
+        for job in jobs.values():
+            campaign_id = _ad_generation_job_campaign_id(job)
+            if campaign_id:
+                campaign_ids.add(campaign_id)
+
+        campaigns = await _records_by_id(session, Campaign, campaign_ids)
+        orphan_task_ids = [
+            task.id
+            for task in tasks
+            if not _generation_task_has_live_business_reference(
+                task,
+                references_by_task[task.id],
+                campaigns=campaigns,
+                topics=topics,
+                drafts=drafts,
+                videos=videos,
+                jobs=jobs,
+            )
+        ]
+        if not orphan_task_ids:
+            return 0
+
+        await session.execute(
+            delete(GenerationTask)
+            .where(GenerationTask.id.in_(orphan_task_ids))
+            .execution_options(synchronize_session=False)
+        )
+        await session.flush()
+        logger.info("Pruned %s orphaned generation tasks", len(orphan_task_ids))
+        return len(orphan_task_ids)
+
+    async def _attach_display_context(
+        self,
+        session: AsyncSession,
+        tasks: list[GenerationTask],
+        *,
+        operator: OperatorContext | None = None,
+    ) -> None:
+        if not tasks:
+            return
+
+        campaign_ids: set[str] = set()
+        topic_ids: set[str] = set()
+        draft_ids: set[str] = set()
+        video_ids: set[str] = set()
+        job_ids: set[str] = set()
+
+        for task in tasks:
+            campaign_id = _text_or_none(task.campaign_id)
+            if campaign_id:
+                campaign_ids.add(campaign_id)
+            payload = _dict_or_empty(task.payload_json)
+            metadata = _dict_or_empty(task.metadata_json)
+            for value in (payload.get("campaign_id"), metadata.get("campaign_id")):
+                campaign_id = _text_or_none(value)
+                if campaign_id:
+                    campaign_ids.add(campaign_id)
+            if task.business_type == "campaign":
+                campaign_id = _text_or_none(task.business_id)
+                if campaign_id:
+                    campaign_ids.add(campaign_id)
+            elif task.business_type == "topic":
+                topic_id = _text_or_none(task.business_id)
+                if topic_id:
+                    topic_ids.add(topic_id)
+            elif task.business_type == "copy_draft":
+                draft_id = _text_or_none(task.business_id)
+                if draft_id:
+                    draft_ids.add(draft_id)
+            elif task.business_type == "video_asset":
+                video_id = _text_or_none(task.business_id)
+                if video_id:
+                    video_ids.add(video_id)
+            elif task.business_type == "ad_generation_job":
+                job_id = _text_or_none(task.business_id)
+                if job_id:
+                    job_ids.add(job_id)
+
+        topics = await _records_by_id(session, ContentTopic, topic_ids)
+        drafts = await _records_by_id(session, CopyDraft, draft_ids)
+        videos = await _records_by_id(session, VideoAsset, video_ids)
+        for topic in topics.values():
+            campaign_ids.add(topic.campaign_id)
+        for draft in drafts.values():
+            campaign_ids.add(draft.campaign_id)
+        for video in videos.values():
+            campaign_ids.add(video.campaign_id)
+
+        jobs, ordered_jobs = await _generation_jobs_for_context(
+            session,
+            campaign_ids,
+            job_ids,
+            operator=operator,
+        )
+        for job in jobs.values():
+            campaign_id = _ad_generation_job_campaign_id(job)
+            if campaign_id:
+                campaign_ids.add(campaign_id)
+
+        campaigns = await _records_by_id(session, Campaign, campaign_ids)
+        work_order_ids = {
+            campaign.work_order_id
+            for campaign in campaigns.values()
+            if _text_or_none(campaign.work_order_id)
+        }
+        work_orders = await _records_by_id(session, WorkOrder, work_order_ids)
+
+        for task in tasks:
+            campaign_id = _task_display_campaign_id(task, topics, drafts, videos)
+            if campaign_id is None and task.business_type == "ad_generation_job":
+                job = jobs.get(task.business_id)
+                campaign_id = _ad_generation_job_campaign_id(job) if job else None
+            campaign = campaigns.get(campaign_id or "")
+            work_order = work_orders.get(campaign.work_order_id or "") if campaign else None
+            job = _task_display_job(task, campaign_id, jobs)
+            task.display_context = _task_display_context(
+                campaign=campaign,
+                work_order=work_order,
+                job=job,
+                job_number=_ad_generation_job_number(job, ordered_jobs),
+                campaign_id=campaign_id,
+            )
+
+    async def task_summary(
+        self,
+        session: AsyncSession,
+        *,
+        operator: OperatorContext | None = None,
+        prune_orphans: bool = True,
+    ) -> dict[str, Any]:
+        if prune_orphans:
+            await self.prune_orphaned_business_tasks(session, operator=operator)
+
         settings = get_settings()
         status_rows = (
             await session.execute(
-                select(GenerationTask.status, func.count()).group_by(GenerationTask.status)
+                _scope_generation_task_statement(
+                    select(GenerationTask.status, func.count()).group_by(
+                        GenerationTask.status
+                    ),
+                    operator,
+                )
             )
         ).all()
         queue_rows = (
             await session.execute(
-                select(GenerationTask.queue_name, func.count()).group_by(GenerationTask.queue_name)
+                _scope_generation_task_statement(
+                    select(GenerationTask.queue_name, func.count()).group_by(
+                        GenerationTask.queue_name
+                    ),
+                    operator,
+                )
             )
         ).all()
         task_type_rows = (
             await session.execute(
-                select(GenerationTask.task_type, func.count()).group_by(GenerationTask.task_type)
+                _scope_generation_task_statement(
+                    select(GenerationTask.task_type, func.count()).group_by(
+                        GenerationTask.task_type
+                    ),
+                    operator,
+                )
             )
         ).all()
-        all_tasks = list((await session.execute(select(GenerationTask))).scalars().all())
+        all_tasks = list(
+            (
+                await session.execute(
+                    _scope_generation_task_statement(select(GenerationTask), operator)
+                )
+            )
+            .scalars()
+            .all()
+        )
         total = int(
-            (await session.execute(select(func.count()).select_from(GenerationTask))).scalar_one()
+            (
+                await session.execute(
+                    _scope_generation_task_statement(
+                        select(func.count()).select_from(GenerationTask),
+                        operator,
+                    )
+                )
+            ).scalar_one()
             or 0
         )
         retryable_failed_count = int(
             (
                 await session.execute(
-                    select(func.count())
-                    .select_from(GenerationTask)
-                    .where(GenerationTask.status == "failed", GenerationTask.retryable.is_(True))
+                    _scope_generation_task_statement(
+                        select(func.count())
+                        .select_from(GenerationTask)
+                        .where(
+                            GenerationTask.status == "failed",
+                            GenerationTask.retryable.is_(True),
+                        ),
+                        operator,
+                    )
                 )
             ).scalar_one()
             or 0
@@ -295,9 +572,12 @@ class GenerationTaskService:
         active_count = int(
             (
                 await session.execute(
-                    select(func.count())
-                    .select_from(GenerationTask)
-                    .where(GenerationTask.status.in_(("queued", "running")))
+                    _scope_generation_task_statement(
+                        select(func.count())
+                        .select_from(GenerationTask)
+                        .where(GenerationTask.status.in_(("queued", "running"))),
+                        operator,
+                    )
                 )
             ).scalar_one()
             or 0
@@ -305,9 +585,12 @@ class GenerationTaskService:
         resumable_queued_count = int(
             (
                 await session.execute(
-                    select(func.count())
-                    .select_from(GenerationTask)
-                    .where(GenerationTask.status == "queued")
+                    _scope_generation_task_statement(
+                        select(func.count())
+                        .select_from(GenerationTask)
+                        .where(GenerationTask.status == "queued"),
+                        operator,
+                    )
                 )
             ).scalar_one()
             or 0
@@ -318,14 +601,17 @@ class GenerationTaskService:
         stale_running_count = int(
             (
                 await session.execute(
-                    select(func.count())
-                    .select_from(GenerationTask)
-                    .where(
-                        GenerationTask.status == "running",
-                        (
-                            GenerationTask.started_at.is_(None)
-                            | (GenerationTask.started_at <= running_stale_before)
+                    _scope_generation_task_statement(
+                        select(func.count())
+                        .select_from(GenerationTask)
+                        .where(
+                            GenerationTask.status == "running",
+                            (
+                                GenerationTask.started_at.is_(None)
+                                | (GenerationTask.started_at <= running_stale_before)
+                            ),
                         ),
+                        operator,
                     )
                 )
             ).scalar_one()
@@ -334,18 +620,29 @@ class GenerationTaskService:
         interrupted_failed_count = int(
             (
                 await session.execute(
-                    select(func.count())
-                    .select_from(GenerationTask)
-                    .where(
-                        GenerationTask.status == "failed",
-                        GenerationTask.error_code.in_(("task_interrupted", "task_stale")),
+                    _scope_generation_task_statement(
+                        select(func.count())
+                        .select_from(GenerationTask)
+                        .where(
+                            GenerationTask.status == "failed",
+                            GenerationTask.error_code.in_(("task_interrupted", "task_stale")),
+                        ),
+                        operator,
                     )
                 )
             ).scalar_one()
             or 0
         )
         queue_concurrency = _queue_concurrency_settings()
+        provider_concurrency = _provider_concurrency_settings()
         queue_health = _generation_task_queue_health(all_tasks, queue_concurrency)
+        failure_codes = _generation_task_failure_codes(all_tasks)
+        slowest_queues = _generation_task_slowest_queues(queue_health)
+        await session.commit()
+        runtime_summary = await GenerationRuntimeMonitor().runtime_summary(
+            list(queue_health.keys()),
+            queue_concurrency,
+        )
         return {
             "total": total,
             "by_status": {str(status): int(count) for status, count in status_rows},
@@ -359,9 +656,11 @@ class GenerationTaskService:
             "target_concurrent_users": settings.generation_task_target_concurrent_users,
             "total_active_capacity": sum(queue_concurrency.values()),
             "queue_concurrency": queue_concurrency,
+            "provider_concurrency": provider_concurrency,
             "queue_health": queue_health,
-            "failure_codes": _generation_task_failure_codes(all_tasks),
-            "slowest_queues": _generation_task_slowest_queues(queue_health),
+            "failure_codes": failure_codes,
+            "slowest_queues": slowest_queues,
+            **runtime_summary,
         }
 
     async def recover_interrupted_tasks(
@@ -478,8 +777,16 @@ class GenerationTaskService:
         task.finished_at = utcnow()
         task.duration_ms = _duration_ms(task.started_at, task.finished_at)
 
-    async def retry_task(self, session: AsyncSession, task_id: str) -> GenerationTask:
+    async def retry_task(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        *,
+        operator: OperatorContext | None = None,
+    ) -> GenerationTask:
         task = await self.get_task(session, task_id)
+        if operator is not None:
+            require_write_access(task, operator)
         if task.task_type == "image_brief_generate":
             raise AppError("Image brief queue tasks are retried by regenerating the image request.")
         if task.status not in {"failed", "queued"}:
@@ -495,6 +802,7 @@ class GenerationTaskService:
         task.started_at = None
         task.finished_at = None
         task.duration_ms = None
+        task.metadata_json = _manual_retry_metadata(task)
         await session.commit()
         await session.refresh(task)
         return task
@@ -503,11 +811,18 @@ class GenerationTaskService:
         queue_name = await self._task_queue_name(task_id)
         if queue_name == TEXT_QUEUE_NAME:
             async with _text_queue_capacity():
-                await self._process_task_body(task_id)
+                async with _model_provider_capacity(TEXT_QUEUE_NAME):
+                    await self._process_task_body(task_id)
+            return
+        if queue_name == IMAGE_QUEUE_NAME:
+            async with _image_queue_capacity():
+                async with _model_provider_capacity(IMAGE_QUEUE_NAME):
+                    await self._process_task_body(task_id)
             return
         if queue_name == VIDEO_QUEUE_NAME:
             async with _video_queue_capacity():
-                await self._process_task_body(task_id)
+                async with _model_provider_capacity(VIDEO_QUEUE_NAME):
+                    await self._process_task_body(task_id)
             return
         if queue_name == CALLBACK_QUEUE_NAME:
             async with _callback_queue_capacity():
@@ -522,16 +837,45 @@ class GenerationTaskService:
 
     async def _process_task_body(self, task_id: str) -> None:
         async with AsyncSessionLocal() as session:
-            task = await self.get_task(session, task_id)
-            if task.status != "queued":
+            task = await self._claim_queued_task(session, task_id)
+            if task is None:
                 return
-            await self._mark_running(session, task)
             try:
                 result = await self._run_task(session, task)
             except Exception as exc:
                 await self._mark_failed(session, task, exc)
                 return
             await self._mark_succeeded(session, task, result)
+
+    async def _claim_queued_task(
+        self,
+        session: AsyncSession,
+        task_id: str,
+    ) -> GenerationTask | None:
+        now = utcnow()
+        result = await session.execute(
+            update(GenerationTask)
+            .where(GenerationTask.id == task_id, GenerationTask.status == "queued")
+            .values(
+                status="running",
+                attempt_count=GenerationTask.attempt_count + 1,
+                started_at=now,
+                finished_at=None,
+                duration_ms=None,
+                error_code=None,
+                error_message=None,
+                retryable=False,
+                updated_at=now,
+            )
+            .returning(GenerationTask.id)
+        )
+        claimed_task_id = result.scalar_one_or_none()
+        if claimed_task_id is None:
+            await session.rollback()
+            return None
+
+        await session.commit()
+        return await session.get(GenerationTask, claimed_task_id)
 
     async def run_inline(
         self,
@@ -559,32 +903,36 @@ class GenerationTaskService:
             )
 
         async with _text_queue_capacity():
-            async with AsyncSessionLocal() as session:
-                task = await self.get_task(session, task.id)
-                await self._mark_running(session, task)
-            try:
-                result = await operation()
-            except Exception as exc:
+            async with _model_provider_capacity(TEXT_QUEUE_NAME):
                 async with AsyncSessionLocal() as session:
                     task = await self.get_task(session, task.id)
-                    await self._mark_failed(session, task, exc)
-                raise
-            async with AsyncSessionLocal() as session:
-                task = await self.get_task(session, task.id)
-                await self._mark_succeeded(session, task, result_serializer(result))
-            return result
+                    await self._mark_running(session, task)
+                try:
+                    result = await operation()
+                except Exception as exc:
+                    async with AsyncSessionLocal() as session:
+                        task = await self.get_task(session, task.id)
+                        await self._mark_failed(session, task, exc)
+                    raise
+                async with AsyncSessionLocal() as session:
+                    task = await self.get_task(session, task.id)
+                    await self._mark_succeeded(session, task, result_serializer(result))
+                return result
 
     async def run_in_text_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
         async with _text_queue_capacity():
-            return await operation()
+            async with _model_provider_capacity(TEXT_QUEUE_NAME):
+                return await operation()
 
     async def run_in_image_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
         async with _image_queue_capacity():
-            return await operation()
+            async with _model_provider_capacity(IMAGE_QUEUE_NAME):
+                return await operation()
 
     async def run_in_video_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
         async with _video_queue_capacity():
-            return await operation()
+            async with _model_provider_capacity(VIDEO_QUEUE_NAME):
+                return await operation()
 
     async def run_in_callback_queue(self, operation: Callable[[], Awaitable[T]]) -> T:
         async with _callback_queue_capacity():
@@ -638,6 +986,24 @@ class GenerationTaskService:
                 CopyReviseRequest.model_validate(request_payload),
             )
             return {"draft": CopyDraftRead.model_validate(draft).model_dump(mode="json")}
+
+        if task.task_type == "video_storyboard_generate":
+            from backend.app.services.video_service import VideoService
+
+            storyboard = await VideoService().generate_storyboard(
+                session,
+                VideoStoryboardGenerateRequest.model_validate(payload),
+            )
+            return _video_storyboard_task_result(storyboard)
+
+        if task.task_type == "video_storyboard_rewrite":
+            from backend.app.services.video_service import VideoService
+
+            storyboard = await VideoService().rewrite_storyboard(
+                session,
+                VideoStoryboardRewriteRequest.model_validate(payload),
+            )
+            return _video_storyboard_task_result(storyboard)
 
         raise AppError(f"Unsupported text task type: {task.task_type}")
 
@@ -762,6 +1128,7 @@ class GenerationTaskService:
         task.error_code = None
         task.error_message = None
         task.retryable = False
+        task.metadata_json = _finish_auto_retry_metadata(task, status="succeeded")
         task.finished_at = utcnow()
         task.duration_ms = _duration_ms(task.started_at, task.finished_at)
         await session.commit()
@@ -775,14 +1142,37 @@ class GenerationTaskService:
     ) -> None:
         message = str(exc) or exc.__class__.__name__
         error_code = classify_generation_error(message)
-        task.status = "failed"
         task.error_code = error_code
         task.error_message = message
-        task.retryable = (
+        retryable = (
             task.attempt_count < task.max_attempts and error_code in RETRYABLE_TASK_ERROR_CODES
         )
+        if _should_auto_retry_task(task, error_code):
+            delay_seconds = _auto_retry_delay_seconds(task)
+            now = utcnow()
+            task.status = "queued"
+            task.retryable = False
+            task.queued_at = now + timedelta(seconds=delay_seconds)
+            task.started_at = None
+            task.finished_at = None
+            task.duration_ms = None
+            task.metadata_json = _scheduled_auto_retry_metadata(
+                task,
+                error_code=error_code,
+                message=message,
+                delay_seconds=delay_seconds,
+                scheduled_at=now,
+            )
+            await session.commit()
+            await session.refresh(task)
+            _schedule_auto_retry_task(task, delay_seconds)
+            return
+
+        task.status = "failed"
+        task.retryable = retryable
         task.finished_at = utcnow()
         task.duration_ms = _duration_ms(task.started_at, task.finished_at)
+        task.metadata_json = _finish_auto_retry_metadata(task, status="exhausted")
         await session.commit()
         await session.refresh(task)
 
@@ -833,6 +1223,40 @@ def _callback_queue_capacity() -> asyncio.Semaphore:
     return _callback_queue_semaphore
 
 
+@asynccontextmanager
+async def _model_provider_capacity(queue_name: str) -> AsyncIterator[None]:
+    semaphore = _model_provider_semaphore(queue_name)
+    async with semaphore:
+        yield
+
+
+def _model_provider_semaphore(queue_name: str) -> asyncio.Semaphore:
+    limit = _model_provider_limit(queue_name)
+    if (
+        queue_name not in _model_provider_semaphores
+        or _model_provider_limits.get(queue_name) != limit
+    ):
+        _model_provider_semaphores[queue_name] = asyncio.Semaphore(limit)
+        _model_provider_limits[queue_name] = limit
+    return _model_provider_semaphores[queue_name]
+
+
+def _model_provider_limit(queue_name: str) -> int:
+    settings = get_settings()
+    if queue_name == IMAGE_QUEUE_NAME:
+        return settings.model_provider_image_concurrency
+    if queue_name == VIDEO_QUEUE_NAME:
+        return settings.model_provider_video_concurrency
+    if queue_name == TEXT_QUEUE_NAME:
+        return settings.model_provider_text_concurrency
+    return 1
+
+
+def _reset_model_provider_capacity_for_tests() -> None:
+    _model_provider_semaphores.clear()
+    _model_provider_limits.clear()
+
+
 def _queue_concurrency_settings() -> dict[str, int]:
     settings = get_settings()
     return {
@@ -841,6 +1265,423 @@ def _queue_concurrency_settings() -> dict[str, int]:
         VIDEO_QUEUE_NAME: settings.video_queue_concurrency,
         CALLBACK_QUEUE_NAME: settings.callback_queue_concurrency,
     }
+
+
+def _provider_concurrency_settings() -> dict[str, int]:
+    return {
+        TEXT_QUEUE_NAME: _model_provider_limit(TEXT_QUEUE_NAME),
+        IMAGE_QUEUE_NAME: _model_provider_limit(IMAGE_QUEUE_NAME),
+        VIDEO_QUEUE_NAME: _model_provider_limit(VIDEO_QUEUE_NAME),
+    }
+
+
+def _video_storyboard_task_result(storyboard: VideoStoryboardRead) -> dict[str, Any]:
+    serialized_storyboard = storyboard.model_dump(mode="json")
+    return {
+        "video_storyboard": serialized_storyboard,
+        "storyboard_text": _format_video_storyboard_text(storyboard.storyboard),
+        "generated_count": 1,
+    }
+
+
+def _format_video_storyboard_text(storyboard: list[dict]) -> str:
+    if not storyboard:
+        return ""
+    blocks: list[str] = []
+    for index, scene in enumerate(storyboard, start=1):
+        scene_index = _storyboard_scene_value(scene, "scene_index") or str(index)
+        start = _storyboard_scene_value(scene, "start_second") or "-"
+        end = _storyboard_scene_value(scene, "end_second") or "-"
+        blocks.append(
+            "\n".join(
+                [
+                    f"镜头 {scene_index}（{start}-{end} 秒）",
+                    f"画面：{_storyboard_scene_value(scene, 'visual') or '-'}",
+                    f"字幕：{_storyboard_scene_value(scene, 'subtitle') or '-'}",
+                    f"动效：{_storyboard_scene_value(scene, 'motion') or '-'}",
+                    f"旁白：{_storyboard_scene_value(scene, 'voiceover') or '-'}",
+                    f"备注：{_storyboard_scene_value(scene, 'notes') or '-'}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
+def _storyboard_scene_value(scene: dict, key: str) -> str:
+    value = scene.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str | int | float | bool):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _should_auto_retry_task(task: GenerationTask, error_code: str) -> bool:
+    settings = get_settings()
+    return (
+        settings.generation_task_auto_retry_enabled
+        and error_code in RETRYABLE_TASK_ERROR_CODES
+        and task.attempt_count < task.max_attempts
+    )
+
+
+def _auto_retry_delay_seconds(task: GenerationTask) -> int:
+    delays = get_settings().generation_task_auto_retry_delays_seconds or [10]
+    clean_delays = [max(int(value), 0) for value in delays] or [10]
+    index = max(task.attempt_count - 1, 0)
+    return clean_delays[min(index, len(clean_delays) - 1)]
+
+
+def _scheduled_auto_retry_metadata(
+    task: GenerationTask,
+    *,
+    error_code: str,
+    message: str,
+    delay_seconds: int,
+    scheduled_at: datetime,
+) -> dict[str, Any]:
+    metadata = dict(task.metadata_json or {})
+    history = _auto_retry_history(metadata)
+    next_attempt = task.attempt_count + 1
+    next_retry_at = scheduled_at + timedelta(seconds=delay_seconds)
+    history.append(
+        {
+            "attempt": task.attempt_count,
+            "error_code": error_code,
+            "error_message": message,
+            "failed_at": scheduled_at.isoformat(),
+            "next_attempt": next_attempt,
+            "delay_seconds": delay_seconds,
+        }
+    )
+    metadata[AUTO_RETRY_METADATA_FIELD] = {
+        "status": "scheduled",
+        "attempt": task.attempt_count,
+        "next_attempt": next_attempt,
+        "max_attempts": task.max_attempts,
+        "remaining_attempts": max(task.max_attempts - task.attempt_count, 0),
+        "delay_seconds": delay_seconds,
+        "scheduled_at": scheduled_at.isoformat(),
+        "next_retry_at": next_retry_at.isoformat(),
+        "last_error_code": error_code,
+        "last_error_message": message,
+        "history": history[-5:],
+    }
+    return metadata
+
+
+def _manual_retry_metadata(task: GenerationTask) -> dict[str, Any]:
+    metadata = dict(task.metadata_json or {})
+    auto_retry = _dict_or_empty(metadata.get(AUTO_RETRY_METADATA_FIELD))
+    if auto_retry:
+        metadata[AUTO_RETRY_METADATA_FIELD] = {
+            **auto_retry,
+            "status": "manual_requeued",
+            "manual_requeued_at": utcnow().isoformat(),
+        }
+    return metadata
+
+
+def _finish_auto_retry_metadata(task: GenerationTask, *, status: str) -> dict[str, Any]:
+    metadata = dict(task.metadata_json or {})
+    auto_retry = _dict_or_empty(metadata.get(AUTO_RETRY_METADATA_FIELD))
+    if not auto_retry:
+        return metadata
+    metadata[AUTO_RETRY_METADATA_FIELD] = {
+        **auto_retry,
+        "status": status,
+        "finished_at": utcnow().isoformat(),
+    }
+    return metadata
+
+
+def _auto_retry_history(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    auto_retry = _dict_or_empty(metadata.get(AUTO_RETRY_METADATA_FIELD))
+    history = auto_retry.get("history")
+    if not isinstance(history, list):
+        return []
+    return [item for item in history if isinstance(item, dict)]
+
+
+def _schedule_auto_retry_task(task: GenerationTask, countdown_seconds: int) -> None:
+    from backend.app.services.generation_task_dispatcher import schedule_generation_task_id
+
+    schedule_generation_task_id(
+        task.id,
+        queue_name=task.queue_name,
+        priority=task.priority,
+        countdown_seconds=countdown_seconds,
+    )
+
+
+def _scope_generation_task_statement(
+    statement: Select[Any],
+    operator: OperatorContext | None,
+) -> Select[Any]:
+    if operator is None:
+        return statement
+    return filter_for_operator(statement, GenerationTask, operator)
+
+
+async def _records_by_id(
+    session: AsyncSession,
+    model: type[Any],
+    ids: set[str],
+) -> dict[str, Any]:
+    clean_ids = {item for item in ids if item}
+    if not clean_ids:
+        return {}
+    rows = (
+        await session.execute(select(model).where(model.id.in_(clean_ids)))
+    ).scalars().all()
+    return {row.id: row for row in rows}
+
+
+def _generation_task_business_references(
+    task: GenerationTask,
+) -> _GenerationTaskBusinessReferences:
+    references = _GenerationTaskBusinessReferences()
+    payload = _dict_or_empty(task.payload_json)
+    metadata = _dict_or_empty(task.metadata_json)
+
+    _add_text_refs(
+        references.campaign_ids,
+        task.campaign_id,
+        payload.get("campaign_id"),
+        metadata.get("campaign_id"),
+    )
+    _add_text_refs(
+        references.topic_ids,
+        payload.get("topic_id"),
+        metadata.get("topic_id"),
+    )
+    _add_text_refs(
+        references.draft_ids,
+        payload.get("draft_id"),
+        payload.get("copy_draft_id"),
+        metadata.get("draft_id"),
+        metadata.get("copy_draft_id"),
+    )
+    _add_text_refs(
+        references.video_ids,
+        payload.get("video_id"),
+        payload.get("video_asset_id"),
+        metadata.get("video_id"),
+        metadata.get("video_asset_id"),
+    )
+    _add_text_refs(
+        references.job_ids,
+        payload.get("job_id"),
+        payload.get("ad_generation_job_id"),
+        metadata.get("job_id"),
+        metadata.get("ad_generation_job_id"),
+    )
+
+    if task.business_type == "campaign":
+        _add_text_refs(references.campaign_ids, task.business_id)
+    elif task.business_type == "topic":
+        _add_text_refs(references.topic_ids, task.business_id)
+    elif task.business_type == "copy_draft":
+        _add_text_refs(references.draft_ids, task.business_id)
+    elif task.business_type == "video_asset":
+        _add_text_refs(references.video_ids, task.business_id)
+    elif task.business_type == "ad_generation_job":
+        _add_text_refs(references.job_ids, task.business_id)
+
+    return references
+
+
+def _generation_task_has_live_business_reference(
+    task: GenerationTask,
+    references: _GenerationTaskBusinessReferences,
+    *,
+    campaigns: dict[str, Campaign],
+    topics: dict[str, ContentTopic],
+    drafts: dict[str, CopyDraft],
+    videos: dict[str, VideoAsset],
+    jobs: dict[str, AdGenerationJob],
+) -> bool:
+    if any(campaign_id in campaigns for campaign_id in references.campaign_ids):
+        return True
+    if any(
+        topic_id in topics and topics[topic_id].campaign_id in campaigns
+        for topic_id in references.topic_ids
+    ):
+        return True
+    if any(
+        draft_id in drafts and drafts[draft_id].campaign_id in campaigns
+        for draft_id in references.draft_ids
+    ):
+        return True
+    if any(
+        video_id in videos and videos[video_id].campaign_id in campaigns
+        for video_id in references.video_ids
+    ):
+        return True
+    if any(job_id in jobs for job_id in references.job_ids):
+        return True
+
+    known_business_types = {
+        "campaign",
+        "topic",
+        "copy_draft",
+        "video_asset",
+        "ad_generation_job",
+    }
+    if task.business_type not in known_business_types:
+        return True
+    return not _generation_task_has_known_references(references)
+
+
+def _generation_task_has_known_references(
+    references: _GenerationTaskBusinessReferences,
+) -> bool:
+    return any(
+        (
+            references.campaign_ids,
+            references.topic_ids,
+            references.draft_ids,
+            references.video_ids,
+            references.job_ids,
+        )
+    )
+
+
+def _add_text_refs(target: set[str], *values: Any) -> None:
+    for value in values:
+        text = _text_or_none(value)
+        if text:
+            target.add(text)
+
+
+async def _generation_jobs_for_context(
+    session: AsyncSession,
+    campaign_ids: set[str],
+    job_ids: set[str],
+    *,
+    operator: OperatorContext | None = None,
+) -> tuple[dict[str, AdGenerationJob], list[AdGenerationJob]]:
+    if not campaign_ids and not job_ids:
+        return {}, []
+    statement = select(AdGenerationJob).order_by(
+        AdGenerationJob.created_at.asc(),
+        AdGenerationJob.id.asc(),
+    )
+    if operator is not None:
+        statement = filter_for_operator(statement, AdGenerationJob, operator)
+    rows = (await session.execute(statement)).scalars().all()
+    jobs: dict[str, AdGenerationJob] = {}
+    for job in rows:
+        campaign_id = _ad_generation_job_campaign_id(job)
+        if job.id in job_ids or (campaign_id is not None and campaign_id in campaign_ids):
+            jobs[job.id] = job
+    return jobs, list(rows)
+
+
+def _task_display_campaign_id(
+    task: GenerationTask,
+    topics: dict[str, ContentTopic],
+    drafts: dict[str, CopyDraft],
+    videos: dict[str, VideoAsset],
+) -> str | None:
+    campaign_id = _text_or_none(task.campaign_id)
+    if campaign_id:
+        return campaign_id
+    payload = _dict_or_empty(task.payload_json)
+    metadata = _dict_or_empty(task.metadata_json)
+    for value in (payload.get("campaign_id"), metadata.get("campaign_id")):
+        campaign_id = _text_or_none(value)
+        if campaign_id:
+            return campaign_id
+    if task.business_type == "campaign":
+        return _text_or_none(task.business_id)
+    if task.business_type == "topic":
+        topic = topics.get(task.business_id)
+        return topic.campaign_id if topic else None
+    if task.business_type == "copy_draft":
+        draft = drafts.get(task.business_id)
+        return draft.campaign_id if draft else None
+    if task.business_type == "video_asset":
+        video = videos.get(task.business_id)
+        return video.campaign_id if video else None
+    return None
+
+
+def _task_display_job(
+    task: GenerationTask,
+    campaign_id: str | None,
+    jobs: dict[str, AdGenerationJob],
+) -> AdGenerationJob | None:
+    if task.business_type == "ad_generation_job":
+        return jobs.get(task.business_id)
+    if not campaign_id:
+        return None
+    for job in jobs.values():
+        if _ad_generation_job_campaign_id(job) == campaign_id:
+            return job
+    return None
+
+
+def _task_display_context(
+    *,
+    campaign: Campaign | None,
+    work_order: WorkOrder | None,
+    job: AdGenerationJob | None,
+    job_number: str | None,
+    campaign_id: str | None,
+) -> dict[str, str]:
+    context: dict[str, str] = {}
+    resolved_campaign_id = campaign.id if campaign else campaign_id
+    if resolved_campaign_id:
+        context["campaign_id"] = resolved_campaign_id
+    if campaign and campaign.name:
+        context["campaign_name"] = campaign.name
+    if work_order:
+        context["work_order_id"] = work_order.id
+        context["work_order_title"] = (
+            _text_or_none(work_order.project_name)
+            or _text_or_none(work_order.product_name)
+            or _text_or_none(campaign.name if campaign else None)
+            or work_order.id
+        )
+    elif campaign and campaign.name:
+        context["work_order_title"] = campaign.name
+    if job:
+        context["ad_generation_job_id"] = job.id
+        if job_number:
+            context["ad_generation_job_number"] = job_number
+    return context
+
+
+def _ad_generation_job_number(
+    job: AdGenerationJob | None,
+    ordered_jobs: list[AdGenerationJob],
+) -> str | None:
+    if job is None:
+        return None
+    for index, item in enumerate(ordered_jobs, start=1):
+        if item.id == job.id:
+            return f"{index:03d}"
+    return None
+
+
+def _ad_generation_job_campaign_id(job: AdGenerationJob | None) -> str | None:
+    if job is None:
+        return None
+    result_payload = _dict_or_empty(job.result_payload)
+    metadata = _dict_or_empty(result_payload.get("metadata_json"))
+    return _text_or_none(metadata.get("campaign_id"))
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _generation_task_recovery_refs(
@@ -1072,6 +1913,7 @@ def _generation_task_idempotency_key(
     task_type: str,
     business_type: str,
     business_id: str,
+    owner_user_id: str | None,
     payload: dict[str, Any],
 ) -> str:
     raw = _canonical_json(
@@ -1080,6 +1922,7 @@ def _generation_task_idempotency_key(
             "task_type": task_type,
             "business_type": business_type,
             "business_id": business_id,
+            "owner_user_id": owner_user_id,
             "payload": payload,
         }
     )

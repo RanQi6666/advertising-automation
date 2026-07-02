@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
-from backend.app.api.deps import DbSession
+from backend.app.api.deps import CurrentOperator, DbSession
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.schemas.video import (
@@ -16,6 +16,7 @@ from backend.app.schemas.video import (
 from backend.app.services.generation_attempt_service import GenerationAttemptService
 from backend.app.services.generation_task_dispatcher import schedule_generation_task
 from backend.app.services.generation_task_service import (
+    TEXT_QUEUE_NAME,
     VIDEO_QUEUE_NAME,
     GenerationTaskService,
 )
@@ -72,6 +73,40 @@ async def stream_video_storyboard(payload: VideoStoryboardGenerateRequest, sessi
 
 
 @router.post(
+    "/videos/storyboard/task",
+    response_model=GenerationTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_video_storyboard(
+    payload: VideoStoryboardGenerateRequest,
+    session: DbSession,
+    operator: CurrentOperator,
+    background_tasks: BackgroundTasks,
+):
+    business_id = payload.draft_id or payload.campaign_id
+    task = await task_service.create_task(
+        session,
+        queue_name=TEXT_QUEUE_NAME,
+        task_type="video_storyboard_generate",
+        business_type="copy_draft" if payload.draft_id else "campaign",
+        business_id=business_id,
+        campaign_id=payload.campaign_id,
+        payload=payload.model_dump(mode="json"),
+        owner_user_id=operator.id,
+        max_attempts=3,
+        metadata={
+            "creative_asset_ids": payload.creative_asset_ids,
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+            "draft_id": payload.draft_id,
+            "model_id": payload.model_id,
+        },
+    )
+    schedule_generation_task(task, background_tasks)
+    return GenerationTaskRead.from_model(task)
+
+
+@router.post(
     "/videos/storyboard/rewrite",
     response_model=VideoStoryboardRead,
     status_code=status.HTTP_201_CREATED,
@@ -118,6 +153,40 @@ async def stream_rewrite_video_storyboard(
 
 
 @router.post(
+    "/videos/storyboard/rewrite/task",
+    response_model=GenerationTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_rewrite_video_storyboard(
+    payload: VideoStoryboardRewriteRequest,
+    session: DbSession,
+    operator: CurrentOperator,
+    background_tasks: BackgroundTasks,
+):
+    business_id = payload.draft_id or payload.campaign_id
+    task = await task_service.create_task(
+        session,
+        queue_name=TEXT_QUEUE_NAME,
+        task_type="video_storyboard_rewrite",
+        business_type="copy_draft" if payload.draft_id else "campaign",
+        business_id=business_id,
+        campaign_id=payload.campaign_id,
+        payload=payload.model_dump(mode="json"),
+        owner_user_id=operator.id,
+        max_attempts=3,
+        metadata={
+            "creative_asset_ids": payload.creative_asset_ids,
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+            "draft_id": payload.draft_id,
+            "model_id": payload.model_id,
+        },
+    )
+    schedule_generation_task(task, background_tasks)
+    return GenerationTaskRead.from_model(task)
+
+
+@router.post(
     "/videos/from-images",
     response_model=VideoAssetRead,
     status_code=status.HTTP_202_ACCEPTED,
@@ -139,6 +208,7 @@ async def start_video_generation(video_id: str, session: DbSession):
 async def queue_start_video_generation(
     video_id: str,
     session: DbSession,
+    operator: CurrentOperator,
     background_tasks: BackgroundTasks,
 ):
     video = await get_required(session, VideoAsset, video_id)
@@ -150,6 +220,7 @@ async def queue_start_video_generation(
         business_id=video.id,
         campaign_id=video.campaign_id,
         payload={"video_id": video.id},
+        owner_user_id=operator.id,
         metadata={
             "duration_seconds": video.duration_seconds,
             "aspect_ratio": video.aspect_ratio,

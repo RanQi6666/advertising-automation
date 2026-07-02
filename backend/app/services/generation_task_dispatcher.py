@@ -18,6 +18,8 @@ class _GenerationTaskLike(Protocol):
 def schedule_generation_task(
     task: GenerationTask | _GenerationTaskLike,
     background_tasks: _BackgroundTaskScheduler | None = None,
+    *,
+    countdown_seconds: int = 0,
 ) -> bool:
     if bool(getattr(task, "reused_existing", False)):
         return False
@@ -26,6 +28,7 @@ def schedule_generation_task(
         queue_name=str(task.queue_name),
         background_tasks=background_tasks,
         priority=int(getattr(task, "priority", 0) or 0),
+        countdown_seconds=countdown_seconds,
     )
 
 
@@ -35,13 +38,18 @@ def schedule_generation_task_id(
     queue_name: str,
     background_tasks: _BackgroundTaskScheduler | None = None,
     priority: int = 0,
+    countdown_seconds: int = 0,
 ) -> bool:
     settings = get_settings()
+    countdown_seconds = max(int(countdown_seconds or 0), 0)
     if settings.generation_task_execution_backend == "celery":
-        _enqueue_celery_generation_task(task_id, queue_name, priority)
+        if countdown_seconds > 0:
+            _enqueue_celery_generation_task(task_id, queue_name, priority, countdown_seconds)
+        else:
+            _enqueue_celery_generation_task(task_id, queue_name, priority)
         return True
 
-    _enqueue_background_generation_task(task_id, background_tasks)
+    _enqueue_background_generation_task(task_id, background_tasks, countdown_seconds)
     return True
 
 
@@ -62,13 +70,27 @@ def schedule_ad_generation_job(
 def _enqueue_background_generation_task(
     task_id: str,
     background_tasks: _BackgroundTaskScheduler | None,
+    countdown_seconds: int = 0,
 ) -> None:
+    if background_tasks is not None:
+        if countdown_seconds > 0:
+            background_tasks.add_task(
+                _process_generation_task_after_delay,
+                task_id,
+                countdown_seconds,
+            )
+        else:
+            background_tasks.add_task(_process_generation_task_after_delay, task_id)
+        return
+    asyncio.create_task(_process_generation_task_after_delay(task_id, countdown_seconds))
+
+
+async def _process_generation_task_after_delay(task_id: str, countdown_seconds: int = 0) -> None:
     from backend.app.services.generation_task_service import GenerationTaskService
 
-    if background_tasks is not None:
-        background_tasks.add_task(GenerationTaskService().process_task, task_id)
-        return
-    asyncio.create_task(GenerationTaskService().process_task(task_id))
+    if countdown_seconds > 0:
+        await asyncio.sleep(countdown_seconds)
+    await GenerationTaskService().process_task(task_id)
 
 
 def _enqueue_background_ad_generation_job(
@@ -83,13 +105,19 @@ def _enqueue_background_ad_generation_job(
     asyncio.create_task(AdGenerationService().run_job(job_id))
 
 
-def _enqueue_celery_generation_task(task_id: str, queue_name: str, priority: int) -> None:
+def _enqueue_celery_generation_task(
+    task_id: str,
+    queue_name: str,
+    priority: int,
+    countdown_seconds: int = 0,
+) -> None:
     from backend.app.worker.tasks import process_generation_task
 
     process_generation_task.apply_async(
         args=[task_id],
         queue=queue_name,
         priority=max(priority, 0),
+        countdown=max(int(countdown_seconds or 0), 0),
     )
 
 

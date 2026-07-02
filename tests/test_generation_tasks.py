@@ -2,23 +2,31 @@ import asyncio
 from datetime import timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from backend.app.api.v1.endpoints import generation_tasks as generation_tasks_endpoint
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base, utcnow
+from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import VideoStatus
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
+from backend.app.db.models.user import User
 from backend.app.db.models.video_asset import VideoAsset
+from backend.app.db.models.work_order import WorkOrder
+from backend.app.db.session import get_session
+from backend.app.main import create_app
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services import creative_service, video_service
 from backend.app.services import generation_task_dispatcher as dispatcher
 from backend.app.services import generation_task_service as task_module
+from backend.app.services.collaboration import OperatorContext
 from backend.app.services.generation_task_service import (
     CALLBACK_QUEUE_NAME,
     IMAGE_QUEUE_NAME,
@@ -28,6 +36,58 @@ from backend.app.services.generation_task_service import (
     recover_generation_tasks_on_startup,
     should_schedule_generation_task,
 )
+
+
+class FakeStoryboardTaskService:
+    async def generate_storyboard(self, session, payload):
+        from backend.app.schemas.video import VideoStoryboardRead
+
+        return VideoStoryboardRead(
+            campaign_id=payload.campaign_id,
+            draft_id=payload.draft_id,
+            creative_asset_ids=payload.creative_asset_ids,
+            duration_seconds=payload.duration_seconds,
+            aspect_ratio=payload.aspect_ratio,
+            storyboard=[
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": payload.duration_seconds,
+                    "visual": "Open with the app benefit.",
+                    "subtitle": "Start now",
+                    "motion": "Fast cuts",
+                    "voiceover": "Try it today",
+                    "notes": "Use approved copy.",
+                }
+            ],
+            prompt="Scene 1: Open with the app benefit.",
+            metadata_json={"provider": "fake", "model": payload.model_id or "fake-text"},
+        )
+
+    async def rewrite_storyboard(self, session, payload):
+        from backend.app.schemas.video import VideoStoryboardRead
+
+        return VideoStoryboardRead(
+            campaign_id=payload.campaign_id,
+            draft_id=payload.draft_id,
+            creative_asset_ids=payload.creative_asset_ids,
+            duration_seconds=payload.duration_seconds,
+            aspect_ratio=payload.aspect_ratio,
+            storyboard=[
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": payload.duration_seconds,
+                    "visual": "Open faster with the app benefit.",
+                    "subtitle": "Play now",
+                    "motion": "Quick zoom",
+                    "voiceover": "Try it today",
+                    "notes": f"Revision applied: {payload.feedback}",
+                }
+            ],
+            prompt=f"Revision applied: {payload.feedback}",
+            metadata_json={"provider": "fake", "revision_feedback": payload.feedback},
+        )
 
 
 class FakeImageTaskLLMProvider:
@@ -85,6 +145,54 @@ class FakeVideoTaskService:
         return video
 
 
+OPERATOR_A_ID = "00000000-0000-4000-8000-000000000101"
+OPERATOR_B_ID = "00000000-0000-4000-8000-000000000102"
+ADMIN_ID = "00000000-0000-4000-8000-000000000199"
+
+
+def _operator_context(operator_id: str, role: str = "operator") -> OperatorContext:
+    return OperatorContext(
+        id=operator_id,
+        email=f"{operator_id}@example.test",
+        full_name=None,
+        role=role,
+    )
+
+
+def _operator_headers(operator_id: str) -> dict[str, str]:
+    return {"X-Operator-Id": operator_id}
+
+
+async def _seed_generation_task_users(session_factory) -> None:
+    async with session_factory() as session:
+        session.add_all(
+            [
+                User(
+                    id=OPERATOR_A_ID,
+                    email="generation-operator-a@example.test",
+                    full_name="Operator A",
+                    role="operator",
+                    is_active=True,
+                ),
+                User(
+                    id=OPERATOR_B_ID,
+                    email="generation-operator-b@example.test",
+                    full_name="Operator B",
+                    role="operator",
+                    is_active=True,
+                ),
+                User(
+                    id=ADMIN_ID,
+                    email="generation-admin@example.test",
+                    full_name="Admin",
+                    role="admin",
+                    is_active=True,
+                ),
+            ]
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_generation_task_processes_topic_generation(monkeypatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "mock")
@@ -138,6 +246,147 @@ async def test_generation_task_processes_topic_generation(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_task_processes_video_storyboard_generation(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(video_service, "VideoService", FakeStoryboardTaskService)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-storyboard-task-1",
+            name="Storyboard Task Campaign",
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-storyboard-task-1",
+            campaign_id=campaign.id,
+            title="Topic",
+            angle="Angle",
+        )
+        draft = CopyDraft(
+            id="draft-storyboard-task-1",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Approved copy",
+            status="approved",
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="video_storyboard_generate",
+            business_type="copy_draft",
+            business_id=draft.id,
+            campaign_id=campaign.id,
+            payload={
+                "campaign_id": campaign.id,
+                "creative_asset_ids": [],
+                "draft_id": draft.id,
+                "duration_seconds": 12,
+                "aspect_ratio": "9:16",
+                "instructions": "Make it energetic.",
+                "model_id": "fake-text-model",
+            },
+            owner_user_id=OPERATOR_A_ID,
+        )
+
+    await GenerationTaskService().process_task(task.id)
+
+    async with session_factory() as session:
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.queue_name == TEXT_QUEUE_NAME
+    assert stored.task_type == "video_storyboard_generate"
+    assert stored.business_type == "copy_draft"
+    assert stored.campaign_id == "campaign-storyboard-task-1"
+    assert stored.result_json is not None
+    assert stored.result_json["video_storyboard"]["campaign_id"] == "campaign-storyboard-task-1"
+    assert stored.result_json["video_storyboard"]["draft_id"] == "draft-storyboard-task-1"
+    assert stored.result_json["storyboard_text"].startswith("镜头 1")
+    assert stored.result_json["generated_count"] == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_processes_video_storyboard_rewrite(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(video_service, "VideoService", FakeStoryboardTaskService)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-storyboard-rewrite-task-1",
+            name="Storyboard Rewrite Campaign",
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-storyboard-rewrite-task-1",
+            campaign_id=campaign.id,
+            title="Topic",
+            angle="Angle",
+        )
+        draft = CopyDraft(
+            id="draft-storyboard-rewrite-task-1",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Approved copy",
+            status="approved",
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="video_storyboard_rewrite",
+            business_type="copy_draft",
+            business_id=draft.id,
+            campaign_id=campaign.id,
+            payload={
+                "campaign_id": campaign.id,
+                "creative_asset_ids": [],
+                "draft_id": draft.id,
+                "duration_seconds": 12,
+                "aspect_ratio": "9:16",
+                "storyboard": [{"scene_index": 1, "visual": "Open with the app."}],
+                "storyboard_text": "Scene 1: Open with the app.",
+                "feedback": "Make the hook faster.",
+                "model_id": "fake-text-model",
+            },
+            owner_user_id=OPERATOR_A_ID,
+        )
+
+    await GenerationTaskService().process_task(task.id)
+
+    async with session_factory() as session:
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.task_type == "video_storyboard_rewrite"
+    assert stored.result_json is not None
+    assert stored.result_json["video_storyboard"]["metadata_json"]["revision_feedback"] == (
+        "Make the hook faster."
+    )
+    assert "Open faster" in stored.result_json["storyboard_text"]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_run_in_text_queue_does_not_require_database_session(monkeypatch) -> None:
     def fail_session_factory():
         raise AssertionError("inline text queue capacity should not open a database session")
@@ -181,7 +430,14 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
             name="Task Monitor Campaign",
             metadata_json={},
         )
-        session.add(campaign)
+        callback_job = AdGenerationJob(
+            id="job-task-monitor-1",
+            status="returned",
+            request_payload={},
+            result_payload={"metadata_json": {"campaign_id": campaign.id}},
+            metadata_json={},
+        )
+        session.add_all([campaign, callback_job])
         await session.commit()
 
         service = GenerationTaskService()
@@ -277,6 +533,483 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert queued_task.status == "queued"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_list_enriches_historical_copy_task_work_order_context(
+    monkeypatch,
+) -> None:
+    class FakeRuntimeMonitor:
+        async def runtime_summary(self, queue_names, queue_concurrency):
+            return {
+                "execution_backend": "background_tasks",
+                "redis_queues": {"status": "disabled", "queues": {}, "error": None},
+                "worker_health": {
+                    "status": "disabled",
+                    "online_count": 0,
+                    "missing_queues": [],
+                    "total_active_tasks": 0,
+                    "workers": [],
+                    "error": None,
+                },
+            }
+
+    monkeypatch.setattr(task_module, "GenerationRuntimeMonitor", FakeRuntimeMonitor)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        work_order = WorkOrder(
+            id="work-order-task-context-1",
+            raw_content="Project GAJA777",
+            project_name="GAJA777",
+            parsed_fields={},
+            metadata_json={},
+        )
+        campaign = Campaign(
+            id="campaign-task-context-1",
+            name="GAJA777",
+            work_order_id=work_order.id,
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-task-context-1",
+            campaign_id=campaign.id,
+            title="Launch hook",
+            angle="Open the game portal",
+            selling_points=[],
+            source_data={},
+        )
+        older_job = AdGenerationJob(
+            id="job-task-context-0",
+            status="fields_review",
+            request_payload={"work_order": {"structured_fields": {"project_name": "Earlier"}}},
+            result_payload={"metadata_json": {"campaign_id": "campaign-older-context"}},
+            metadata_json={},
+            created_at=utcnow() - timedelta(hours=1),
+        )
+        job = AdGenerationJob(
+            id="job-task-context-1",
+            status="image_review",
+            request_payload={"work_order": {"structured_fields": {"project_name": "GAJA777"}}},
+            result_payload={
+                "metadata_json": {
+                    "campaign_id": campaign.id,
+                    "work_order_id": work_order.id,
+                }
+            },
+            metadata_json={},
+            created_at=utcnow(),
+        )
+        session.add_all([work_order, campaign, topic, older_job, job])
+        await session.commit()
+
+        historical_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="copy_generate",
+            business_type="topic",
+            business_id=topic.id,
+            payload={"topic_id": topic.id},
+        )
+
+        listing = await GenerationTaskService().list_tasks(session)
+        read_task = GenerationTaskRead.from_model(listing.items[0])
+
+    assert listing.items[0].id == historical_task.id
+    assert read_task.campaign_id is None
+    assert read_task.display_context == {
+        "campaign_id": campaign.id,
+        "campaign_name": "GAJA777",
+        "work_order_id": work_order.id,
+        "work_order_title": "GAJA777",
+        "ad_generation_job_id": job.id,
+        "ad_generation_job_number": "002",
+    }
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_service_scopes_list_and_summary_by_operator(
+    monkeypatch,
+) -> None:
+    class FakeRuntimeMonitor:
+        async def runtime_summary(self, queue_names, queue_concurrency):
+            return {
+                "execution_backend": "celery",
+                "redis_queues": {
+                    "status": "ok",
+                    "total_depth": 4,
+                    "queues": {
+                        queue_name: {
+                            "depth": 1,
+                            "concurrency": queue_concurrency[queue_name],
+                            "backlog": 0,
+                            "pressure_ratio": 0.0,
+                        }
+                        for queue_name in queue_names
+                    },
+                    "error": None,
+                },
+                "worker_health": {
+                    "status": "ok",
+                    "online_count": 2,
+                    "missing_queues": [],
+                    "total_active_tasks": 3,
+                    "workers": [],
+                    "error": None,
+                },
+            }
+
+    monkeypatch.setattr(task_module, "GenerationRuntimeMonitor", FakeRuntimeMonitor)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-owned-task-monitor-1",
+            name="Owned Task Monitor Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        service = GenerationTaskService()
+        operator_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=f"{campaign.id}-operator-a",
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id, "owner": "a"},
+            owner_user_id=OPERATOR_A_ID,
+        )
+        other_operator_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-owned-task-monitor-b",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-owned-task-monitor-b"},
+            owner_user_id=OPERATOR_B_ID,
+        )
+        unowned_task = await service.create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id="video-owned-task-monitor-unowned",
+            campaign_id=campaign.id,
+            payload={"video_id": "video-owned-task-monitor-unowned"},
+        )
+        other_operator_task.status = "failed"
+        other_operator_task.error_code = "provider_timeout"
+        other_operator_task.error_message = "provider timeout"
+        other_operator_task.retryable = True
+        other_operator_task.finished_at = utcnow()
+        await session.commit()
+
+        operator_listing = await service.list_tasks(
+            session,
+            operator=_operator_context(OPERATOR_A_ID),
+        )
+        admin_listing = await service.list_tasks(
+            session,
+            operator=_operator_context(ADMIN_ID, role="admin"),
+        )
+
+    assert {task.id for task in operator_listing.items} == {
+        operator_task.id,
+        unowned_task.id,
+    }
+    assert operator_listing.total == 2
+    assert operator_listing.summary["total"] == 2
+    assert operator_listing.summary["by_queue"] == {
+        TEXT_QUEUE_NAME: 1,
+        VIDEO_QUEUE_NAME: 1,
+    }
+    assert operator_listing.summary["retryable_failed_count"] == 0
+    assert operator_listing.summary["redis_queues"]["total_depth"] == 4
+    assert operator_listing.summary["worker_health"]["online_count"] == 2
+
+    assert {task.id for task in admin_listing.items} == {
+        operator_task.id,
+        other_operator_task.id,
+        unowned_task.id,
+    }
+    assert admin_listing.total == 3
+    assert admin_listing.summary["total"] == 3
+    assert admin_listing.summary["retryable_failed_count"] == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_list_prunes_orphaned_business_tasks() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-visible-task-monitor",
+            name="Visible Task Monitor Campaign",
+            metadata_json={},
+        )
+        topic = ContentTopic(
+            id="topic-visible-task-monitor",
+            campaign_id=campaign.id,
+            title="Visible topic",
+            angle="Visible angle",
+        )
+        draft = CopyDraft(
+            id="draft-visible-task-monitor",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Visible copy",
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+        service = GenerationTaskService()
+        valid_campaign_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=f"{campaign.id}-request",
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id},
+        )
+        valid_draft_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id=draft.id,
+            campaign_id=None,
+            payload={"draft_id": draft.id},
+        )
+        orphan_campaign_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id="campaign-deleted-task-monitor",
+            campaign_id="campaign-deleted-task-monitor",
+            payload={"campaign_id": "campaign-deleted-task-monitor"},
+        )
+        orphan_topic_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="copy_generate",
+            business_type="topic",
+            business_id="topic-deleted-task-monitor",
+            campaign_id=None,
+            payload={"topic_id": "topic-deleted-task-monitor"},
+        )
+        orphan_draft_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-deleted-task-monitor",
+            campaign_id=None,
+            payload={"draft_id": "draft-deleted-task-monitor"},
+        )
+        orphan_callback_task = await service.create_task(
+            session,
+            queue_name=CALLBACK_QUEUE_NAME,
+            task_type="ad_generation_callback",
+            business_type="ad_generation_job",
+            business_id="job-deleted-task-monitor",
+            campaign_id=None,
+            payload={"job_id": "job-deleted-task-monitor"},
+        )
+
+        listing = await service.list_tasks(session)
+        remaining_rows = list(
+            (await session.execute(select(GenerationTask))).scalars().all()
+        )
+
+    assert {task.id for task in listing.items} == {
+        valid_campaign_task.id,
+        valid_draft_task.id,
+    }
+    assert listing.total == 2
+    assert listing.summary["total"] == 2
+    assert {task.id for task in remaining_rows} == {
+        valid_campaign_task.id,
+        valid_draft_task.id,
+    }
+    assert orphan_campaign_task.id not in {task.id for task in remaining_rows}
+    assert orphan_topic_task.id not in {task.id for task in remaining_rows}
+    assert orphan_draft_task.id not in {task.id for task in remaining_rows}
+    assert orphan_callback_task.id not in {task.id for task in remaining_rows}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_endpoints_require_operator_and_block_cross_operator_access(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "")
+    get_settings.cache_clear()
+
+    class FakeRuntimeMonitor:
+        async def runtime_summary(self, queue_names, queue_concurrency):
+            return {
+                "execution_backend": "background",
+                "redis_queues": {"status": "disabled", "queues": {}, "error": None},
+                "worker_health": {
+                    "status": "disabled",
+                    "online_count": 0,
+                    "missing_queues": [],
+                    "total_active_tasks": 0,
+                    "workers": [],
+                    "error": None,
+                },
+            }
+
+    monkeypatch.setattr(task_module, "GenerationRuntimeMonitor", FakeRuntimeMonitor)
+    monkeypatch.setattr(
+        generation_tasks_endpoint,
+        "schedule_generation_task",
+        lambda task, background_tasks: None,
+    )
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'generation-tasks-api.db').as_posix()}"
+    engine = create_async_engine(database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed_generation_task_users(session_factory)
+
+    async def override_get_session():
+        async with session_factory() as session:
+            yield session
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-owned-task-api-1",
+            name="Owned Task API Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        service = GenerationTaskService()
+        operator_task = await service.create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=f"{campaign.id}-operator-a",
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id, "owner": "a"},
+            owner_user_id=OPERATOR_A_ID,
+        )
+        other_operator_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-owned-task-api-b",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-owned-task-api-b"},
+            owner_user_id=OPERATOR_B_ID,
+            max_attempts=3,
+        )
+        unowned_task = await service.create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id="video-owned-task-api-unowned",
+            campaign_id=campaign.id,
+            payload={"video_id": "video-owned-task-api-unowned"},
+        )
+        other_operator_task.status = "failed"
+        other_operator_task.error_code = "provider_timeout"
+        other_operator_task.error_message = "provider timeout"
+        other_operator_task.retryable = True
+        other_operator_task.attempt_count = 1
+        other_operator_task.finished_at = utcnow()
+        await session.commit()
+
+    app = create_app()
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        with TestClient(app) as client:
+            missing_operator_response = client.get("/api/v1/generation-tasks")
+            operator_list_response = client.get(
+                "/api/v1/generation-tasks",
+                headers=_operator_headers(OPERATOR_A_ID),
+            )
+            admin_list_response = client.get(
+                "/api/v1/generation-tasks",
+                headers=_operator_headers(ADMIN_ID),
+            )
+            forbidden_get_response = client.get(
+                f"/api/v1/generation-tasks/{other_operator_task.id}",
+                headers=_operator_headers(OPERATOR_A_ID),
+            )
+            admin_get_response = client.get(
+                f"/api/v1/generation-tasks/{other_operator_task.id}",
+                headers=_operator_headers(ADMIN_ID),
+            )
+            forbidden_retry_response = client.post(
+                f"/api/v1/generation-tasks/{other_operator_task.id}/retry",
+                headers=_operator_headers(OPERATOR_A_ID),
+            )
+            admin_retry_response = client.post(
+                f"/api/v1/generation-tasks/{other_operator_task.id}/retry",
+                headers=_operator_headers(ADMIN_ID),
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert missing_operator_response.status_code == 401
+    assert operator_list_response.status_code == 200
+    operator_payload = operator_list_response.json()
+    assert {item["id"] for item in operator_payload["items"]} == {
+        operator_task.id,
+        unowned_task.id,
+    }
+    assert operator_payload["total"] == 2
+    assert operator_payload["summary"]["total"] == 2
+    assert operator_payload["summary"]["by_queue"] == {
+        TEXT_QUEUE_NAME: 1,
+        VIDEO_QUEUE_NAME: 1,
+    }
+
+    assert admin_list_response.status_code == 200
+    assert {item["id"] for item in admin_list_response.json()["items"]} == {
+        operator_task.id,
+        other_operator_task.id,
+        unowned_task.id,
+    }
+
+    assert forbidden_get_response.status_code == 403
+    assert admin_get_response.status_code == 200
+    assert admin_get_response.json()["owner_user_id"] == OPERATOR_B_ID
+    assert forbidden_retry_response.status_code == 403
+    assert admin_retry_response.status_code == 200
+    assert admin_retry_response.json()["status"] == "queued"
+
+    await engine.dispose()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -390,6 +1123,71 @@ async def test_generation_task_summary_reports_queue_pressure_and_duration_metri
     assert video_health["avg_run_ms"] == 120_000
     assert summary["failure_codes"] == [{"code": "provider_timeout", "count": 1}]
     assert summary["slowest_queues"][0]["queue_name"] == TEXT_QUEUE_NAME
+
+    await engine.dispose()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_summary_includes_runtime_monitor_status(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    active_session: AsyncSession | None = None
+
+    class FakeRuntimeMonitor:
+        async def runtime_summary(self, queue_names, queue_concurrency):
+            assert active_session is not None
+            assert active_session.in_transaction() is False
+            return {
+                "execution_backend": "celery",
+                "redis_queues": {
+                    "status": "ok",
+                    "total_depth": 2,
+                    "queues": {
+                        "text_queue": {
+                            "depth": 2,
+                            "concurrency": queue_concurrency["text_queue"],
+                            "backlog": 0,
+                            "pressure_ratio": 0.33,
+                        }
+                    },
+                    "error": None,
+                },
+                "worker_health": {
+                    "status": "ok",
+                    "online_count": 1,
+                    "missing_queues": [],
+                    "total_active_tasks": 1,
+                    "workers": [
+                        {
+                            "name": "text@worker",
+                            "queues": ["text_queue"],
+                            "concurrency": 6,
+                            "active_tasks": 1,
+                        }
+                    ],
+                    "error": None,
+                },
+            }
+
+    monkeypatch.setattr(task_module, "GenerationRuntimeMonitor", FakeRuntimeMonitor)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        active_session = session
+        summary = await GenerationTaskService().task_summary(session)
+
+    assert summary["execution_backend"] == "celery"
+    assert summary["redis_queues"]["status"] == "ok"
+    assert summary["redis_queues"]["queues"]["text_queue"]["depth"] == 2
+    assert summary["worker_health"]["online_count"] == 1
+    assert summary["worker_health"]["workers"][0]["name"] == "text@worker"
 
     await engine.dispose()
     get_settings.cache_clear()
@@ -557,6 +1355,239 @@ async def test_generation_task_service_reuses_concurrent_duplicate_task(
     assert len(rows) == 1
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_processing_claims_queued_task_once(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'claim.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-claim-task-1",
+            name="Claim Task Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id, "limit": 3, "signals": {}},
+        )
+
+    service = GenerationTaskService()
+    original_get_task = GenerationTaskService.get_task
+    queued_reads = 0
+    both_workers_read_queued = asyncio.Event()
+    run_count = 0
+
+    async def delayed_get_task(self, session, task_id: str) -> GenerationTask:
+        nonlocal queued_reads
+        task = await original_get_task(self, session, task_id)
+        if task.status == "queued":
+            queued_reads += 1
+            if queued_reads == 2:
+                both_workers_read_queued.set()
+            try:
+                await asyncio.wait_for(both_workers_read_queued.wait(), timeout=0.1)
+            except TimeoutError:
+                pass
+        return task
+
+    async def counted_run_task(self, session, task: GenerationTask) -> dict[str, str]:
+        nonlocal run_count
+        run_count += 1
+        await asyncio.sleep(0.05)
+        return {"ok": task.id}
+
+    monkeypatch.setattr(GenerationTaskService, "get_task", delayed_get_task)
+    monkeypatch.setattr(GenerationTaskService, "_run_task", counted_run_task)
+
+    await asyncio.gather(
+        service._process_task_body(task.id),
+        service._process_task_body(task.id),
+    )
+
+    async with session_factory() as session:
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.attempt_count == 1
+    assert run_count == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_auto_retries_retryable_provider_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_ENABLED", "true")
+    get_settings.cache_clear()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'auto-retry.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled: list[tuple[str, str, int, int]] = []
+
+    def capture_schedule(task, countdown_seconds: int) -> None:
+        scheduled.append((task.id, task.queue_name, task.priority, countdown_seconds))
+
+    monkeypatch.setattr(task_module, "_schedule_auto_retry_task", capture_schedule)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-auto-retry-task-1",
+            name="Auto Retry Task Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-auto-retry-task-1",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-auto-retry-task-1"},
+            priority=4,
+            max_attempts=3,
+        )
+        task.status = "running"
+        task.attempt_count = 1
+        task.started_at = utcnow() - timedelta(seconds=5)
+        await session.commit()
+
+        await GenerationTaskService()._mark_failed(
+            session,
+            task,
+            TimeoutError("Gateway image API request timed out"),
+        )
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "queued"
+    assert stored.retryable is False
+    assert stored.error_code == "provider_timeout"
+    assert stored.error_message == "Gateway image API request timed out"
+    assert stored.started_at is None
+    assert stored.finished_at is None
+    assert stored.duration_ms is None
+    assert stored.queued_at > stored.created_at
+    assert scheduled == [(stored.id, IMAGE_QUEUE_NAME, 4, 10)]
+    assert stored.metadata_json["auto_retry"]["status"] == "scheduled"
+    assert stored.metadata_json["auto_retry"]["next_attempt"] == 2
+    assert stored.metadata_json["auto_retry"]["max_attempts"] == 3
+    assert stored.metadata_json["auto_retry"]["remaining_attempts"] == 2
+    assert stored.metadata_json["auto_retry"]["delay_seconds"] == 10
+    assert stored.metadata_json["auto_retry"]["last_error_code"] == "provider_timeout"
+
+    await engine.dispose()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_model_provider_capacity_limits_image_work(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER_IMAGE_CONCURRENCY", "1")
+    get_settings.cache_clear()
+    task_module._reset_model_provider_capacity_for_tests()
+    active_count = 0
+    max_active_count = 0
+
+    async def run_work() -> None:
+        nonlocal active_count, max_active_count
+        async with task_module._model_provider_capacity(IMAGE_QUEUE_NAME):
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+            await asyncio.sleep(0.02)
+            active_count -= 1
+
+    await asyncio.gather(run_work(), run_work(), run_work())
+
+    assert max_active_count == 1
+
+    task_module._reset_model_provider_capacity_for_tests()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_image_generation_task_uses_model_provider_capacity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER_IMAGE_CONCURRENCY", "1")
+    get_settings.cache_clear()
+    task_module._reset_model_provider_capacity_for_tests()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'image-capacity.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    active_count = 0
+    max_active_count = 0
+
+    async def fake_run_image_task(self, session, task) -> dict:
+        nonlocal active_count, max_active_count
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        try:
+            await asyncio.sleep(0.03)
+            return {"task_id": task.id, "generated_count": 1, "assets": []}
+        finally:
+            active_count -= 1
+
+    monkeypatch.setattr(GenerationTaskService, "_run_image_task", fake_run_image_task)
+
+    async with session_factory() as session:
+        service = GenerationTaskService()
+        first_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-image-capacity-1",
+            payload={"draft_id": "draft-image-capacity-1"},
+        )
+        second_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-image-capacity-2",
+            payload={"draft_id": "draft-image-capacity-2"},
+        )
+
+    await asyncio.gather(
+        GenerationTaskService().process_task(first_task.id),
+        GenerationTaskService().process_task(second_task.id),
+    )
+
+    assert max_active_count == 1
+
+    await engine.dispose()
+    task_module._reset_model_provider_capacity_for_tests()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

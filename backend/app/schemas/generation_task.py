@@ -13,6 +13,7 @@ class GenerationTaskRead(TimestampedRead):
     business_type: str
     business_id: str
     campaign_id: str | None = None
+    owner_user_id: str | None = None
     status: str
     priority: int
     payload: dict = Field(default_factory=dict)
@@ -27,6 +28,7 @@ class GenerationTaskRead(TimestampedRead):
     finished_at: datetime | None = None
     duration_ms: int | None = None
     metadata: dict = Field(default_factory=dict)
+    display_context: dict = Field(default_factory=dict)
     reused_existing: bool = False
 
     @classmethod
@@ -40,6 +42,7 @@ class GenerationTaskRead(TimestampedRead):
             business_type=task.business_type,
             business_id=task.business_id,
             campaign_id=task.campaign_id,
+            owner_user_id=task.owner_user_id,
             status=task.status,
             priority=task.priority,
             payload=task.payload_json or {},
@@ -54,6 +57,7 @@ class GenerationTaskRead(TimestampedRead):
             finished_at=task.finished_at,
             duration_ms=task.duration_ms,
             metadata=task.metadata_json or {},
+            display_context=getattr(task, "display_context", {}) or {},
             reused_existing=bool(getattr(task, "reused_existing", False)),
         )
 

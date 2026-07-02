@@ -47,7 +47,12 @@ def test_schedule_generation_task_skips_reused_existing_task(
     get_settings.cache_clear()
     enqueued: list[tuple[str, str, int]] = []
 
-    def capture_enqueue(task_id: str, queue_name: str, priority: int) -> None:
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
         enqueued.append((task_id, queue_name, priority))
 
     monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
@@ -71,7 +76,12 @@ def test_schedule_generation_task_uses_celery_queue_from_task(
     get_settings.cache_clear()
     enqueued: list[tuple[str, str, int]] = []
 
-    def capture_enqueue(task_id: str, queue_name: str, priority: int) -> None:
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
         enqueued.append((task_id, queue_name, priority))
 
     monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
@@ -91,7 +101,12 @@ def test_schedule_generation_task_id_uses_explicit_queue_in_celery_mode(
     get_settings.cache_clear()
     enqueued: list[tuple[str, str, int]] = []
 
-    def capture_enqueue(task_id: str, queue_name: str, priority: int) -> None:
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
         enqueued.append((task_id, queue_name, priority))
 
     monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
@@ -104,6 +119,34 @@ def test_schedule_generation_task_id_uses_explicit_queue_in_celery_mode(
 
     assert scheduled is True
     assert enqueued == [("task-callback-1", "callback_queue", 3)]
+
+
+def test_schedule_generation_task_id_passes_countdown_in_celery_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        enqueued.append((task_id, queue_name, priority, countdown_seconds))
+
+    monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
+
+    scheduled = dispatcher.schedule_generation_task_id(
+        "task-delayed-retry-1",
+        queue_name="image_queue",
+        priority=7,
+        countdown_seconds=30,
+    )
+
+    assert scheduled is True
+    assert enqueued == [("task-delayed-retry-1", "image_queue", 7, 30)]
 
 
 def test_schedule_ad_generation_job_uses_background_tasks_by_default(

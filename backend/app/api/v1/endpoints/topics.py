@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Query, status
 from starlette.responses import StreamingResponse
 
-from backend.app.api.deps import DbSession
+from backend.app.api.deps import CurrentOperator, DbSession
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
 from backend.app.services.generation_attempt_service import GenerationAttemptService
@@ -33,6 +33,7 @@ async def generate_topics(payload: TopicGenerateRequest, session: DbSession):
 async def queue_generate_topics(
     payload: TopicGenerateRequest,
     session: DbSession,
+    operator: CurrentOperator,
     background_tasks: BackgroundTasks,
 ):
     task = await task_service.create_task(
@@ -43,6 +44,7 @@ async def queue_generate_topics(
         business_id=payload.campaign_id,
         campaign_id=payload.campaign_id,
         payload=payload.model_dump(mode="json"),
+        owner_user_id=operator.id,
         metadata={"limit": payload.limit},
     )
     schedule_generation_task(task, background_tasks)
