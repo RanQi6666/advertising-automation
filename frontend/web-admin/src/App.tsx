@@ -2873,6 +2873,98 @@ function App() {
     setLoading((current) => (current === `creative-regenerate-${asset.id}` ? null : current));
   }
 
+  async function handleRetryKeyframeGroupTask(group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) {
+    const draft = approvedDraft ?? selectedDraft;
+    if (!draft) {
+      setError("请先生成并审核通过一条文案。", "image");
+      return;
+    }
+    if (imageGenerationActionIsBusy(loading)) {
+      setNotice("已有图片任务正在处理，请稍后再重生此方案。");
+      return;
+    }
+    const generationPlan = imageGenerationPlanForMode(
+      creativeGenerationMode,
+      videoDurationSeconds,
+      videoAspectRatio,
+      keyframeVariantCount,
+    );
+    const storyboardContext = currentStoryboardContextForKeyframes();
+    if (!storyboardContext) {
+      setError("请先生成或粘贴视频脚本，再生成关键帧。", "image");
+      return;
+    }
+
+    const targetIndices = keyframeGroupSlotIndices(
+      group.group,
+      generationPlan.framesPerVariant ?? KEYFRAME_FRAMES_PER_VARIANT,
+    );
+    const loadingKey = `creative-retry-group-${group.group}`;
+    setLoading(loadingKey);
+    clearError("image");
+    setNotice(null);
+    for (const index of targetIndices) {
+      updateCreativeGenerationSlot(index, {
+        status: "loading",
+        asset: undefined,
+        message: undefined,
+      });
+    }
+
+    try {
+      const task = await api.generateCreativesTask(
+        draft.id,
+        targetIndices.length,
+        generationPlan.size,
+        undefined,
+        {
+          modelId: selectedImageModelId,
+          storyboard: storyboardContext.storyboard,
+          storyboardText: storyboardContext.storyboardText,
+          generationMode: generationPlan.generationMode,
+          variantCount: generationPlan.variantCount,
+          framesPerVariant: generationPlan.framesPerVariant,
+          videoDurationSeconds: generationPlan.videoDurationSeconds,
+          targetIndices,
+        },
+      );
+      saveActiveImageGenerationTaskCache({ taskIds: [task.id], draftId: draft.id });
+      applyCreativeGenerationTask(task);
+      const completedTask = await waitForGenerationTask(
+        task.id,
+        `方案 ${group.group}`,
+        "image",
+        applyCreativeGenerationTask,
+      );
+      if (completedTask && generationTaskIsFinal(completedTask)) {
+        clearActiveImageGenerationTaskCache(completedTask.id);
+      }
+      const generatedAssets = completedTask ? applyCreativeGenerationTask(completedTask) : [];
+      if (!generatedAssets.length) {
+        for (const index of targetIndices) {
+          updateCreativeGenerationSlot(index, {
+            status: "error",
+            message: "方案重生未返回图片，请重试。",
+          });
+        }
+        return;
+      }
+      setNotice(`方案 ${group.group} 已重生`);
+      clearError("image");
+      void saveWorkflowStage("image_review");
+    } catch (caught) {
+      const message = setCaughtError("image", caught, `方案 ${group.group} 重生失败`);
+      for (const index of targetIndices) {
+        updateCreativeGenerationSlot(index, {
+          status: "error",
+          message,
+        });
+      }
+    } finally {
+      setLoading((current) => (current === loadingKey ? null : current));
+    }
+  }
+
   async function handleRegenerateKeyframeGroup(group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) {
     const feedbackKey = String(group.group);
     const feedback = keyframeRewriteFeedbacks[feedbackKey]?.trim();
@@ -3529,6 +3621,7 @@ function App() {
             onGenerate={() => void handleGenerateCreativesTask()}
             onRetrySlot={(index) => void handleRetryCreativeSlotTask(index)}
             onRegenerate={(asset) => void handleRegenerateCreative(asset)}
+            onRetryGroup={(group) => void handleRetryKeyframeGroupTask(group)}
             onRegenerateGroup={(group) => void handleRegenerateKeyframeGroup(group)}
             onReview={handleReview}
             onReviewGroup={(group, decision) => void handleReviewKeyframeGroup(group, decision)}
@@ -4833,6 +4926,7 @@ function CreativesView({
   onGenerate,
   onRetrySlot,
   onRegenerate,
+  onRetryGroup,
   onRegenerateGroup,
   onReview,
   onReviewGroup,
@@ -4869,6 +4963,7 @@ function CreativesView({
   onGenerate: () => void;
   onRetrySlot: (index: number) => void;
   onRegenerate: (asset: CreativeAsset) => void;
+  onRetryGroup: (group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) => void;
   onRegenerateGroup: (group: CreativeReviewKeyframeGroup<CreativeGenerationSlot>) => void;
   onReview: (
     entityType: "topic" | "copy_draft" | "creative_asset" | "video_asset",
@@ -5139,6 +5234,7 @@ function CreativesView({
               const groupSelected =
                 groupIds.length > 0 && groupIds.every((id) => selectedCreativeIds.includes(id));
               const groupFeedback = keyframeRewriteFeedbacks[String(group.group)] ?? "";
+              const isGroupRetrying = loading === `creative-retry-group-${group.group}`;
               const isGroupRegenerating = loading === `creative-regenerate-group-${group.group}`;
               const groupReviewLoading = group.assets.some(
                 () => loading === "review-creative_asset-approved" || loading === "review-creative_asset-rejected",
@@ -5225,6 +5321,14 @@ function CreativesView({
                       onChange={(event) => setKeyframeRewriteFeedback(group.group, event.target.value)}
                       disabled={Boolean(loading)}
                     />
+                    <button
+                      className="secondary-button"
+                      onClick={() => onRetryGroup(group)}
+                      disabled={Boolean(loading)}
+                    >
+                      {isGroupRetrying ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+                      <span>重生方案</span>
+                    </button>
                     <button
                       className="secondary-button"
                       onClick={() => onRegenerateGroup(group)}

@@ -319,6 +319,15 @@ test("keyframe image generation launches scheme tasks and stores multiple task i
   assert.match(appSource, /targetIndices,/);
 });
 
+test("keyframe groups expose whole-scheme retry separately from feedback regeneration", () => {
+  assert.match(appSource, /handleRetryKeyframeGroupTask/);
+  assert.match(appSource, /onRetryGroup/);
+  assert.match(appSource, /重生方案/);
+  assert.match(appSource, /按意见重生此方案/);
+  assert.doesNotMatch(appSource, /brief 生成中/);
+  assert.doesNotMatch(appSource, /图片下载保存中/);
+});
+
 test("performance analysis shows the current optimization work order and collapses secondary work", () => {
   const performanceSource = componentSource("PerformanceAnalysisView", "DataCompletenessCard");
 
