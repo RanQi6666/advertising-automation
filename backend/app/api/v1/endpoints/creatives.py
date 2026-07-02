@@ -13,10 +13,10 @@ from backend.app.schemas.creative import (
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services.creative_service import CreativeService
 from backend.app.services.generation_attempt_service import GenerationAttemptService
+from backend.app.services.generation_task_dispatcher import schedule_generation_task
 from backend.app.services.generation_task_service import (
     IMAGE_QUEUE_NAME,
     GenerationTaskService,
-    should_schedule_generation_task,
 )
 from backend.app.services.utils import get_required
 
@@ -63,8 +63,7 @@ async def queue_generate_creatives(
             "video_duration_seconds": payload.video_duration_seconds,
         },
     )
-    if should_schedule_generation_task(task):
-        background_tasks.add_task(task_service.process_task, task.id)
+    schedule_generation_task(task, background_tasks)
     return GenerationTaskRead.from_model(task)
 
 

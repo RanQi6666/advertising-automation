@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     model_gateway_base_url: str | None = None
     model_gateway_text_model: str | None = None
     model_gateway_text_timeout_seconds: float = Field(default=180.0, ge=1, le=600)
+    generation_task_execution_backend: Literal["background_tasks", "celery"] = (
+        "background_tasks"
+    )
+    celery_broker_url: str = "redis://127.0.0.1:6379/0"
+    celery_result_backend: str = "redis://127.0.0.1:6379/1"
     text_queue_concurrency: int = Field(default=6, ge=1, le=64)
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)

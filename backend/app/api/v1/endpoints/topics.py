@@ -7,10 +7,10 @@ from backend.app.api.deps import DbSession
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.schemas.topic import TopicGenerateRequest, TopicRead
 from backend.app.services.generation_attempt_service import GenerationAttemptService
+from backend.app.services.generation_task_dispatcher import schedule_generation_task
 from backend.app.services.generation_task_service import (
     TEXT_QUEUE_NAME,
     GenerationTaskService,
-    should_schedule_generation_task,
 )
 from backend.app.services.topic_service import TopicService
 
@@ -45,8 +45,7 @@ async def queue_generate_topics(
         payload=payload.model_dump(mode="json"),
         metadata={"limit": payload.limit},
     )
-    if should_schedule_generation_task(task):
-        background_tasks.add_task(task_service.process_task, task.id)
+    schedule_generation_task(task, background_tasks)
     return GenerationTaskRead.from_model(task)
 
 

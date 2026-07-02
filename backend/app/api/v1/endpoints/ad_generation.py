@@ -18,11 +18,14 @@ from backend.app.services.collaboration import (
     record_can_edit,
     require_read_access,
 )
-from backend.app.services.generation_task_service import GenerationTaskService
+from backend.app.services.generation_task_dispatcher import (
+    schedule_ad_generation_job,
+    schedule_generation_task_id,
+)
+from backend.app.services.generation_task_service import CALLBACK_QUEUE_NAME
 
 router = APIRouter()
 service = AdGenerationService()
-task_service = GenerationTaskService()
 
 
 @router.post(
@@ -37,7 +40,7 @@ async def create_publishing_ad_generation_job(
     operator: OptionalOperator,
 ):
     job = await service.create_job(session, payload, operator=operator)
-    background_tasks.add_task(service.run_job, job.id)
+    schedule_ad_generation_job(job.id, background_tasks)
     return PublishingAdGenerationJobAccepted(
         job_id=job.id,
         status=job.status,
@@ -148,7 +151,11 @@ async def confirm_publishing_ad_generation_review(
     job = await service.confirm_review(session, job_id, payload, operator=operator)
     callback_task_id = _queued_callback_task_id(job)
     if callback_task_id:
-        background_tasks.add_task(task_service.process_task, callback_task_id)
+        schedule_generation_task_id(
+            callback_task_id,
+            queue_name=CALLBACK_QUEUE_NAME,
+            background_tasks=background_tasks,
+        )
     return _job_read(job, operator)
 
 

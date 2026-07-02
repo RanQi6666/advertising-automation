@@ -17,6 +17,7 @@ from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.generation_task import GenerationTaskRead
 from backend.app.services import creative_service, video_service
+from backend.app.services import generation_task_dispatcher as dispatcher
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.generation_task_service import (
     CALLBACK_QUEUE_NAME,
@@ -626,6 +627,125 @@ async def test_generation_task_startup_recovery_reschedules_queued_and_marks_run
     assert summary["interrupted_failed_count"] == 1
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_startup_recovery_schedules_celery_queue(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(task_id: str, queue_name: str, priority: int) -> None:
+        enqueued.append((task_id, queue_name, priority))
+
+    async def no_op_process_task(self, task_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
+    monkeypatch.setattr(GenerationTaskService, "process_task", no_op_process_task)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-startup-celery-recovery-1",
+            name="Startup Celery Recovery Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        queued_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-startup-celery-recovery-1",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-startup-celery-recovery-1", "count": 2, "size": "1:1"},
+            priority=7,
+        )
+
+    recovery = await recover_generation_tasks_on_startup()
+
+    assert recovery.rescheduled_task_ids == [queued_task.id]
+    assert enqueued == [(queued_task.id, IMAGE_QUEUE_NAME, 7)]
+
+    await engine.dispose()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_startup_recovery_keeps_running_tasks_in_celery_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(task_id: str, queue_name: str, priority: int) -> None:
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(dispatcher, "_enqueue_celery_generation_task", capture_enqueue)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-startup-celery-running-1",
+            name="Startup Celery Running Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        queued_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=TEXT_QUEUE_NAME,
+            task_type="topic_generate",
+            business_type="campaign",
+            business_id=campaign.id,
+            campaign_id=campaign.id,
+            payload={"campaign_id": campaign.id, "limit": 3, "signals": {}},
+        )
+        running_task = await GenerationTaskService().create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id="video-startup-celery-running-1",
+            campaign_id=campaign.id,
+            payload={"video_id": "video-startup-celery-running-1"},
+        )
+        running_task.status = "running"
+        running_task.attempt_count = 1
+        running_task.started_at = utcnow() - timedelta(minutes=5)
+        await session.commit()
+
+    recovery = await recover_generation_tasks_on_startup()
+
+    async with session_factory() as session:
+        stored_running = await session.get(GenerationTask, running_task.id)
+
+    assert recovery.rescheduled_task_ids == [queued_task.id]
+    assert recovery.interrupted_task_ids == []
+    assert enqueued == [(queued_task.id, TEXT_QUEUE_NAME, 0)]
+    assert stored_running is not None
+    assert stored_running.status == "running"
+    assert stored_running.error_code is None
+
+    await engine.dispose()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

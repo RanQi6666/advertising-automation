@@ -2,6 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Query
 
 from backend.app.api.deps import DbSession
 from backend.app.schemas.generation_task import GenerationTaskListResponse, GenerationTaskRead
+from backend.app.services.generation_task_dispatcher import schedule_generation_task
 from backend.app.services.generation_task_service import GenerationTaskService
 
 router = APIRouter()
@@ -43,5 +44,5 @@ async def retry_generation_task(
     background_tasks: BackgroundTasks,
 ):
     task = await service.retry_task(session, task_id)
-    background_tasks.add_task(service.process_task, task.id)
+    schedule_generation_task(task, background_tasks)
     return GenerationTaskRead.from_model(task)

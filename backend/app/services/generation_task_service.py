@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any, TypeVar
@@ -74,10 +74,18 @@ class GenerationTaskListResult:
 
 
 @dataclass(frozen=True)
+class GenerationTaskRecoveryTask:
+    id: str
+    queue_name: str
+    priority: int = 0
+
+
+@dataclass(frozen=True)
 class GenerationTaskRecoveryResult:
     rescheduled_task_ids: list[str]
     interrupted_task_ids: list[str]
     stale_task_ids: list[str]
+    rescheduled_tasks: list[GenerationTaskRecoveryTask] = field(default_factory=list)
 
 
 class GenerationTaskService:
@@ -359,23 +367,28 @@ class GenerationTaskService:
     async def recover_interrupted_tasks(
         self,
         session: AsyncSession,
+        *,
+        mark_running_interrupted: bool = True,
     ) -> GenerationTaskRecoveryResult:
-        queued_task_ids = await self._queued_task_ids(session)
-        running_tasks = await self._running_tasks(session)
+        queued_tasks = await self._queued_tasks(session)
+        running_tasks = (
+            await self._running_tasks(session) if mark_running_interrupted else []
+        )
         for task in running_tasks:
             self._mark_interrupted(
                 task,
                 error_code="task_interrupted",
                 message=(
                     "Generation task was interrupted before completion. "
-                    "The backend may have restarted before BackgroundTasks finished."
+                    "The backend or worker may have restarted before processing finished."
                 ),
             )
         await session.commit()
         return GenerationTaskRecoveryResult(
-            rescheduled_task_ids=queued_task_ids,
+            rescheduled_task_ids=[task.id for task in queued_tasks],
             interrupted_task_ids=[task.id for task in running_tasks],
             stale_task_ids=[],
+            rescheduled_tasks=_generation_task_recovery_refs(queued_tasks),
         )
 
     async def recover_stale_tasks(self, session: AsyncSession) -> GenerationTaskRecoveryResult:
@@ -384,7 +397,7 @@ class GenerationTaskService:
         queued_before = now - timedelta(seconds=settings.generation_task_queued_stale_seconds)
         running_before = now - timedelta(seconds=settings.generation_task_running_stale_seconds)
 
-        queued_task_ids = await self._queued_task_ids(session, queued_before=queued_before)
+        queued_tasks = await self._queued_tasks(session, queued_before=queued_before)
         stale_tasks = await self._running_tasks(session, started_before=running_before)
         for task in stale_tasks:
             self._mark_interrupted(
@@ -397,25 +410,25 @@ class GenerationTaskService:
             )
         await session.commit()
         return GenerationTaskRecoveryResult(
-            rescheduled_task_ids=queued_task_ids,
+            rescheduled_task_ids=[task.id for task in queued_tasks],
             interrupted_task_ids=[],
             stale_task_ids=[task.id for task in stale_tasks],
+            rescheduled_tasks=_generation_task_recovery_refs(queued_tasks),
         )
 
-    async def _queued_task_ids(
+    async def _queued_tasks(
         self,
         session: AsyncSession,
         *,
         queued_before: datetime | None = None,
-    ) -> list[str]:
+    ) -> list[GenerationTask]:
         conditions = [GenerationTask.status == "queued"]
         if queued_before is not None:
             conditions.append(GenerationTask.queued_at <= queued_before)
-        return [
-            str(task_id)
-            for task_id in (
+        return list(
+            (
                 await session.execute(
-                    select(GenerationTask.id)
+                    select(GenerationTask)
                     .where(*conditions)
                     .order_by(
                         GenerationTask.priority.desc(),
@@ -426,7 +439,7 @@ class GenerationTaskService:
             )
             .scalars()
             .all()
-        ]
+        )
 
     async def _running_tasks(
         self,
@@ -830,6 +843,19 @@ def _queue_concurrency_settings() -> dict[str, int]:
     }
 
 
+def _generation_task_recovery_refs(
+    tasks: list[GenerationTask],
+) -> list[GenerationTaskRecoveryTask]:
+    return [
+        GenerationTaskRecoveryTask(
+            id=task.id,
+            queue_name=task.queue_name,
+            priority=task.priority,
+        )
+        for task in tasks
+    ]
+
+
 def _generation_task_queue_health(
     tasks: list[GenerationTask],
     queue_concurrency: dict[str, int],
@@ -948,9 +974,14 @@ async def recover_generation_tasks_on_startup(
 ) -> GenerationTaskRecoveryResult:
     service = GenerationTaskService()
     async with AsyncSessionLocal() as session:
-        result = await service.recover_interrupted_tasks(session)
-    for task_id in result.rescheduled_task_ids:
-        _schedule_recovered_task(task_id, schedule_task)
+        result = await service.recover_interrupted_tasks(
+            session,
+            mark_running_interrupted=(
+                get_settings().generation_task_execution_backend != "celery"
+            ),
+        )
+    for task in result.rescheduled_tasks:
+        _schedule_recovered_task(task, schedule_task)
     _log_recovery_result("startup", result)
     return result
 
@@ -964,8 +995,8 @@ async def run_generation_task_recovery_loop(
         try:
             async with AsyncSessionLocal() as session:
                 result = await service.recover_stale_tasks(session)
-            for task_id in result.rescheduled_task_ids:
-                _schedule_recovered_task(task_id, schedule_task)
+            for task in result.rescheduled_tasks:
+                _schedule_recovered_task(task, schedule_task)
             _log_recovery_result("periodic", result)
         except asyncio.CancelledError:
             raise
@@ -974,13 +1005,19 @@ async def run_generation_task_recovery_loop(
 
 
 def _schedule_recovered_task(
-    task_id: str,
+    task: GenerationTaskRecoveryTask,
     schedule_task: Callable[[str], Any] | None,
 ) -> None:
     if schedule_task is not None:
-        schedule_task(task_id)
+        schedule_task(task.id)
         return
-    asyncio.create_task(GenerationTaskService().process_task(task_id))
+    from backend.app.services.generation_task_dispatcher import schedule_generation_task_id
+
+    schedule_generation_task_id(
+        task.id,
+        queue_name=task.queue_name,
+        priority=task.priority,
+    )
 
 
 def _log_recovery_result(source: str, result: GenerationTaskRecoveryResult) -> None:
