@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -367,6 +368,54 @@ async def test_stream_creatives_generates_selected_keyframe_pair(monkeypatch) ->
         assert metadata_by_index[3]["keyframe_role"] == "first_frame"
         assert metadata_by_index[4]["keyframe_group"] == 2
         assert metadata_by_index[4]["keyframe_role"] == "last_frame"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stream_creatives_logs_image_stage_timings(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="backend.app.services.image_generation_timing")
+    _patch_image_provider(monkeypatch, FakeImageProvider())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        service = CreativeService()
+        service.llm = FakeLLMProvider()  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in service.stream_creatives(
+                session,
+                CreativeGenerateRequest(draft_id=draft.id, count=1, size="1:1"),
+                task_id="task-1",
+            )
+        ]
+
+        assert events[-1] == {"type": "done", "generated": 1}
+        records = [
+            record.image_generation
+            for record in caplog.records
+            if getattr(record, "image_generation", None)
+        ]
+        stages = {record["stage"] for record in records}
+        assert {"image_brief", "provider_request", "db_commit"} <= stages
+        assert all(record["task_id"] == "task-1" for record in records)
+        assert all(record["duration_ms"] >= 0 for record in records)
 
     await engine.dispose()
 

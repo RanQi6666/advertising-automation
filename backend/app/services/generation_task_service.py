@@ -1017,7 +1017,7 @@ class GenerationTaskService:
         result = _initial_image_task_result(request)
         await self._update_task_result(session, task, result)
 
-        async for event in service.stream_creatives(session, request):
+        async for event in service.stream_creatives(session, request, task_id=task.id):
             event_type = event.get("type")
             if event_type == "start":
                 indices = event.get("indices")

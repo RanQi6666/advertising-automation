@@ -16,6 +16,7 @@ from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.services.creative_asset_urls import repair_creative_asset_urls
 from backend.app.services.generation_task_service import GenerationTaskService
+from backend.app.services.image_generation_timing import image_generation_timer
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.model_selection import effective_image_model, settings_for_image_model
 from backend.app.services.utils import get_required
@@ -70,6 +71,7 @@ class CreativeService:
         storyboard: list[dict] | None = None,
         storyboard_text: str | None = None,
         keyframe_plan: dict | None = None,
+        task_id: str | None = None,
     ) -> list[CreativeAsset]:
         draft = await get_required(session, CopyDraft, draft_id)
         creative_strategy = _creative_strategy_from_draft(draft)
@@ -90,6 +92,7 @@ class CreativeService:
             size=size,
             storyboard_context=storyboard_context,
             streamed=False,
+            task_id=task_id,
         )
         briefs = _briefs_for_slots(briefs, slot_indices)
         return list(
@@ -114,6 +117,7 @@ class CreativeService:
                             **_keyframe_metadata(brief.image_index, keyframe_plan),
                         },
                         image_model_id=image_model_id,
+                        task_id=task_id,
                     )
                     for brief in briefs
                 ]
@@ -124,6 +128,7 @@ class CreativeService:
         self,
         session: AsyncSession,
         payload: CreativeGenerateRequest,
+        task_id: str | None = None,
     ) -> AsyncIterator[dict]:
         draft = await get_required(session, CopyDraft, payload.draft_id)
         slot_indices = _slot_indices(payload)
@@ -147,6 +152,7 @@ class CreativeService:
                     size=payload.size,
                     storyboard_context=storyboard_context,
                     streamed=True,
+                    task_id=task_id,
                 )
             )
             while True:
@@ -183,6 +189,7 @@ class CreativeService:
                         creative_strategy=creative_strategy,
                     ),
                     image_model_id=payload.model_id,
+                    task_id=task_id,
                 )
             )
             for brief in briefs
@@ -209,9 +216,16 @@ class CreativeService:
                 if asset is None:
                     yield {"type": "error", "index": index, "message": message or "图片生成失败。"}
                     continue
-                session.add(asset)
-                await session.commit()
-                await session.refresh(asset)
+                with image_generation_timer(
+                    task_id=task_id,
+                    draft_id=draft.id,
+                    campaign_id=draft.campaign_id,
+                    image_index=index,
+                    stage="db_commit",
+                ):
+                    session.add(asset)
+                    await session.commit()
+                    await session.refresh(asset)
                 generated_count += 1
                 yield {
                     "type": "asset",
@@ -233,17 +247,27 @@ class CreativeService:
         feedback: str | None = None,
         source_asset: CreativeAsset | None = None,
         storyboard_context: dict | None = None,
+        task_id: str | None = None,
     ) -> list[ImageBrief]:
-        return await self.text_tasks.run_in_text_queue(
-            operation=lambda: self.llm.generate_image_briefs(
-                draft=draft,
-                count=count,
-                size=size,
-                feedback=feedback,
-                source_asset=source_asset,
-                storyboard_context=storyboard_context,
-            ),
-        )
+        with image_generation_timer(
+            task_id=task_id,
+            draft_id=draft.id,
+            campaign_id=draft.campaign_id,
+            stage="image_brief",
+            streamed=streamed,
+        ) as finish:
+            briefs = await self.text_tasks.run_in_text_queue(
+                operation=lambda: self.llm.generate_image_briefs(
+                    draft=draft,
+                    count=count,
+                    size=size,
+                    feedback=feedback,
+                    source_asset=source_asset,
+                    storyboard_context=storyboard_context,
+                ),
+            )
+            finish(status="succeeded", count=len(briefs))
+            return briefs
 
     async def regenerate_creative(
         self,
@@ -319,6 +343,7 @@ class CreativeService:
         version: int,
         extra_metadata: dict,
         image_model_id: str | None = None,
+        task_id: str | None = None,
     ) -> tuple[int, CreativeAsset | None, str | None]:
         try:
             asset = await self._generate_asset_from_brief(
@@ -327,6 +352,7 @@ class CreativeService:
                 version=version,
                 extra_metadata=extra_metadata,
                 image_model_id=image_model_id,
+                task_id=task_id,
             )
             return brief.image_index, asset, None
         except Exception as exc:
@@ -339,12 +365,25 @@ class CreativeService:
         version: int,
         extra_metadata: dict,
         image_model_id: str | None = None,
+        task_id: str | None = None,
     ) -> CreativeAsset:
         image_settings = settings_for_image_model(self.settings, image_model_id)
         image_provider = get_image_provider(image_settings)
-        generated_images = await self.text_tasks.run_in_image_queue(
-            lambda: image_provider.generate_images([brief])
-        )
+        image_model = effective_image_model(image_settings)
+        with image_generation_timer(
+            task_id=task_id,
+            draft_id=draft.id,
+            campaign_id=draft.campaign_id,
+            image_index=brief.image_index,
+            keyframe_group=extra_metadata.get("keyframe_group"),
+            keyframe_role=extra_metadata.get("keyframe_role"),
+            stage="provider_request",
+            provider=image_settings.image_provider,
+            model=image_model,
+        ):
+            generated_images = await self.text_tasks.run_in_image_queue(
+                lambda: image_provider.generate_images([brief])
+            )
         if not generated_images:
             raise ProviderError("Image provider returned no generated image.")
         return await self._asset_from_generated_image(
@@ -354,9 +393,10 @@ class CreativeService:
             version=version,
             extra_metadata={
                 **extra_metadata,
-                "image_model": effective_image_model(image_settings),
+                "image_model": image_model,
                 "image_provider": image_settings.image_provider,
             },
+            task_id=task_id,
         )
 
     async def _asset_from_generated_image(
@@ -366,6 +406,7 @@ class CreativeService:
         image: GeneratedImage,
         version: int,
         extra_metadata: dict,
+        task_id: str | None = None,
     ) -> CreativeAsset:
         image_url = image.url
         storage_key = image.storage_key
@@ -380,11 +421,22 @@ class CreativeService:
             if image.storage_key:
                 metadata["provider_storage_key"] = image.storage_key
             image_id = str(uuid4())
-            image_url, storage_key = await self.image_storage.transfer_provider_image(
-                source_url=image.url,
+            with image_generation_timer(
+                task_id=task_id,
+                draft_id=draft.id,
                 campaign_id=draft.campaign_id,
-                image_id=image_id,
-            )
+                image_index=brief.image_index,
+                keyframe_group=metadata.get("keyframe_group"),
+                keyframe_role=metadata.get("keyframe_role"),
+                stage="download_storage",
+                provider=metadata.get("provider") or metadata.get("image_provider"),
+                model=metadata.get("model") or metadata.get("image_model"),
+            ):
+                image_url, storage_key = await self.image_storage.transfer_provider_image(
+                    source_url=image.url,
+                    campaign_id=draft.campaign_id,
+                    image_id=image_id,
+                )
         if not image_url:
             image_url = self.image_storage.public_url_for_storage_key(storage_key)
         return CreativeAsset(
