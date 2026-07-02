@@ -42,6 +42,7 @@ class CreativeService:
             count=payload.count,
             size=payload.size,
             target_index=payload.target_index,
+            target_indices=payload.target_indices,
             extra_metadata={"streamed": False},
             image_model_id=payload.model_id,
             storyboard=payload.storyboard,
@@ -64,6 +65,7 @@ class CreativeService:
         size: str,
         extra_metadata: dict,
         target_index: int | None = None,
+        target_indices: list[int] | None = None,
         image_model_id: str | None = None,
         storyboard: list[dict] | None = None,
         storyboard_text: str | None = None,
@@ -77,14 +79,18 @@ class CreativeService:
             keyframe_plan,
             creative_strategy,
         )
+        slot_indices = _target_slot_indices(
+            count=count,
+            target_index=target_index,
+            target_indices=target_indices or [],
+        )
         briefs = await self._generate_image_briefs_via_text_queue(
             draft=draft,  # type: ignore[arg-type]
-            count=count,
+            count=len(slot_indices),
             size=size,
             storyboard_context=storyboard_context,
             streamed=False,
         )
-        slot_indices = [target_index] if target_index is not None else list(range(1, count + 1))
         briefs = _briefs_for_slots(briefs, slot_indices)
         return list(
             await asyncio.gather(
@@ -395,9 +401,24 @@ class CreativeService:
 
 
 def _slot_indices(payload: CreativeGenerateRequest) -> list[int]:
-    if payload.target_index is not None:
-        return [payload.target_index]
-    return list(range(1, payload.count + 1))
+    return _target_slot_indices(
+        count=payload.count,
+        target_index=payload.target_index,
+        target_indices=payload.target_indices,
+    )
+
+
+def _target_slot_indices(
+    *,
+    count: int,
+    target_index: int | None,
+    target_indices: list[int],
+) -> list[int]:
+    if target_indices:
+        return list(target_indices)
+    if target_index is not None:
+        return [target_index]
+    return list(range(1, count + 1))
 
 
 def _briefs_for_slots(briefs: list[ImageBrief], slot_indices: list[int]) -> list[ImageBrief]:

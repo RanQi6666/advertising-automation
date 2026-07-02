@@ -60,6 +60,7 @@ async def queue_generate_creatives(
         metadata={
             "size": payload.size,
             "target_index": payload.target_index,
+            "target_indices": payload.target_indices,
             "generation_mode": payload.generation_mode,
             "variant_count": payload.variant_count,
             "frames_per_variant": payload.frames_per_variant,
@@ -72,7 +73,13 @@ async def queue_generate_creatives(
 
 @router.post("/creatives/generate/stream")
 async def stream_creatives(payload: CreativeGenerateRequest, session: DbSession):
-    total_count = 1 if payload.target_index is not None else payload.count
+    total_count = (
+        len(payload.target_indices)
+        if payload.target_indices
+        else 1
+        if payload.target_index is not None
+        else payload.count
+    )
     attempt = await attempt_service.create_attempt(
         session,
         business_type="image",
@@ -83,6 +90,7 @@ async def stream_creatives(payload: CreativeGenerateRequest, session: DbSession)
         metadata={
             "size": payload.size,
             "target_index": payload.target_index,
+            "target_indices": payload.target_indices,
             "generation_mode": payload.generation_mode,
             "variant_count": payload.variant_count,
             "frames_per_variant": payload.frames_per_variant,

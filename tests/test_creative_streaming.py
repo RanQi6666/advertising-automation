@@ -314,6 +314,64 @@ async def test_stream_creatives_marks_video_keyframe_variant_groups(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_stream_creatives_generates_selected_keyframe_pair(monkeypatch) -> None:
+    _patch_image_provider(monkeypatch, FakeImageProvider())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        session.add_all([campaign, draft])
+        await session.commit()
+
+        fake_llm = FakeLLMProvider()
+        service = CreativeService()
+        service.llm = fake_llm  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in service.stream_creatives(
+                session,
+                CreativeGenerateRequest(
+                    draft_id=draft.id,
+                    count=2,
+                    size="9:16",
+                    target_indices=[3, 4],
+                    generation_mode="video_keyframe_variants",
+                    variant_count=3,
+                    frames_per_variant=2,
+                    video_duration_seconds=12,
+                ),
+            )
+        ]
+
+        asset_events = [event for event in events if event["type"] == "asset"]
+        assert events[0] == {"type": "start", "limit": 2, "indices": [3, 4]}
+        assert fake_llm.calls[-1]["count"] == 2
+        assert [event["index"] for event in asset_events] == [3, 4]
+
+        metadata_by_index = {
+            event["index"]: event["asset"]["metadata_json"] for event in asset_events
+        }
+        assert metadata_by_index[3]["keyframe_group"] == 2
+        assert metadata_by_index[3]["keyframe_role"] == "first_frame"
+        assert metadata_by_index[4]["keyframe_group"] == 2
+        assert metadata_by_index[4]["keyframe_role"] == "last_frame"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_regenerate_creative_creates_new_version_with_feedback(monkeypatch) -> None:
     _patch_image_provider(monkeypatch, FakeImageProvider())
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
