@@ -64,28 +64,29 @@ export function resolveWorkbenchBaseSelection({
   currentCampaignId,
   jobs,
   campaigns,
+  allowFallbackSelection = true,
 }: {
   currentJobId: string | null;
   currentCampaignId: string | null;
   jobs: AdGenerationJob[];
   campaigns: Array<{ id: string }>;
+  allowFallbackSelection?: boolean;
 }): WorkbenchBaseSelection {
-  const selectedJob = currentJobId
-    ? jobs.find((item) => item.id === currentJobId) ?? jobs[0] ?? null
-    : jobs[0] ?? null;
-  const selectedJobChanged = Boolean(
-    currentJobId && selectedJob?.id && selectedJob.id !== currentJobId,
-  );
+  const currentJob = currentJobId ? jobs.find((item) => item.id === currentJobId) ?? null : null;
+  const selectedJob = currentJob ?? (!currentJobId && allowFallbackSelection ? jobs[0] ?? null : null);
+  const selectedJobMissing = Boolean(currentJobId && !currentJob);
   const selectedJobCampaignId = selectedJob ? adGenerationJobCampaignId(selectedJob) : null;
   const preferredCampaignIds = [selectedJobCampaignId, currentCampaignId].filter(
     (item): item is string => Boolean(item),
   );
-  const selectedCampaign =
+  let selectedCampaign =
     preferredCampaignIds
       .map((id) => campaigns.find((item) => item.id === id) ?? null)
       .find((item): item is { id: string } => Boolean(item)) ??
-    campaigns[0] ??
     null;
+  if (!selectedCampaign && allowFallbackSelection && !currentJobId) {
+    selectedCampaign = campaigns[0] ?? null;
+  }
   const selectedCampaignMissing = Boolean(
     currentCampaignId && !campaigns.some((item) => item.id === currentCampaignId),
   );
@@ -93,7 +94,7 @@ export function resolveWorkbenchBaseSelection({
   return {
     selectedJobId: selectedJob?.id ?? null,
     selectedCampaignId: selectedCampaign?.id ?? null,
-    shouldClearWorkflowState: !selectedCampaign || selectedCampaignMissing || selectedJobChanged,
+    shouldClearWorkflowState: !selectedCampaign || selectedCampaignMissing || selectedJobMissing,
   };
 }
 

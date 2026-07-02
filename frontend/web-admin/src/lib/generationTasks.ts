@@ -275,6 +275,17 @@ export function generationTaskMonitorStats(tasks: GenerationTask[]): GenerationT
   );
 }
 
+export function generationTaskListHasActiveTasks(tasks: GenerationTask[]): boolean {
+  return tasks.some(generationTaskIsActive);
+}
+
+export function filterGenerationTasksForDeletedWorkOrder(
+  tasks: GenerationTask[],
+  deleted: { jobId: string; campaignId: string | null },
+): GenerationTask[] {
+  return tasks.filter((task) => !generationTaskMatchesDeletedWorkOrder(task, deleted));
+}
+
 export function generationTaskIsFinal(task: GenerationTask): boolean {
   return task.status === "succeeded" || task.status === "failed";
 }
@@ -339,6 +350,33 @@ function generationTaskAutoRetry(task: GenerationTask): {
     last_error_message:
       typeof autoRetry.last_error_message === "string" ? autoRetry.last_error_message : undefined,
   };
+}
+
+function generationTaskMatchesDeletedWorkOrder(
+  task: GenerationTask,
+  deleted: { jobId: string; campaignId: string | null },
+): boolean {
+  const { jobId, campaignId } = deleted;
+  if (
+    task.business_id === jobId ||
+    readTaskText(task.payload.job_id) === jobId ||
+    readTaskText(task.payload.ad_generation_job_id) === jobId ||
+    readTaskText(task.metadata.job_id) === jobId ||
+    readTaskText(task.metadata.ad_generation_job_id) === jobId ||
+    readTaskText(task.display_context.ad_generation_job_id) === jobId ||
+    readTaskText(task.display_context.job_id) === jobId
+  ) {
+    return true;
+  }
+
+  if (!campaignId) return false;
+  return (
+    task.campaign_id === campaignId ||
+    task.business_id === campaignId ||
+    readTaskText(task.payload.campaign_id) === campaignId ||
+    readTaskText(task.metadata.campaign_id) === campaignId ||
+    readTaskText(task.display_context.campaign_id) === campaignId
+  );
 }
 
 export function videoAssetFromGenerationTask(task: GenerationTask): VideoAsset | null {
@@ -482,6 +520,12 @@ function numericValue(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function readTaskText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
 }
 
 function creativeImageIndex(asset: CreativeAsset): number {

@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import React, { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -59,9 +59,11 @@ import {
 import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
+  filterGenerationTasksForDeletedWorkOrder,
   generationTaskFailureAdvice,
   generationTaskIsActive,
   generationTaskIsFinal,
+  generationTaskListHasActiveTasks,
   generationTaskIsSuccessful,
   generationTaskMonitorStats,
   generationTaskQueueRiskClass,
@@ -377,6 +379,7 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>(() => initialViewFromUrl());
   const [jobs, setJobs] = useState<AdGenerationJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(() => adGenerationJobIdFromUrl());
+  const [jobSelectionAutoPaused, setJobSelectionAutoPaused] = useState(false);
   const [performanceAnalyses, setPerformanceAnalyses] = useState<AdPerformanceAnalysis[]>([]);
   const [selectedPerformanceAnalysisId, setSelectedPerformanceAnalysisId] = useState<string | null>(null);
   const [generationTaskList, setGenerationTaskList] = useState<GenerationTask[]>([]);
@@ -448,7 +451,7 @@ function App() {
   const videoTaskResumeRef = useRef<string | null>(null);
 
   const selectedJob = useMemo(
-    () => jobs.find((item) => item.id === selectedJobId) ?? (!selectedJobId ? jobs[0] : null) ?? null,
+    () => jobs.find((item) => item.id === selectedJobId) ?? null,
     [jobs, selectedJobId],
   );
   const selectedPerformanceAnalysis = useMemo(
@@ -471,7 +474,7 @@ function App() {
       if (selectedJob) {
         return selectedJobCampaignId ? campaigns.find((item) => item.id === selectedJobCampaignId) ?? null : null;
       }
-      return campaigns.find((item) => item.id === selectedCampaignId) ?? campaigns[0] ?? null;
+      return selectedCampaignId ? campaigns.find((item) => item.id === selectedCampaignId) ?? null : null;
     },
     [campaigns, selectedCampaignId, selectedJob, selectedJobCampaignId],
   );
@@ -546,7 +549,7 @@ function App() {
     [creatives, selectedCreativeIds],
   );
   const hasActiveGenerationTasks = useMemo(
-    () => generationTaskList.some((task) => !generationTaskIsFinal(task)),
+    () => generationTaskListHasActiveTasks(generationTaskList),
     [generationTaskList],
   );
 
@@ -1386,6 +1389,7 @@ function App() {
   }
 
   function resetWorkbenchSelection() {
+    setJobSelectionAutoPaused(false);
     setJobs([]);
     setSelectedJobId(null);
     setPerformanceAnalyses([]);
@@ -1406,6 +1410,7 @@ function App() {
       return null;
     }
     setJobs((current) => upsertById(current, job));
+    setJobSelectionAutoPaused(false);
     setSelectedJobId(job.id);
     if (targetView) setActiveView(targetView);
     const campaignId = adGenerationCampaignId(job);
@@ -1497,12 +1502,19 @@ function App() {
         currentCampaignId: selectedCampaignIdRef.current ?? selectedCampaignId,
         jobs: nextJobs,
         campaigns: nextCampaigns,
+        allowFallbackSelection: !jobSelectionAutoPaused,
       });
+      const selectedJobMissing = Boolean(selectedJobId && !nextJobs.some((item) => item.id === selectedJobId));
       setJobs(nextJobs);
       setCampaigns(nextCampaigns);
       setPerformanceAnalyses(nextPerformanceAnalyses);
       applyModelOptions(nextModelOptions);
       applyGenerationTaskList(nextGenerationTasks);
+      setJobSelectionAutoPaused((current) => {
+        if (selection.selectedJobId) return false;
+        if (selectedJobMissing) return true;
+        return current;
+      });
       setSelectedJobId(selection.selectedJobId);
       setSelectedPerformanceAnalysisId((current) =>
         current && nextPerformanceAnalyses.some((item) => item.id === current)
@@ -1556,28 +1568,15 @@ function App() {
   }
 
   function removeGenerationTasksForDeletedJob(jobId: string, campaignId: string | null) {
-    const matchesDeletedJob = (task: GenerationTask) => {
-      if (
-        task.business_id === jobId ||
-        readText(task.payload.job_id) === jobId ||
-        readText(task.metadata.job_id) === jobId ||
-        readText(task.display_context.ad_generation_job_id) === jobId ||
-        readText(task.display_context.job_id) === jobId
-      ) {
-        return true;
-      }
-      if (!campaignId) return false;
-      return (
-        task.campaign_id === campaignId ||
-        task.business_id === campaignId ||
-        readText(task.payload.campaign_id) === campaignId ||
-        readText(task.metadata.campaign_id) === campaignId ||
-        readText(task.display_context.campaign_id) === campaignId
-      );
-    };
-    const removedCount = generationTaskList.filter(matchesDeletedJob).length;
+    const remainingTasks = filterGenerationTasksForDeletedWorkOrder(generationTaskList, {
+      jobId,
+      campaignId,
+    });
+    const removedCount = generationTaskList.length - remainingTasks.length;
     if (!removedCount) return;
-    setGenerationTaskList((current) => current.filter((task) => !matchesDeletedJob(task)));
+    setGenerationTaskList((current) =>
+      filterGenerationTasksForDeletedWorkOrder(current, { jobId, campaignId }),
+    );
     setGenerationTaskTotal((current) => Math.max(0, current - removedCount));
   }
 
@@ -1592,6 +1591,7 @@ function App() {
     const job = await run("ad-generation-refresh", () => api.getAdGenerationJob(jobId));
     if (!job) return;
     setJobs((current) => upsertById(current, job));
+    setJobSelectionAutoPaused(false);
     setSelectedJobId(job.id);
     if (job.status === "failed") {
       setError(adGenerationJobFailureMessage(job), "work-order");
@@ -1804,6 +1804,7 @@ function App() {
       "AI 工单已创建，正在进入 AI 生产",
     );
     if (!accepted) return;
+    setJobSelectionAutoPaused(false);
     setSelectedJobId(accepted.job_id);
     setActiveView("workflow");
     setDeliveryConfirmOpen(false);
@@ -1835,12 +1836,14 @@ function App() {
     );
     if (deleted === null) return;
 
-    clearDeletedCampaignWorkflowState(deletedCampaignId, selectedJobId === jobId);
+    const deletingSelectedJob = selectedJobId === jobId;
+    if (deletingSelectedJob) setJobSelectionAutoPaused(true);
+    clearDeletedCampaignWorkflowState(deletedCampaignId, deletingSelectedJob);
     removeGenerationTasksForDeletedJob(jobId, deletedCampaignId);
     setJobs((current) => {
       const nextJobs = current.filter((item) => item.id !== jobId);
-      if (selectedJobId === jobId) {
-        setSelectedJobId(nextJobs[0]?.id ?? null);
+      if (deletingSelectedJob) {
+        setSelectedJobId(null);
       }
       return nextJobs;
     });
@@ -4954,7 +4957,12 @@ function CopyView({
                           title={asset.alt_text || imagePromptTitle(asset.prompt)}
                           type="button"
                         >
-                          <img src={displayAssetUrl(asset.url)} alt={asset.alt_text || `预览图片 ${index + 1}`} />
+                          <img
+                            src={displayAssetUrl(asset.url)}
+                            alt={asset.alt_text || `预览图片 ${index + 1}`}
+                            loading="lazy"
+                            decoding="async"
+                          />
                           <span>{creativePreviewAssetLabel(asset, index)}</span>
                         </button>
                       ))}
@@ -4975,6 +4983,8 @@ function CopyView({
                       className={`facebook-preview-image ${selectedPreviewAspectClass}`}
                       src={displayAssetUrl(selectedPreviewCreative.url)}
                       alt={selectedPreviewCreative.alt_text || "广告预览图片"}
+                      loading="lazy"
+                      decoding="async"
                     />
                   ) : (
                     <div className={`facebook-preview-empty ${selectedPreviewAspectClass}`}>
@@ -5101,19 +5111,25 @@ function CreativesView({
     videoAspectRatio,
     keyframeVariantCount,
   );
+  const keyframeModeActive = isVideoKeyframeMode(generationMode);
   const selectedKeyframeGroupCount = generationPlan.variantCount ?? keyframeVariantCount;
-  const modeCreatives = creatives.filter((asset) =>
-    isVideoKeyframeMode(generationMode) ? isKeyframeVariantAsset(asset) : !isKeyframeVariantAsset(asset),
+  const modeCreatives = useMemo(
+    () =>
+      creatives.filter((asset) =>
+        keyframeModeActive ? isKeyframeVariantAsset(asset) : !isKeyframeVariantAsset(asset),
+      ),
+    [creatives, keyframeModeActive],
   );
-  const modeGenerationSlots = creativeGenerationSlots.filter((slot) =>
-    slot.asset
-      ? isVideoKeyframeMode(generationMode) === isKeyframeVariantAsset(slot.asset)
-      : true,
+  const modeGenerationSlots = useMemo(
+    () =>
+      creativeGenerationSlots.filter((slot) =>
+        slot.asset ? keyframeModeActive === isKeyframeVariantAsset(slot.asset) : true,
+      ),
+    [creativeGenerationSlots, keyframeModeActive],
   );
-  const creativeReviewState = buildCreativeReviewState(
-    modeCreatives,
-    modeGenerationSlots,
-    selectedKeyframeGroupCount,
+  const creativeReviewState = useMemo(
+    () => buildCreativeReviewState(modeCreatives, modeGenerationSlots, selectedKeyframeGroupCount),
+    [modeCreatives, modeGenerationSlots, selectedKeyframeGroupCount],
   );
   const visibleSlots = creativeReviewState.visibleSlots;
   const historyCreatives = creativeReviewState.historyCreatives;
@@ -5134,10 +5150,13 @@ function CreativesView({
     KEYFRAME_VARIANT_OPTIONS.length,
     Math.max(selectedKeyframeGroupCount, ...keyframeGroups.map((group) => group.group)),
   ) as KeyframeVariantCount;
-  const keyframeProgressItems =
-    keyframeReviewActive && visibleSlots.length
-      ? buildKeyframePlanProgress(visibleSlots, visibleKeyframeGroupCount)
-      : [];
+  const keyframeProgressItems = useMemo(
+    () =>
+      keyframeReviewActive && visibleSlots.length
+        ? buildKeyframePlanProgress(visibleSlots, visibleKeyframeGroupCount)
+        : [],
+    [keyframeReviewActive, visibleSlots, visibleKeyframeGroupCount],
+  );
   const keyframeDoneCount = keyframeProgressItems.filter((item) => item.status === "done").length;
   const keyframeHasErrors = keyframeProgressItems.some((item) => item.status === "error");
   const slotLimit = keyframeReviewActive
@@ -5506,7 +5525,7 @@ function CreativesView({
   );
 }
 
-function CreativeSlotCard({
+const CreativeSlotCard = React.memo(function CreativeSlotCard({
   slot,
   selectedCreativeIds,
   setSelectedCreativeIds,
@@ -5670,9 +5689,9 @@ function CreativeSlotCard({
       </div>
     </article>
   );
-}
+});
 
-function CreativeAssetMiniCard({
+const CreativeAssetMiniCard = React.memo(function CreativeAssetMiniCard({
   asset,
   selectedCreativeIds,
   setSelectedCreativeIds,
@@ -5734,7 +5753,7 @@ function CreativeAssetMiniCard({
       </div>
     </article>
   );
-}
+});
 
 function VideosView({
   campaign,
@@ -6087,7 +6106,13 @@ function VideosView({
                 <pre className="facebook-preview-text">{previewText}</pre>
                 {selectedVideo?.url ? (
                   <div className={`video-ad-preview-media ${previewAspectClass}`}>
-                    <video controls muted playsInline src={displayAssetUrl(selectedVideo.url)} />
+                    <video
+                      controls
+                      muted
+                      playsInline
+                      preload="metadata"
+                      src={displayAssetUrl(selectedVideo.url)}
+                    />
                   </div>
                 ) : (
                   <div
@@ -6111,6 +6136,8 @@ function VideosView({
                             key={asset.id}
                             src={displayAssetUrl(asset.url)}
                             alt={asset.alt_text || `参考图 ${index + 1}`}
+                            loading="lazy"
+                            decoding="async"
                           />
                         ))}
                       </div>
@@ -6288,7 +6315,7 @@ function TaskMonitorView({
   onRetry: (taskId: string) => void;
   loading: string | null;
 }) {
-  const stats = generationTaskMonitorStats(tasks);
+  const stats = useMemo(() => generationTaskMonitorStats(tasks), [tasks]);
   const byStatus = summary.by_status ?? {};
   const byQueue = summary.by_queue ?? {};
   const activeCount = summary.active_count ?? stats.activeCount;
@@ -6309,12 +6336,21 @@ function TaskMonitorView({
   const missingWorkerQueues = workerHealth ? workerHealth.missing_queues : [];
   const runtimeStatus = workerHealth?.status ?? redisQueues?.status ?? "disabled";
   const isRefreshing = loading === "generation-task-list";
-  const queueOptions = ["text_queue", "image_queue", "video_queue", "callback_queue"];
-  const statusOptions = ["queued", "running", "failed", "succeeded"];
-  const lookups = { jobs, campaigns, topics, drafts, videos };
+  const queueOptions = useMemo(() => ["text_queue", "image_queue", "video_queue", "callback_queue"], []);
+  const statusOptions = useMemo(() => ["queued", "running", "failed", "succeeded"], []);
+  const lookups = useMemo(
+    () => ({ jobs, campaigns, topics, drafts, videos }),
+    [jobs, campaigns, topics, drafts, videos],
+  );
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
-  const selectedTaskDisplay = selectedTask ? taskMonitorDisplayContext(selectedTask, lookups) : null;
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId],
+  );
+  const selectedTaskDisplay = useMemo(
+    () => (selectedTask ? taskMonitorDisplayContext(selectedTask, lookups) : null),
+    [selectedTask, lookups],
+  );
 
   return (
     <section className="task-monitor-layout">
@@ -6818,7 +6854,7 @@ function taskMonitorBusinessTypeLabel(businessType: string): string {
   return labels[businessType] ?? businessType;
 }
 
-function TaskDetailDrawer({
+const TaskDetailDrawer = React.memo(function TaskDetailDrawer({
   task,
   display,
   onClose,
@@ -6887,7 +6923,7 @@ function TaskDetailDrawer({
       </aside>
     </div>
   );
-}
+});
 
 function TaskDetailField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -7937,7 +7973,7 @@ function areaLabel(value: string): string {
   return labels[value] ?? value;
 }
 
-function ImagePreview({ asset }: { asset: CreativeAsset }) {
+const ImagePreview = React.memo(function ImagePreview({ asset }: { asset: CreativeAsset }) {
   if (!asset.url) {
     return (
       <div className="image-placeholder">
@@ -7946,16 +7982,24 @@ function ImagePreview({ asset }: { asset: CreativeAsset }) {
       </div>
     );
   }
-  return <img className="asset-image" src={displayAssetUrl(asset.url)} alt={asset.alt_text || "creative"} />;
-}
+  return (
+    <img
+      className="asset-image"
+      src={displayAssetUrl(asset.url)}
+      alt={asset.alt_text || "creative"}
+      loading="lazy"
+      decoding="async"
+    />
+  );
+});
 
-function VideoPreview({ url }: { url: string }) {
+const VideoPreview = React.memo(function VideoPreview({ url }: { url: string }) {
   return (
     <div className="video-preview">
-      <video controls src={displayAssetUrl(url)} />
+      <video controls preload="metadata" src={displayAssetUrl(url)} />
     </div>
   );
-}
+});
 
 type WorkflowSummary = Record<"fields" | "topic" | "copy" | "image" | "video" | "final", {
   key: string;

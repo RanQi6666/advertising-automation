@@ -6,9 +6,11 @@ import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
   generationTaskIsActive,
+  generationTaskListHasActiveTasks,
   generationTaskMonitorStats,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
+  filterGenerationTasksForDeletedWorkOrder,
   generationTaskQueueRiskClass,
   generationTaskQueueRiskLabel,
   generationTaskQueueLabel,
@@ -326,6 +328,49 @@ test("generation task monitor helpers label queues and count retryable failures"
     retryableFailedCount: 1,
     succeededCount: 1,
   });
+});
+
+test("generation task list active helper only treats queued and running as active", () => {
+  assert.equal(
+    generationTaskListHasActiveTasks([
+      task("succeeded"),
+      { ...task("failed"), id: "task-failed" },
+    ]),
+    false,
+  );
+  assert.equal(
+    generationTaskListHasActiveTasks([
+      task("succeeded"),
+      { ...task("queued"), id: "task-queued" },
+    ]),
+    true,
+  );
+});
+
+test("filters tasks linked to a deleted work order or campaign", () => {
+  const tasks = [
+    { ...task("running"), id: "job-business", business_id: "job-deleted" },
+    { ...task("queued"), id: "payload-job", payload: { job_id: "job-deleted" } },
+    {
+      ...task("failed"),
+      id: "display-job",
+      display_context: { ad_generation_job_id: "job-deleted" },
+    },
+    { ...task("running"), id: "campaign-direct", campaign_id: "campaign-deleted" },
+    {
+      ...task("queued"),
+      id: "display-campaign",
+      display_context: { campaign_id: "campaign-deleted" },
+    },
+    { ...task("running"), id: "other", business_id: "job-other", campaign_id: "campaign-other" },
+  ];
+
+  const remaining = filterGenerationTasksForDeletedWorkOrder(tasks, {
+    jobId: "job-deleted",
+    campaignId: "campaign-deleted",
+  });
+
+  assert.deepEqual(remaining.map((item) => item.id), ["other"]);
 });
 
 test("generation task monitor helpers label queue pressure risk", () => {

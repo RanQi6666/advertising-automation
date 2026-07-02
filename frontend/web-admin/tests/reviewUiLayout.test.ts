@@ -248,12 +248,18 @@ test("deleted work orders are removed from the visible task monitor immediately"
 
   assert.match(appSource, /function removeGenerationTasksForDeletedJob\(jobId: string, campaignId: string \| null\)/);
   assert.match(appSource, /function clearDeletedCampaignWorkflowState\(campaignId: string \| null, forceVisible: boolean\)/);
+  assert.match(appSource, /const \[jobSelectionAutoPaused, setJobSelectionAutoPaused\] = useState\(false\);/);
   assert.match(deleteSource, /const deletedCampaignId = job \? adGenerationCampaignId\(job\) : null;/);
-  assert.match(deleteSource, /clearDeletedCampaignWorkflowState\(deletedCampaignId, selectedJobId === jobId\);/);
+  assert.match(deleteSource, /const deletingSelectedJob = selectedJobId === jobId;/);
+  assert.match(deleteSource, /clearDeletedCampaignWorkflowState\(deletedCampaignId, deletingSelectedJob\);/);
   assert.match(deleteSource, /removeGenerationTasksForDeletedJob\(jobId, deletedCampaignId\);/);
+  assert.match(deleteSource, /setSelectedJobId\(null\);/);
+  assert.doesNotMatch(deleteSource, /setSelectedJobId\(nextJobs\[0\]\?\.id \?\? null\);/);
   assert.match(appSource, /slot\.campaignId !== campaignId/);
   assert.match(appSource, /setSelectedCampaignId\(\(current\) => \(!campaignId \|\| current === campaignId \? null : current\)\)/);
-  assert.match(appSource, /task\.display_context\.ad_generation_job_id/);
+  assert.match(appSource, /filterGenerationTasksForDeletedWorkOrder\(current, \{ jobId, campaignId \}\)/);
+  assert.match(appSource, /allowFallbackSelection: !jobSelectionAutoPaused/);
+  assert.doesNotMatch(appSource, /jobs\.find\(\(item\) => item\.id === selectedJobId\) \?\? \(!selectedJobId \? jobs\[0\] : null\)/);
 });
 
 test("active task monitor polling is responsive without becoming one-second polling", () => {
@@ -447,7 +453,7 @@ test("task monitor auto refreshes active tasks silently", () => {
   assert.match(appSource, /const TASK_MONITOR_ACTIVE_REFRESH_MS = 3000;/);
   assert.match(appSource, /const TASK_MONITOR_IDLE_REFRESH_MS = 15000;/);
   assert.match(appSource, /const hasActiveGenerationTasks = useMemo\(/);
-  assert.match(appSource, /generationTaskIsFinal\(task\)/);
+  assert.match(appSource, /generationTaskListHasActiveTasks\(generationTaskList\)/);
   assert.match(appSource, /window\.setInterval/);
   assert.match(appSource, /refreshGenerationTasks\(\{ silent: true \}\)/);
   assert.match(
@@ -501,4 +507,21 @@ test("task monitor shows redis backlog and celery worker health", () => {
   assert.match(stylesSource, /\.task-runtime-grid\s*\{/);
   assert.match(stylesSource, /\.task-runtime-worker-list\s*\{/);
   assert.match(stylesSource, /\.task-redis-depth\s*\{/);
+});
+
+test("media-heavy previews defer offscreen images and large video downloads", () => {
+  assert.match(appSource, /loading="lazy"/);
+  assert.match(appSource, /decoding="async"/);
+  assert.match(appSource, /preload="metadata"/);
+});
+
+test("heavy media and task components are memoized and list calculations are cached", () => {
+  assert.match(appSource, /const CreativeSlotCard = React\.memo\(function CreativeSlotCard/);
+  assert.match(appSource, /const CreativeAssetMiniCard = React\.memo\(function CreativeAssetMiniCard/);
+  assert.match(appSource, /const ImagePreview = React\.memo\(function ImagePreview/);
+  assert.match(appSource, /const VideoPreview = React\.memo\(function VideoPreview/);
+  assert.match(appSource, /const TaskDetailDrawer = React\.memo\(function TaskDetailDrawer/);
+  assert.match(appSource, /const modeCreatives = useMemo\(/);
+  assert.match(appSource, /const modeGenerationSlots = useMemo\(/);
+  assert.match(appSource, /const selectedTaskDisplay = useMemo\(/);
 });

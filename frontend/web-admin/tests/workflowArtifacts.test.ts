@@ -353,3 +353,44 @@ test("resolves browser reload base selection from the selected work order campai
     shouldClearWorkflowState: false,
   });
 });
+
+test("keeps work order selection empty when the previously selected work order is gone", () => {
+  const otherJob = adGenerationJob({
+    id: "job-other",
+    result_payload: { metadata_json: { campaign_id: "campaign-other" } },
+  });
+
+  const selection = resolveWorkbenchBaseSelection({
+    currentJobId: "job-deleted",
+    currentCampaignId: "campaign-deleted",
+    jobs: [otherJob],
+    campaigns: [{ id: "campaign-other" }],
+  });
+
+  assert.deepEqual(selection, {
+    selectedJobId: null,
+    selectedCampaignId: null,
+    shouldClearWorkflowState: true,
+  });
+});
+
+test("can keep work order selection empty instead of auto-selecting the first work order", () => {
+  const firstJob = adGenerationJob({
+    id: "job-first",
+    result_payload: { metadata_json: { campaign_id: "campaign-first" } },
+  });
+
+  const selection = resolveWorkbenchBaseSelection({
+    currentJobId: null,
+    currentCampaignId: null,
+    jobs: [firstJob],
+    campaigns: [{ id: "campaign-first" }],
+    allowFallbackSelection: false,
+  });
+
+  assert.deepEqual(selection, {
+    selectedJobId: null,
+    selectedCampaignId: null,
+    shouldClearWorkflowState: true,
+  });
+});
