@@ -1,6 +1,7 @@
 import type { CreativeAsset, VideoAsset } from "../types/domain";
 
 export type GenerationTaskStatus = "queued" | "running" | "succeeded" | "failed";
+export type GenerationTaskQueueRiskLevel = "low" | "medium" | "high";
 
 export type CreativeGenerationTaskSlot = {
   index: number;
@@ -35,6 +36,37 @@ export type GenerationTask = {
   updated_at: string;
 };
 
+export type GenerationTaskQueueHealth = {
+  total: number;
+  queued: number;
+  running: number;
+  failed: number;
+  succeeded: number;
+  active: number;
+  concurrency: number;
+  backlog: number;
+  pressure_ratio: number;
+  risk_level: GenerationTaskQueueRiskLevel;
+  avg_wait_ms: number | null;
+  max_wait_ms: number | null;
+  avg_run_ms: number | null;
+  max_run_ms: number | null;
+};
+
+export type GenerationTaskFailureCodeSummary = {
+  code: string;
+  count: number;
+};
+
+export type GenerationTaskSlowQueueSummary = {
+  queue_name: string;
+  avg_wait_ms: number | null;
+  max_wait_ms: number | null;
+  avg_run_ms: number | null;
+  max_run_ms: number | null;
+  risk_level: GenerationTaskQueueRiskLevel;
+};
+
 export type GenerationTaskListResponse = {
   items: GenerationTask[];
   total: number;
@@ -49,6 +81,13 @@ export type GenerationTaskListResponse = {
     resumable_queued_count?: number;
     stale_running_count?: number;
     interrupted_failed_count?: number;
+    by_task_type?: Record<string, number>;
+    target_concurrent_users?: number;
+    total_active_capacity?: number;
+    queue_concurrency?: Record<string, number>;
+    queue_health?: Record<string, GenerationTaskQueueHealth>;
+    failure_codes?: GenerationTaskFailureCodeSummary[];
+    slowest_queues?: GenerationTaskSlowQueueSummary[];
   };
 };
 
@@ -98,6 +137,17 @@ export function generationTaskStatusLabel(status: string): string {
 
 export function generationTaskTypeLabel(taskType: string): string {
   return generationTaskTypeLabels[taskType] ?? taskType;
+}
+
+export function generationTaskQueueRiskLabel(riskLevel: string | undefined): string {
+  if (riskLevel === "high") return "高风险";
+  if (riskLevel === "medium") return "有积压";
+  return "正常";
+}
+
+export function generationTaskQueueRiskClass(riskLevel: string | undefined): GenerationTaskQueueRiskLevel {
+  if (riskLevel === "high" || riskLevel === "medium") return riskLevel;
+  return "low";
 }
 
 export function generationTaskFailureAdvice(

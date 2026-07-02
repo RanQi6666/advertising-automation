@@ -364,3 +364,20 @@ test("task monitor opens a detail drawer with failure advice and debug data", ()
   assert.match(stylesSource, /\.task-detail-panel\s*\{/);
   assert.match(stylesSource, /\.task-detail-json\s*\{/);
 });
+
+test("task monitor shows queue pressure analytics for concurrent usage", () => {
+  const taskMonitorSource = componentSource("TaskMonitorView", "TaskDetailDrawer");
+
+  assert.match(taskMonitorSource, /summary\.queue_health/);
+  assert.match(taskMonitorSource, /summary\.target_concurrent_users/);
+  assert.match(taskMonitorSource, /summary\.total_active_capacity/);
+  assert.match(taskMonitorSource, /summary\.failure_codes/);
+  assert.match(taskMonitorSource, /summary\.slowest_queues/);
+  assert.match(taskMonitorSource, /className="task-analytics-grid"/);
+  assert.match(taskMonitorSource, /className="task-queue-health-list"/);
+  assert.match(taskMonitorSource, /className="task-failure-list"/);
+  assert.match(taskMonitorSource, /generationTaskQueueRiskLabel/);
+  assert.match(stylesSource, /\.task-analytics-grid\s*\{/);
+  assert.match(stylesSource, /\.task-queue-health-card\s*\{/);
+  assert.match(stylesSource, /\.task-risk-badge\.high\s*\{/);
+});

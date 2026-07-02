@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
+    generation_task_target_concurrent_users: int = Field(default=30, ge=1, le=1000)
     generation_task_recovery_enabled: bool = True
     generation_task_recovery_interval_seconds: float = Field(default=60.0, ge=5, le=3600)
     generation_task_queued_stale_seconds: float = Field(default=60.0, ge=1, le=3600)

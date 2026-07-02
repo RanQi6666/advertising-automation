@@ -8,6 +8,8 @@ import {
   generationTaskMonitorStats,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
+  generationTaskQueueRiskClass,
+  generationTaskQueueRiskLabel,
   generationTaskQueueLabel,
   generationTaskSummary,
   generationTaskStatusLabel,
@@ -198,6 +200,16 @@ test("generation task monitor helpers label queues and count retryable failures"
     retryableFailedCount: 1,
     succeededCount: 1,
   });
+});
+
+test("generation task monitor helpers label queue pressure risk", () => {
+  assert.equal(generationTaskQueueRiskLabel("high"), "\u9ad8\u98ce\u9669");
+  assert.equal(generationTaskQueueRiskLabel("medium"), "\u6709\u79ef\u538b");
+  assert.equal(generationTaskQueueRiskLabel("low"), "\u6b63\u5e38");
+  assert.equal(generationTaskQueueRiskLabel(undefined), "\u6b63\u5e38");
+  assert.equal(generationTaskQueueRiskClass("high"), "high");
+  assert.equal(generationTaskQueueRiskClass("medium"), "medium");
+  assert.equal(generationTaskQueueRiskClass("unknown"), "low");
 });
 
 test("generation task helpers label task types in business language", () => {

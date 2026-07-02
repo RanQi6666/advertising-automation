@@ -253,6 +253,7 @@ class GenerationTaskService:
         )
 
     async def task_summary(self, session: AsyncSession) -> dict[str, Any]:
+        settings = get_settings()
         status_rows = (
             await session.execute(
                 select(GenerationTask.status, func.count()).group_by(GenerationTask.status)
@@ -263,6 +264,12 @@ class GenerationTaskService:
                 select(GenerationTask.queue_name, func.count()).group_by(GenerationTask.queue_name)
             )
         ).all()
+        task_type_rows = (
+            await session.execute(
+                select(GenerationTask.task_type, func.count()).group_by(GenerationTask.task_type)
+            )
+        ).all()
+        all_tasks = list((await session.execute(select(GenerationTask))).scalars().all())
         total = int(
             (await session.execute(select(func.count()).select_from(GenerationTask))).scalar_one()
             or 0
@@ -329,15 +336,24 @@ class GenerationTaskService:
             ).scalar_one()
             or 0
         )
+        queue_concurrency = _queue_concurrency_settings()
+        queue_health = _generation_task_queue_health(all_tasks, queue_concurrency)
         return {
             "total": total,
             "by_status": {str(status): int(count) for status, count in status_rows},
             "by_queue": {str(queue_name): int(count) for queue_name, count in queue_rows},
+            "by_task_type": {str(task_type): int(count) for task_type, count in task_type_rows},
             "retryable_failed_count": retryable_failed_count,
             "active_count": active_count,
             "resumable_queued_count": resumable_queued_count,
             "stale_running_count": stale_running_count,
             "interrupted_failed_count": interrupted_failed_count,
+            "target_concurrent_users": settings.generation_task_target_concurrent_users,
+            "total_active_capacity": sum(queue_concurrency.values()),
+            "queue_concurrency": queue_concurrency,
+            "queue_health": queue_health,
+            "failure_codes": _generation_task_failure_codes(all_tasks),
+            "slowest_queues": _generation_task_slowest_queues(queue_health),
         }
 
     async def recover_interrupted_tasks(
@@ -804,6 +820,129 @@ def _callback_queue_capacity() -> asyncio.Semaphore:
     return _callback_queue_semaphore
 
 
+def _queue_concurrency_settings() -> dict[str, int]:
+    settings = get_settings()
+    return {
+        TEXT_QUEUE_NAME: settings.text_queue_concurrency,
+        IMAGE_QUEUE_NAME: settings.image_queue_concurrency,
+        VIDEO_QUEUE_NAME: settings.video_queue_concurrency,
+        CALLBACK_QUEUE_NAME: settings.callback_queue_concurrency,
+    }
+
+
+def _generation_task_queue_health(
+    tasks: list[GenerationTask],
+    queue_concurrency: dict[str, int],
+) -> dict[str, dict[str, Any]]:
+    now = utcnow()
+    queue_names = list(queue_concurrency)
+    for task in tasks:
+        if task.queue_name not in queue_names:
+            queue_names.append(task.queue_name)
+
+    health: dict[str, dict[str, Any]] = {}
+    wait_values_by_queue: dict[str, list[int]] = {}
+    run_values_by_queue: dict[str, list[int]] = {}
+    for queue_name in queue_names:
+        concurrency = max(int(queue_concurrency.get(queue_name, 1)), 1)
+        health[queue_name] = {
+            "total": 0,
+            "queued": 0,
+            "running": 0,
+            "failed": 0,
+            "succeeded": 0,
+            "active": 0,
+            "concurrency": concurrency,
+            "backlog": 0,
+            "pressure_ratio": 0.0,
+            "risk_level": "low",
+            "avg_wait_ms": None,
+            "max_wait_ms": None,
+            "avg_run_ms": None,
+            "max_run_ms": None,
+        }
+        wait_values_by_queue[queue_name] = []
+        run_values_by_queue[queue_name] = []
+
+    for task in tasks:
+        queue = health[task.queue_name]
+        queue["total"] += 1
+        if task.status in {"queued", "running", "failed", "succeeded"}:
+            queue[task.status] += 1
+        if task.status in ACTIVE_TASK_STATUSES:
+            queue["active"] += 1
+
+        wait_ms = _generation_task_wait_ms(task, now)
+        if wait_ms is not None:
+            wait_values_by_queue[task.queue_name].append(wait_ms)
+        run_ms = _generation_task_run_ms(task, now)
+        if run_ms is not None:
+            run_values_by_queue[task.queue_name].append(run_ms)
+
+    for queue_name, queue in health.items():
+        wait_values = wait_values_by_queue[queue_name]
+        run_values = run_values_by_queue[queue_name]
+        concurrency = queue["concurrency"]
+        queue["backlog"] = max(queue["active"] - concurrency, 0)
+        queue["pressure_ratio"] = round(queue["active"] / concurrency, 2)
+        queue["risk_level"] = _generation_task_queue_risk_level(queue)
+        queue["avg_wait_ms"] = _average_int(wait_values)
+        queue["max_wait_ms"] = max(wait_values) if wait_values else None
+        queue["avg_run_ms"] = _average_int(run_values)
+        queue["max_run_ms"] = max(run_values) if run_values else None
+    return health
+
+
+def _generation_task_failure_codes(tasks: list[GenerationTask]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for task in tasks:
+        if task.status != "failed":
+            continue
+        code = task.error_code or "unknown"
+        counts[code] = counts.get(code, 0) + 1
+    return [
+        {"code": code, "count": count}
+        for code, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _generation_task_slowest_queues(
+    queue_health: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "queue_name": queue_name,
+            "avg_wait_ms": health["avg_wait_ms"],
+            "max_wait_ms": health["max_wait_ms"],
+            "avg_run_ms": health["avg_run_ms"],
+            "max_run_ms": health["max_run_ms"],
+            "risk_level": health["risk_level"],
+        }
+        for queue_name, health in queue_health.items()
+        if health["avg_wait_ms"] is not None or health["avg_run_ms"] is not None
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -(row["avg_wait_ms"] or 0),
+            -(row["avg_run_ms"] or 0),
+            row["queue_name"],
+        ),
+    )
+
+
+def _generation_task_queue_risk_level(queue: dict[str, Any]) -> str:
+    if (
+        queue["queued"] >= queue["concurrency"]
+        or queue["backlog"] >= queue["concurrency"]
+        or queue["pressure_ratio"] >= 2
+    ):
+        return "high"
+    if queue["queued"] > 0 or queue["backlog"] > 0 or queue["pressure_ratio"] >= 1:
+        return "medium"
+    return "low"
+
+
 async def recover_generation_tasks_on_startup(
     schedule_task: Callable[[str], Any] | None = None,
 ) -> GenerationTaskRecoveryResult:
@@ -1051,3 +1190,24 @@ def _duration_ms(started_at: datetime | None, finished_at: datetime | None) -> i
             int(duration.total_seconds() * 1000),
             0,
         )
+
+
+def _generation_task_wait_ms(task: GenerationTask, now: datetime) -> int | None:
+    wait_until = task.started_at
+    if wait_until is None and task.status in ACTIVE_TASK_STATUSES:
+        wait_until = now
+    return _duration_ms(task.queued_at, wait_until)
+
+
+def _generation_task_run_ms(task: GenerationTask, now: datetime) -> int | None:
+    if task.duration_ms is not None:
+        return max(int(task.duration_ms), 0)
+    if task.status == "running":
+        return _duration_ms(task.started_at, now)
+    return None
+
+
+def _average_int(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return int(round(sum(values) / len(values)))

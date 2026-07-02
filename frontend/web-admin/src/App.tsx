@@ -56,6 +56,8 @@ import {
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskMonitorStats,
+  generationTaskQueueRiskClass,
+  generationTaskQueueRiskLabel,
   generationTaskQueueLabel,
   generationTaskSummary,
   generationTaskStatusLabel,
@@ -5978,6 +5980,11 @@ function TaskMonitorView({
   const succeededCount = byStatus.succeeded ?? stats.succeededCount;
   const resumableQueuedCount = summary.resumable_queued_count ?? byStatus.queued ?? 0;
   const interruptedFailedCount = summary.interrupted_failed_count ?? 0;
+  const queueHealth = summary.queue_health ?? {};
+  const failureCodes = summary.failure_codes ?? [];
+  const slowestQueues = summary.slowest_queues ?? [];
+  const targetConcurrentUsers = summary.target_concurrent_users ?? 30;
+  const totalActiveCapacity = summary.total_active_capacity ?? 0;
   const isRefreshing = loading === "generation-task-list";
   const queueOptions = ["text_queue", "image_queue", "video_queue", "callback_queue"];
   const statusOptions = ["queued", "running", "failed", "succeeded"];
@@ -5995,6 +6002,91 @@ function TaskMonitorView({
         <Metric label="已完成" value={succeededCount} accent="violet" hint="生成成功任务" icon={Check} />
         <Metric label="待补偿" value={resumableQueuedCount} accent="blue" hint="启动或巡检会重新调度" icon={RefreshCw} />
         <Metric label="中断失败" value={interruptedFailedCount} accent="amber" hint="可在详情确认后重试" icon={X} />
+      </section>
+
+      <section className="task-analytics-grid">
+        <section className="panel task-analytics-panel">
+          <div className="panel-header task-analytics-header">
+            <div>
+              <h2>队列压力</h2>
+              <span className="panel-note">
+                目标 {targetConcurrentUsers} 人并发 / 当前队列容量 {totalActiveCapacity}
+              </span>
+            </div>
+            <span className="task-capacity-pill">按等待与运行任务判断</span>
+          </div>
+          <div className="task-queue-health-list">
+            {queueOptions.map((queueName) => {
+              const health = queueHealth[queueName];
+              const riskClass = generationTaskQueueRiskClass(health?.risk_level);
+              return (
+                <article className="task-queue-health-card" key={queueName}>
+                  <div className="task-queue-health-head">
+                    <strong>{generationTaskQueueLabel(queueName)}</strong>
+                    <span className={`task-risk-badge ${riskClass}`}>
+                      {generationTaskQueueRiskLabel(health?.risk_level)}
+                    </span>
+                  </div>
+                  <div className="task-queue-health-metrics">
+                    <span>
+                      等待 <strong>{health?.queued ?? 0}</strong>
+                    </span>
+                    <span>
+                      运行 <strong>{health?.running ?? 0}</strong>
+                    </span>
+                    <span>
+                      并发 <strong>{health?.concurrency ?? 0}</strong>
+                    </span>
+                    <span>
+                      积压 <strong>{health?.backlog ?? 0}</strong>
+                    </span>
+                  </div>
+                  <div className="task-queue-health-foot">
+                    <span>平均等待 {formatTaskDurationMs(health?.avg_wait_ms ?? null)}</span>
+                    <span>平均执行 {formatTaskDurationMs(health?.avg_run_ms ?? null)}</span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="panel task-analytics-panel">
+          <div className="panel-header task-analytics-header">
+            <div>
+              <h2>失败与耗时</h2>
+              <span className="panel-note">定位最容易拖慢 30 人并发体验的环节</span>
+            </div>
+          </div>
+          <div className="task-analytics-columns">
+            <div className="task-failure-list">
+              <span className="task-analytics-label">失败原因排行</span>
+              {failureCodes.length ? (
+                failureCodes.slice(0, 4).map((item) => (
+                  <div className="task-analytics-row" key={item.code}>
+                    <span>{item.code}</span>
+                    <strong>{item.count}</strong>
+                  </div>
+                ))
+              ) : (
+                <div className="task-analytics-empty">暂无失败任务</div>
+              )}
+            </div>
+            <div className="task-slowest-list">
+              <span className="task-analytics-label">等待最久队列</span>
+              {slowestQueues.length ? (
+                slowestQueues.slice(0, 4).map((item) => (
+                  <div className="task-analytics-row" key={item.queue_name}>
+                    <span>{generationTaskQueueLabel(item.queue_name)}</span>
+                    <strong>{formatTaskDurationMs(item.avg_wait_ms)}</strong>
+                  </div>
+                ))
+              ) : (
+                <div className="task-analytics-empty">暂无耗时数据</div>
+              )}
+            </div>
+          </div>
+        </section>
       </section>
 
       <section className="panel task-monitor-panel">

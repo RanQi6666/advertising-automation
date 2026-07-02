@@ -262,9 +262,136 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert listing.summary["by_queue"][CALLBACK_QUEUE_NAME] == 1
     assert listing.summary["retryable_failed_count"] == 1
     assert listing.summary["active_count"] == 2
+    assert listing.summary["target_concurrent_users"] == 30
+    assert listing.summary["total_active_capacity"] == 17
+    assert listing.summary["failure_codes"] == [
+        {"code": "provider_timeout", "count": 1},
+        {"code": "unknown_provider_error", "count": 1},
+    ]
+    assert listing.summary["queue_health"][TEXT_QUEUE_NAME]["queued"] == 1
+    assert listing.summary["queue_health"][TEXT_QUEUE_NAME]["concurrency"] == 6
+    assert listing.summary["queue_health"][IMAGE_QUEUE_NAME]["failed"] == 1
+    assert listing.summary["queue_health"][VIDEO_QUEUE_NAME]["running"] == 1
+    assert listing.summary["queue_health"][VIDEO_QUEUE_NAME]["risk_level"] == "low"
     assert queued_task.status == "queued"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_summary_reports_queue_pressure_and_duration_metrics(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEXT_QUEUE_CONCURRENCY", "2")
+    monkeypatch.setenv("IMAGE_QUEUE_CONCURRENCY", "1")
+    monkeypatch.setenv("VIDEO_QUEUE_CONCURRENCY", "1")
+    monkeypatch.setenv("CALLBACK_QUEUE_CONCURRENCY", "1")
+    monkeypatch.setenv("GENERATION_TASK_TARGET_CONCURRENT_USERS", "30")
+    get_settings.cache_clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-task-pressure-1",
+            name="Task Pressure Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        now = utcnow()
+        service = GenerationTaskService()
+        queued_text_tasks = [
+            await service.create_task(
+                session,
+                queue_name=TEXT_QUEUE_NAME,
+                task_type="topic_generate",
+                business_type="campaign",
+                business_id=f"{campaign.id}-{index}",
+                campaign_id=campaign.id,
+                payload={"campaign_id": campaign.id, "index": index},
+            )
+            for index in range(3)
+        ]
+        running_image_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-task-pressure-1",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-task-pressure-1"},
+        )
+        failed_image_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="image_generate",
+            business_type="copy_draft",
+            business_id="draft-task-pressure-2",
+            campaign_id=campaign.id,
+            payload={"draft_id": "draft-task-pressure-2"},
+        )
+        succeeded_video_task = await service.create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_generate",
+            business_type="video_asset",
+            business_id="video-task-pressure-1",
+            campaign_id=campaign.id,
+            payload={"video_id": "video-task-pressure-1"},
+        )
+
+        for index, task in enumerate(queued_text_tasks):
+            task.queued_at = now - timedelta(seconds=120 + index * 30)
+        running_image_task.status = "running"
+        running_image_task.queued_at = now - timedelta(seconds=150)
+        running_image_task.started_at = now - timedelta(seconds=90)
+        running_image_task.attempt_count = 1
+        failed_image_task.status = "failed"
+        failed_image_task.error_code = "provider_timeout"
+        failed_image_task.error_message = "provider timeout"
+        failed_image_task.retryable = True
+        failed_image_task.queued_at = now - timedelta(seconds=240)
+        failed_image_task.started_at = now - timedelta(seconds=180)
+        failed_image_task.finished_at = now - timedelta(seconds=60)
+        failed_image_task.duration_ms = 120_000
+        succeeded_video_task.status = "succeeded"
+        succeeded_video_task.queued_at = now - timedelta(seconds=300)
+        succeeded_video_task.started_at = now - timedelta(seconds=240)
+        succeeded_video_task.finished_at = now - timedelta(seconds=120)
+        succeeded_video_task.duration_ms = 120_000
+        await session.commit()
+
+        summary = await service.task_summary(session)
+
+    text_health = summary["queue_health"][TEXT_QUEUE_NAME]
+    image_health = summary["queue_health"][IMAGE_QUEUE_NAME]
+    video_health = summary["queue_health"][VIDEO_QUEUE_NAME]
+
+    assert summary["target_concurrent_users"] == 30
+    assert summary["total_active_capacity"] == 5
+    assert text_health["active"] == 3
+    assert text_health["concurrency"] == 2
+    assert text_health["backlog"] == 1
+    assert text_health["risk_level"] == "high"
+    assert text_health["avg_wait_ms"] >= 120_000
+    assert text_health["max_wait_ms"] >= text_health["avg_wait_ms"]
+    assert image_health["active"] == 1
+    assert image_health["failed"] == 1
+    assert image_health["avg_wait_ms"] == 60_000
+    assert image_health["avg_run_ms"] >= 105_000
+    assert image_health["max_run_ms"] >= image_health["avg_run_ms"]
+    assert video_health["avg_wait_ms"] == 60_000
+    assert video_health["avg_run_ms"] == 120_000
+    assert summary["failure_codes"] == [{"code": "provider_timeout", "count": 1}]
+    assert summary["slowest_queues"][0]["queue_name"] == TEXT_QUEUE_NAME
+
+    await engine.dispose()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
