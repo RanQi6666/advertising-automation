@@ -516,6 +516,7 @@ export const api = {
       variantCount?: number;
       framesPerVariant?: number;
       videoDurationSeconds?: number | null;
+      targetIndices?: number[];
     } = {},
   ) =>
     post<GenerationTask>("/creatives/generate/task", {
@@ -523,6 +524,7 @@ export const api = {
       count,
       size,
       ...(targetIndex ? { target_index: targetIndex } : {}),
+      ...(options.targetIndices?.length ? { target_indices: options.targetIndices } : {}),
       ...(options.modelId ? { model_id: options.modelId } : {}),
       ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
       ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
@@ -545,6 +547,7 @@ export const api = {
       variantCount?: number;
       framesPerVariant?: number;
       videoDurationSeconds?: number | null;
+      targetIndices?: number[];
     } = {},
   ) =>
     streamNdjson<CreativeStreamEvent>(
@@ -554,6 +557,7 @@ export const api = {
         count,
         size,
         ...(targetIndex ? { target_index: targetIndex } : {}),
+        ...(options.targetIndices?.length ? { target_indices: options.targetIndices } : {}),
         ...(options.modelId ? { model_id: options.modelId } : {}),
         ...(options.storyboard?.length ? { storyboard: options.storyboard } : {}),
         ...(options.storyboardText?.trim() ? { storyboard_text: options.storyboardText } : {}),
