@@ -5,6 +5,7 @@ import * as generationTaskHelpers from "../src/lib/generationTasks.ts";
 import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
+  generationTaskIsActive,
   generationTaskMonitorStats,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
@@ -51,6 +52,10 @@ function task(status: GenerationTask["status"], errorMessage: string | null = nu
 }
 
 test("generation task helpers summarize text queue statuses", () => {
+  assert.equal(generationTaskIsActive(task("queued")), true);
+  assert.equal(generationTaskIsActive(task("running")), true);
+  assert.equal(generationTaskIsActive(task("succeeded")), false);
+  assert.equal(generationTaskIsActive(task("failed")), false);
   assert.equal(generationTaskIsFinal(task("queued")), false);
   assert.equal(generationTaskIsFinal(task("succeeded")), true);
   assert.equal(generationTaskIsSuccessful(task("succeeded")), true);

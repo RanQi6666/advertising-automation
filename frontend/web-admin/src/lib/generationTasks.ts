@@ -279,6 +279,10 @@ export function generationTaskIsFinal(task: GenerationTask): boolean {
   return task.status === "succeeded" || task.status === "failed";
 }
 
+export function generationTaskIsActive(task: GenerationTask): boolean {
+  return task.status === "queued" || task.status === "running";
+}
+
 export function generationTaskIsSuccessful(task: GenerationTask): boolean {
   return task.status === "succeeded";
 }

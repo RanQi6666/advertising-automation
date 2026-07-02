@@ -61,6 +61,7 @@ import {
   creativeAssetsFromGenerationTask,
   creativeSlotsFromGenerationTask,
   generationTaskFailureAdvice,
+  generationTaskIsActive,
   generationTaskIsFinal,
   generationTaskIsSuccessful,
   generationTaskMonitorStats,
@@ -444,6 +445,7 @@ function App() {
   const selectedCampaignIdRef = useRef<string | null>(null);
   const campaignDataRequestRef = useRef(0);
   const imageTaskResumeRef = useRef<string | null>(null);
+  const activeImageTaskFollowUpRef = useRef<Set<string>>(new Set());
   const videoTaskResumeRef = useRef<string | null>(null);
 
   const selectedJob = useMemo(
@@ -1017,6 +1019,106 @@ function App() {
       });
     }
     return taskAssets;
+  }
+
+  function markActiveImageTaskSlotsPending(task: GenerationTask) {
+    const targetIndices = creativeTaskTargetSlotIndices(task);
+    if (!targetIndices.length) return;
+    const targetIndexSet = new Set(targetIndices);
+    setCreativeGenerationSlots((current) => {
+      const expectedSlotCount = expectedCreativeTaskSlotCount(task);
+      const fallbackSlots = buildCreativeReviewState<CreativeGenerationSlot>(
+        topicCreatives,
+        [],
+      ).visibleSlots;
+      const slots = current.length
+        ? current
+        : fallbackSlots.length
+          ? fallbackSlots
+          : initialCreativeSlots(Math.max(expectedSlotCount, targetIndices.length));
+      const existingIndices = new Set(slots.map((slot) => slot.index));
+      const expandedSlots: CreativeGenerationSlot[] = [
+        ...slots,
+        ...targetIndices
+          .filter((index) => !existingIndices.has(index))
+          .map((index): CreativeGenerationSlot => ({ index, status: "loading" })),
+      ];
+      return expandedSlots
+        .map((slot) =>
+          targetIndexSet.has(slot.index) && !slot.asset
+            ? { ...slot, status: "loading" as const, message: undefined }
+            : slot,
+        )
+        .sort((left, right) => left.index - right.index);
+    });
+  }
+
+  function markImageTaskSlotsFailed(task: GenerationTask, message: string) {
+    const targetIndices = creativeTaskTargetSlotIndices(task);
+    if (!targetIndices.length) return;
+    const targetIndexSet = new Set(targetIndices);
+    setCreativeGenerationSlots((current) =>
+      current.map((slot) =>
+        targetIndexSet.has(slot.index) && slot.status === "loading" && !slot.asset
+          ? { ...slot, status: "error" as const, message }
+          : slot,
+      ),
+    );
+  }
+
+  function handleActiveImageTaskStillRunning(task: GenerationTask, label: string): boolean {
+    if (!generationTaskIsActive(task)) return false;
+    applyCreativeGenerationTask(task);
+    markActiveImageTaskSlotsPending(task);
+    continueActiveImageGenerationTask(task, label);
+    setNotice(`${label}仍在图片队列处理中，完成后会自动更新，不需要刷新页面。`);
+    return true;
+  }
+
+  function continueActiveImageGenerationTask(task: GenerationTask, label: string) {
+    if (!generationTaskIsActive(task)) return;
+    if (activeImageTaskFollowUpRef.current.has(task.id)) return;
+    activeImageTaskFollowUpRef.current.add(task.id);
+
+    const pollUntilFinal = async () => {
+      let latest = task;
+      try {
+        while (generationTaskIsActive(latest)) {
+          await sleep(GENERATION_TASK_CONFIRM_INTERVAL_MS);
+          latest = await api.getGenerationTask(task.id);
+          applyCreativeGenerationTask(latest);
+          if (generationTaskIsActive(latest)) {
+            markActiveImageTaskSlotsPending(latest);
+          }
+        }
+
+        applyCreativeGenerationTask(latest);
+        if (generationTaskIsFinal(latest)) {
+          clearActiveImageGenerationTaskCache(latest.id);
+        }
+        if (generationTaskIsSuccessful(latest)) {
+          const generatedAssets = creativeAssetsFromGenerationTask(latest);
+          const firstGroupIds = firstCompleteKeyframeGroupIds(generatedAssets);
+          if (firstGroupIds.length) setSelectedCreativeIds(firstGroupIds);
+          clearError("image");
+          setNotice(generationTaskSummary(latest, label));
+          void saveWorkflowStage("image_review");
+          return;
+        }
+
+        const message = generationTaskSummary(latest, label);
+        setError(message, "image");
+        markImageTaskSlotsFailed(latest, message);
+      } catch (caught) {
+        if (!isTransientApiError(caught)) {
+          setCaughtError("image", caught, `${label}任务跟踪失败`);
+        }
+      } finally {
+        activeImageTaskFollowUpRef.current.delete(task.id);
+      }
+    };
+
+    void pollUntilFinal();
   }
 
   function applyVideoGenerationTask(task: GenerationTask): VideoAsset | null {
@@ -2343,17 +2445,27 @@ function App() {
             waitForGenerationTask(task.id, "图片", "image", applyCreativeGenerationTask),
           ),
         );
+        let hasActiveImageTask = false;
         for (const completedTask of completedTasks) {
           if (!completedTask) continue;
+          if (handleActiveImageTaskStillRunning(completedTask, "图片")) {
+            hasActiveImageTask = true;
+            continue;
+          }
           applyCreativeGenerationTask(completedTask);
           if (generationTaskIsFinal(completedTask)) {
             clearActiveImageGenerationTaskCache(completedTask.id);
           }
         }
         const generatedAssets = completedTasks.flatMap((task) =>
-          task ? applyCreativeGenerationTask(task) : [],
+          task && !generationTaskIsActive(task) ? applyCreativeGenerationTask(task) : [],
         );
         if (!generatedAssets.length) {
+          if (hasActiveImageTask) {
+            clearError("image");
+            setNotice("图片仍在图片队列处理中，完成后会自动更新，不需要刷新页面。");
+            return;
+          }
           setError("图片生成失败，请稍后重试。", "image");
           markLoadingCreativeSlotsFailed("图片生成失败，请重新生成。");
           return;
@@ -2395,6 +2507,10 @@ function App() {
       );
       if (!completedTask) {
         setNotice("图片仍在图片队列处理中，请稍后刷新查看。");
+        return;
+      }
+      if (handleActiveImageTaskStillRunning(completedTask, "图片")) {
+        clearError("image");
         return;
       }
       if (generationTaskIsFinal(completedTask)) {
@@ -2663,10 +2779,16 @@ function App() {
         "image",
         applyCreativeGenerationTask,
       );
+      if (completedTask && handleActiveImageTaskStillRunning(completedTask, `图片 ${slotIndex}`)) {
+        clearError("image");
+        return;
+      }
       if (completedTask && generationTaskIsFinal(completedTask)) {
         clearActiveImageGenerationTaskCache(completedTask.id);
       }
-      const generatedAssets = completedTask ? applyCreativeGenerationTask(completedTask) : [];
+      const generatedAssets = completedTask && !generationTaskIsActive(completedTask)
+        ? applyCreativeGenerationTask(completedTask)
+        : [];
       const retriedAsset =
         generatedAssets.find((asset) => creativeImageIndex(asset, 0) === slotIndex) ??
         generatedAssets[0] ??
@@ -2936,10 +3058,16 @@ function App() {
         "image",
         applyCreativeGenerationTask,
       );
+      if (completedTask && handleActiveImageTaskStillRunning(completedTask, `方案 ${group.group}`)) {
+        clearError("image");
+        return;
+      }
       if (completedTask && generationTaskIsFinal(completedTask)) {
         clearActiveImageGenerationTaskCache(completedTask.id);
       }
-      const generatedAssets = completedTask ? applyCreativeGenerationTask(completedTask) : [];
+      const generatedAssets = completedTask && !generationTaskIsActive(completedTask)
+        ? applyCreativeGenerationTask(completedTask)
+        : [];
       if (!generatedAssets.length) {
         for (const index of targetIndices) {
           updateCreativeGenerationSlot(index, {
@@ -8528,6 +8656,49 @@ function expectedCreativeTaskSlotCount(task: GenerationTask): number {
     numericMetadataValue(task.metadata.count) ||
     COPY_IMAGE_GENERATION_COUNT;
   return Math.max(count, targetSlotMaximum);
+}
+
+function creativeTaskTargetSlotIndices(task: GenerationTask): number[] {
+  const explicitTargetIndices = numericMetadataList(
+    task.payload.target_indices ?? task.metadata.target_indices,
+  );
+  if (explicitTargetIndices.length) return explicitTargetIndices;
+
+  const targetIndex = numericMetadataValue(task.payload.target_index ?? task.metadata.target_index);
+  if (targetIndex) return [targetIndex];
+
+  const slotIndices = creativeSlotsFromGenerationTask(task).map((slot) => slot.index);
+  if (slotIndices.length) return uniquePositiveIntegers(slotIndices);
+
+  const count = expectedCreativeTaskSlotCount(task);
+  return count > 0 ? Array.from({ length: count }, (_, index) => index + 1) : [];
+}
+
+function numericMetadataList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return uniquePositiveIntegers(
+    value
+      .map((item) =>
+        typeof item === "number"
+          ? item
+          : typeof item === "string"
+            ? Number.parseInt(item, 10)
+            : Number.NaN,
+      ),
+  );
+}
+
+function uniquePositiveIntegers(values: number[]): number[] {
+  const seen = new Set<number>();
+  const result: number[] = [];
+  for (const value of values) {
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const integer = Math.trunc(value);
+    if (seen.has(integer)) continue;
+    seen.add(integer);
+    result.push(integer);
+  }
+  return result;
 }
 
 function buildCreativeSlots(

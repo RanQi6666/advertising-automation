@@ -319,6 +319,24 @@ test("keyframe image generation launches scheme tasks and stores multiple task i
   assert.match(appSource, /targetIndices,/);
 });
 
+test("active image tasks stay pending and continue polling after foreground timeout", () => {
+  const generateSource = asyncFunctionSource("handleGenerateCreativesTask", "handleGenerateCreativesStream");
+  const retryTaskSource = asyncFunctionSource("handleRetryCreativeSlotTask", "handleRetryCreativeSlot");
+  const retryGroupSource = asyncFunctionSource("handleRetryKeyframeGroupTask", "handleRegenerateKeyframeGroup");
+
+  assert.match(appSource, /continueActiveImageGenerationTask/);
+  assert.match(appSource, /handleActiveImageTaskStillRunning/);
+  assert.match(appSource, /activeImageTaskFollowUpRef/);
+  assert.match(appSource, /generationTaskIsActive/);
+  assert.match(generateSource, /handleActiveImageTaskStillRunning\(completedTask, ".*?"\)/s);
+  assert.match(retryTaskSource, /handleActiveImageTaskStillRunning\(completedTask, `.*?\$\{slotIndex\}`\)/s);
+  assert.match(retryGroupSource, /handleActiveImageTaskStillRunning\(completedTask, `.*?\$\{group\.group\}`\)/s);
+  assert.doesNotMatch(
+    generateSource,
+    /if \(!generatedAssets\.length\) \{\s*setError\("鍥剧墖鐢熸垚澶辫触/s,
+  );
+});
+
 test("keyframe groups expose whole-scheme retry separately from feedback regeneration", () => {
   assert.match(appSource, /handleRetryKeyframeGroupTask/);
   assert.match(appSource, /onRetryGroup/);
