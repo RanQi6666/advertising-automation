@@ -21,6 +21,7 @@ import type {
   VideoAsset,
   VideoStoryboardResponse,
   WorkOrder,
+  WorkOrderType,
   ReviewedDeliveryFields,
   WorkOrderDeliveryExtraction,
 } from "../types/domain";
@@ -365,9 +366,11 @@ export const api = {
     rawContent: string,
     reviewedDeliveryFields?: ReviewedDeliveryFields,
     llmDeliveryFields?: WorkOrderDeliveryExtraction,
+    workOrderType?: WorkOrderType,
   ) =>
     post<WorkOrder>("/work-orders", {
       raw_content: rawContent,
+      ...(workOrderType ? { work_order_type: workOrderType } : {}),
       reviewed_delivery_fields: reviewedDeliveryFields ?? {},
       llm_delivery_fields: llmDeliveryFields ?? {},
     }),

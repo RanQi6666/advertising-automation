@@ -87,6 +87,68 @@ def test_builds_game_strategy_without_gaja_default_template() -> None:
     assert "guaranteed winning" in guardrail_text
 
 
+def test_builds_operator_selected_gambling_strategy_with_vfx_library_policy() -> None:
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "product_name": "GAJA777",
+            "project_name": "GAJA777 India",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+            "event_name": "first_recharge",
+            "brief": "Create a premium gambling-like short video without money claims.",
+        },
+        today=date(2026, 7, 3),
+    )
+
+    assert strategy["schema_version"] == "creative_strategy.v2"
+    assert strategy["vertical"] == "gambling"
+    assert strategy["creative_package"] == "gambling_boss_portal_spectacle_package"
+    assert strategy["classification"]["method"] == "operator_selected"
+    assert strategy["brand_display"]["source_name"] == "GAJA777"
+    assert strategy["brand_display"]["cleaned_brand"] == "GAJA"
+    assert strategy["brand_display"]["digit_policy"] == "remove_digits_for_visible_brand"
+    assert strategy["text_brand_timing_policy"] == {
+        "text_allowed_windows": ["0-3s", "9-12s"],
+        "middle_window": "3-9s",
+        "middle_text_rule": "no text except optional tiny brand mark",
+        "first_frame_role": "hook_and_brand",
+        "last_frame_role": "brand_cta_close",
+    }
+    assert strategy["middle_vfx_policy"]["window"] == "3-9s"
+    assert strategy["middle_vfx_policy"]["required_vfx_count"] == "2-3"
+    assert strategy["middle_vfx_policy"]["source"] == "vfx_library"
+    assert "not generic cinematic wording" in strategy["middle_vfx_policy"]["rule"]
+
+    assert {item["angle_type"] for item in strategy["topic_angle_plan"]} == {
+        "sky_portal_pressure",
+        "dark_element_overload",
+        "ancient_guardian_unlock",
+    }
+    assert {item["angle_type"] for item in strategy["topic_angle_plan"]}.isdisjoint(
+        {"challenge_failure", "comeback_growth", "reward_burst"}
+    )
+    assert "bird_god" in strategy["boss_matrix"]["sky_portal_pressure"]
+    assert "six_armed_overlord" in strategy["boss_matrix"]["dark_element_overload"]
+    assert "serpent_guardian" in strategy["boss_matrix"]["ancient_guardian_unlock"]
+    assert {
+        "golden_particle_explosion",
+        "divine_light_descent",
+        "portal_gate_opening",
+        "space_rupture",
+        "element_burst",
+        "slow_motion_suspension",
+    } <= set(strategy["vfx_library"])
+    assert "ENTER NOW" in strategy["cta_pool"]
+    assert "MAKE YOUR CHOICE" in strategy["cta_pool"]
+
+    guardrail_text = " ".join(strategy["compliance_guardrails"])
+    assert "Do not show cash amounts" in guardrail_text
+    assert "withdrawal/recharge/balance UI" in guardrail_text
+    assert "slot machines" in guardrail_text
+    assert "Guaranteed Win" in guardrail_text
+
+
 def test_builds_india_game_market_style_pack_for_male_18_24() -> None:
     strategy = build_creative_strategy(
         {

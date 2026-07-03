@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
@@ -36,6 +37,81 @@ ECOMMERCE_KEYWORDS = (
     "serum",
     "limited offer",
 )
+WORK_ORDER_TYPES = ("ecommerce", "game", "gambling")
+TEXT_BRAND_TIMING_POLICY = {
+    "text_allowed_windows": ["0-3s", "9-12s"],
+    "middle_window": "3-9s",
+    "middle_text_rule": "no text except optional tiny brand mark",
+    "first_frame_role": "hook_and_brand",
+    "last_frame_role": "brand_cta_close",
+}
+MIDDLE_VFX_POLICY = {
+    "window": "3-9s",
+    "required_vfx_count": "2-3",
+    "source": "vfx_library",
+    "rule": (
+        "middle segment must be built from selected VFX library items, "
+        "not generic cinematic wording"
+    ),
+}
+VFX_LIBRARY = [
+    "golden_particle_explosion",
+    "divine_light_descent",
+    "portal_gate_opening",
+    "space_rupture",
+    "element_burst",
+    "slow_motion_suspension",
+    "feather_meteor_storm",
+    "scale_particle_vortex",
+    "energy_serpent_vortex",
+    "boss_energy_awakening",
+    "seal_shatter",
+    "vault_or_relic_mechanism_startup",
+    "epic_legendary_big_reward_feedback",
+    "score_points_stars_power_roll",
+]
+GAMBLING_BOSS_MATRIX = {
+    "sky_portal_pressure": [
+        "bird_god",
+        "phoenix_king",
+        "storm_bird_king",
+        "dragon_descendant_lord",
+        "four_wing_monarch",
+        "golden_wing_gatekeeper",
+    ],
+    "dark_element_overload": [
+        "six_armed_overlord",
+        "shadow_monarch",
+        "abyss_titan",
+        "thunder_king",
+        "frost_judge",
+        "mechanical_deity",
+    ],
+    "ancient_guardian_unlock": [
+        "serpent_guardian",
+        "golden_scale_serpent",
+        "golden_statue",
+        "temple_guard",
+        "ancient_knight",
+        "great_sword_judge",
+    ],
+}
+GAMBLING_SCENE_POOL = [
+    "forbidden_gate",
+    "choose_your_fate_doors",
+    "sealed_vault",
+    "sky_temple",
+    "ancient_ruins",
+    "storm_cloud_realm",
+    "golden_sanctum",
+]
+GAMBLING_CTA_POOL = [
+    "ENTER NOW",
+    "MAKE YOUR CHOICE",
+    "UNLOCK NOW",
+    "FACE THE TRIAL",
+    "PLAY NOW",
+]
 
 COUNTRY_CONTEXT = {
     "SG": {
@@ -163,18 +239,25 @@ def build_creative_strategy(
     audience_lens = _audience_lens(context)
     vertical, classification = _classify_vertical(context)
     topic_angle_plan = _topic_angle_plan(vertical)
+    brand_display = _brand_display(context)
     strategy = {
         "schema_version": CREATIVE_STRATEGY_SCHEMA_VERSION,
         "vertical": vertical,
         "classification": classification,
         "market_context": market_context,
         "audience_lens": audience_lens,
+        "brand_display": brand_display,
+        "text_brand_timing_policy": TEXT_BRAND_TIMING_POLICY,
+        "middle_vfx_policy": MIDDLE_VFX_POLICY,
+        "vfx_library": VFX_LIBRARY,
         "topic_angle_plan": topic_angle_plan,
         "copy_guidance": _copy_guidance(vertical, market_context, audience_lens),
         "image_guidance": _image_guidance(vertical),
         "video_guidance": _video_guidance(vertical),
         "compliance_guardrails": _compliance_guardrails(vertical),
     }
+    if vertical == "gambling":
+        strategy.update(_gambling_creative_package())
     market_game_style_pack = _market_game_style_pack(
         context=context,
         market_context=market_context,
@@ -197,6 +280,17 @@ def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "classification",
         "market_context",
         "audience_lens",
+        "brand_display",
+        "text_brand_timing_policy",
+        "middle_vfx_policy",
+        "vfx_library",
+        "creative_package",
+        "visual_language",
+        "core_formula",
+        "boss_matrix",
+        "scene_pool",
+        "cta_pool",
+        "gambling_safety_rules",
         "topic_angle_plan",
         "copy_guidance",
         "image_guidance",
@@ -320,7 +414,42 @@ def _audience_lens(context: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _brand_display(context: Mapping[str, Any]) -> dict[str, Any]:
+    source_name = _first_non_empty(
+        context.get("product_name"),
+        context.get("project_name"),
+        context.get("campaign_name"),
+        _nested_value(context.get("structured_fields"), "product_name"),
+        _nested_value(context.get("structured_fields"), "project_name"),
+        _nested_value(context.get("work_order"), "product_name"),
+        _nested_value(context.get("work_order"), "project_name"),
+        _nested_value(context.get("work_order"), "campaign_name"),
+        _nested_value(context.get("landing_page"), "title"),
+    )
+    source_text = _string_value(source_name).strip()
+    cleaned = re.sub(r"\d+", "", source_text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
+    if not cleaned:
+        cleaned = source_text
+    return {
+        "source_name": source_text,
+        "cleaned_brand": cleaned,
+        "digit_policy": "remove_digits_for_visible_brand",
+        "vip_required_for_gambling": True,
+    }
+
+
 def _classify_vertical(context: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    selected_type = _selected_work_order_type(context)
+    if selected_type:
+        return selected_type, {
+            "method": "operator_selected",
+            "confidence": 1.0,
+            "signals": [selected_type],
+            "fallback": False,
+            "source": "work_order_type",
+        }
+
     text = _context_text(context)
     game_hits = _game_signals(context, text)
     ecommerce_hits = _keyword_hits(text, ECOMMERCE_KEYWORDS)
@@ -348,7 +477,82 @@ def _classify_vertical(context: Mapping[str, Any]) -> tuple[str, dict[str, Any]]
     }
 
 
+def _selected_work_order_type(context: Mapping[str, Any]) -> str | None:
+    candidates = [
+        context.get("work_order_type"),
+        _nested_value(context.get("metadata_json"), "work_order_type"),
+        _nested_value(context.get("structured_fields"), "work_order_type"),
+        _nested_value(context.get("reviewed_fields"), "work_order_type"),
+        _nested_value(context.get("work_order"), "work_order_type"),
+        _nested_value(context.get("work_order"), "type"),
+    ]
+    for value in candidates:
+        normalized = _normalize_work_order_type(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_work_order_type(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        for key in ("normalized_value", "value", "code", "id", "label", "name"):
+            normalized = _normalize_work_order_type(value.get(key))
+            if normalized:
+                return normalized
+        return None
+    text = _string_value(value).strip().casefold()
+    if not text:
+        return None
+    text = text.replace("-", "_").replace(" ", "_")
+    aliases = {
+        "ecommerce": "ecommerce",
+        "e_commerce": "ecommerce",
+        "commerce": "ecommerce",
+        "shop": "ecommerce",
+        "product": "ecommerce",
+        "game": "game",
+        "games": "game",
+        "gaming": "game",
+        "gambling": "gambling",
+        "gambling_like": "gambling",
+        "gambling_like_safe_game_ad": "gambling",
+        "casino_safe": "gambling",
+        "betting_safe": "gambling",
+    }
+    return aliases.get(text)
+
+
 def _topic_angle_plan(vertical: str) -> list[dict[str, Any]]:
+    if vertical == "gambling":
+        return [
+            {
+                "slot": 1,
+                "angle_type": "sky_portal_pressure",
+                "purpose": (
+                    "Test sky-scale pressure, flying boss arrival, divine light, "
+                    "space rupture, and portal opening."
+                ),
+                "avoid_repeating": ["dark_element_overload", "ancient_guardian_unlock"],
+            },
+            {
+                "slot": 2,
+                "angle_type": "dark_element_overload",
+                "purpose": (
+                    "Test dark entrance pressure, multi-element overload, space collapse, "
+                    "and giant gate reveal."
+                ),
+                "avoid_repeating": ["sky_portal_pressure", "ancient_guardian_unlock"],
+            },
+            {
+                "slot": 3,
+                "angle_type": "ancient_guardian_unlock",
+                "purpose": (
+                    "Test ruins, vault, or temple guardian awakening, seal shatter, "
+                    "golden particle burst, and entrance unlock."
+                ),
+                "avoid_repeating": ["sky_portal_pressure", "dark_element_overload"],
+            },
+        ]
     if vertical == "game":
         return [
             {
@@ -399,6 +603,12 @@ def _copy_guidance(
 ) -> dict[str, Any]:
     if vertical == "game":
         hooks = ["Can you pass this challenge?", "Try again and level up.", "Unlock the reward."]
+    elif vertical == "gambling":
+        hooks = [
+            "Open the forbidden entrance.",
+            "Choose carefully.",
+            "Unlock the hidden spectacle.",
+        ]
     elif vertical == "ecommerce":
         hooks = [
             "Show the daily problem first.",
@@ -428,6 +638,21 @@ def _image_guidance(vertical: str) -> dict[str, Any]:
             "composition": "Use a gameplay or challenge-first visual with a clear payoff.",
             "avoid": ["real-money cues", "guaranteed reward claims", "fake platform UI"],
         }
+    if vertical == "gambling":
+        return {
+            "composition": (
+                "Use first/last-frame key art: first frame shows cleaned brand plus VIP "
+                "and a strong mysterious entrance or boss-as-VFX-source hook; last frame "
+                "shows cleaned brand plus VIP and CTA in safe area."
+            ),
+            "avoid": [
+                "casino props",
+                "cash amounts",
+                "wallet or balance UI",
+                "guaranteed winning claims",
+                "ordinary game battle or upgrade UI",
+            ],
+        }
     if vertical == "ecommerce":
         return {
             "composition": "Show a realistic product scenario and one clear benefit cue.",
@@ -447,6 +672,27 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
             "middle": "Show progression, choice, or improvement.",
             "ending": "Resolve with reward, unlock, or next-action payoff.",
         }
+    if vertical == "gambling":
+        return {
+            "duration_adaptive": True,
+            "opening": (
+                "0-3s: brand and VIP are visible with a mysterious boss, gate, vault, "
+                "or fate-choice hook."
+            ),
+            "middle": (
+                "3-9s: no large text; Boss is a VFX source and entrance opener. "
+                "Combine 2-3 items from vfx_library into the main spectacle."
+            ),
+            "ending": (
+                "9-12s: resolve into cleaned brand plus VIP and CTA after the entrance opens."
+            ),
+            "forbidden_story_patterns": [
+                "no combat plot",
+                "no leveling",
+                "no equipment upgrade",
+                "no ordinary gameplay progression",
+            ],
+        }
     if vertical == "ecommerce":
         return {
             "duration_adaptive": True,
@@ -459,6 +705,29 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
         "opening": "Lead with the audience problem or routine moment.",
         "middle": "Show product use and visible value cue.",
         "ending": "Close with offer, proof, or clear next step.",
+    }
+
+
+def _gambling_creative_package() -> dict[str, Any]:
+    return {
+        "creative_package": "gambling_boss_portal_spectacle_package",
+        "visual_language": "boss_as_vfx_source_portal_unlock",
+        "core_formula": [
+            "boss_or_mysterious_entrance_arrival",
+            "boss_releases_godlike_vfx",
+            "world_distortion",
+            "portal_gate_or_vault_opens",
+            "cleaned_brand_vip_cta",
+        ],
+        "boss_matrix": GAMBLING_BOSS_MATRIX,
+        "scene_pool": GAMBLING_SCENE_POOL,
+        "cta_pool": GAMBLING_CTA_POOL,
+        "gambling_safety_rules": [
+            "Boss is a VFX source and entrance opener, not a combat character.",
+            "Do not show fighting, leveling, equipment upgrades, or gameplay UI progression.",
+            "Use curiosity, pressure, and entrance reveal instead of direct gambling mechanics.",
+            "Middle 3-9s must be built from 2-3 VFX library items.",
+        ],
     }
 
 
@@ -757,18 +1026,37 @@ def _compliance_guardrails(vertical: str) -> list[str]:
         "Avoid fake platform UI, fake endorsements, and unsupported proof.",
         "Keep claims aligned with provided landing page, brief, and work order context.",
     ]
-    if vertical == "game":
+    if vertical in {"game", "gambling"}:
         guardrails.extend(
             [
                 (
-                    "For game ads, keep rewards as in-game progress, level-up, unlock, "
-                    "or next-action feedback only."
+                    "Keep rewards as abstract progress, unlock, spectacle, or next-action "
+                    "feedback only."
                 ),
                 (
                     "Do not show or imply real-money gambling, deposit/recharge, "
                     "withdrawal, payout, cash value, wallet or balance UI, casino props, "
                     "slot machines, chips, roulette, dice, poker props, jackpot panels, "
                     "guaranteed winning, or guaranteed outcome claims."
+                ),
+            ]
+        )
+    if vertical == "gambling":
+        guardrails.extend(
+            [
+                (
+                    "Do not show cash amounts, Win Cash, Guaranteed Money, Guaranteed "
+                    "Win, withdrawal/recharge/balance UI, wallet panels, payout panels, "
+                    "casino tables, slot machines, dice, chips, roulette, or poker props."
+                ),
+                (
+                    "For gambling creative package, Boss is a VFX source and entrance "
+                    "opener only; avoid combat story, leveling, equipment, player upgrade, "
+                    "or standard gameplay progression."
+                ),
+                (
+                    "Use EPIC, LEGENDARY, BIG REWARD, Score, Points, Stars, or Power only "
+                    "as weak abstract feedback without cash value or outcome promises."
                 ),
             ]
         )

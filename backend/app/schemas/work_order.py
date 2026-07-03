@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from backend.app.schemas.common import TimestampedRead
 
 DeliveryFieldStatus = Literal["extracted", "suggested", "missing", "conflict"]
+WorkOrderType = Literal["ecommerce", "game", "gambling"]
 
 
 class WorkOrderDeliveryField(BaseModel):
@@ -41,6 +42,7 @@ class WorkOrderDeliveryExtractionRead(BaseModel):
 
 class WorkOrderCreate(BaseModel):
     raw_content: str = Field(min_length=1)
+    work_order_type: WorkOrderType | None = None
     reviewed_delivery_fields: dict = Field(default_factory=dict)
     llm_delivery_fields: dict = Field(default_factory=dict)
     metadata_json: dict = Field(default_factory=dict)

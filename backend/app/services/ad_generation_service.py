@@ -693,20 +693,29 @@ class AdGenerationService:
             extraction_source = "llm"
         llm_fields = extraction_data.get("fields") or {}
         reviewed_fields = _build_reviewed_fields(structured_fields, llm_fields)
+        work_order_type = _work_order_type(
+            _structured_value(structured_fields, "work_order_type")
+            or payload.metadata_json.get("work_order_type")
+        )
+        work_order_metadata = {
+            "source": "publishing_system",
+            "external_order_id": payload.external_order_id,
+            "structured_fields": structured_fields,
+            "extraction_review": extraction_data.get("review") or {},
+            "extraction_source": extraction_source,
+        }
+        if work_order_type:
+            work_order_metadata["work_order_type"] = work_order_type
+            work_order_metadata["work_order_type_source"] = "operator_confirmed"
 
         work_order = await self.work_orders.create_work_order(
             session,
             WorkOrderCreate(
                 raw_content=raw_content,
+                work_order_type=work_order_type,
                 reviewed_delivery_fields=reviewed_fields,
                 llm_delivery_fields=llm_fields,
-                metadata_json={
-                    "source": "publishing_system",
-                    "external_order_id": payload.external_order_id,
-                    "structured_fields": structured_fields,
-                    "extraction_review": extraction_data.get("review") or {},
-                    "extraction_source": extraction_source,
-                },
+                metadata_json=work_order_metadata,
             ),
         )
 
@@ -716,6 +725,7 @@ class AdGenerationService:
         creative_strategy = build_creative_strategy(
             {
                 "raw_content": raw_content,
+                "work_order_type": work_order_type,
                 "structured_fields": structured_fields,
                 "reviewed_fields": reviewed_fields,
                 "product_name": _structured_value(structured_fields, "product_name"),
@@ -750,6 +760,7 @@ class AdGenerationService:
                 metadata_json={
                     "source": "publishing_system",
                     "ad_generation_job_id": job.id,
+                    **({"work_order_type": work_order_type} if work_order_type else {}),
                     **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                 },
             ),
@@ -842,6 +853,7 @@ class AdGenerationService:
                 "workflow_stage": "fields_review",
                 "work_order_id": work_order.id,
                 "campaign_id": campaign.id,
+                **({"work_order_type": work_order_type} if work_order_type else {}),
                 "reviewed_delivery_fields": reviewed_fields,
                 "llm_extraction_review": extraction_data.get("review") or {},
                 "extraction_source": extraction_source,
@@ -1075,6 +1087,28 @@ def _first_value(value: Any) -> Any | None:
                 return value[key]
         return None
     return value
+
+
+def _work_order_type(value: Any) -> str | None:
+    raw = _text_or_none(_first_value(value))
+    if not raw:
+        return None
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "ecommerce": "ecommerce",
+        "e_commerce": "ecommerce",
+        "commerce": "ecommerce",
+        "shop": "ecommerce",
+        "game": "game",
+        "games": "game",
+        "gaming": "game",
+        "gambling": "gambling",
+        "gambling_like": "gambling",
+        "gambling_like_safe_game_ad": "gambling",
+        "casino_safe": "gambling",
+        "betting_safe": "gambling",
+    }
+    return aliases.get(normalized)
 
 
 def _normalize_structured_value(field_name: str, value: Any) -> Any:

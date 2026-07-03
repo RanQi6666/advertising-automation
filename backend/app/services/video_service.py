@@ -671,11 +671,13 @@ def _keyframe_brand_aaa_video_rules() -> str:
         "or cleaned brand name, plus a country-market strong visual character such as "
         "epic hero, king, warrior, bird-god-style boss, giant serpent boss, or stone "
         "guardian boss.\n"
-        "3-9s middle VFX rule: create high-impact 3A game-ad spectacle using coin "
-        "explosion effects, divine light descent, portal effects, jackpot-style "
-        "feedback, boss defeat, Score, Points, Stars, or Power rolling-number effects, "
-        "and slow-motion reward bursts. Keep the middle cinematic and intense; at most "
-        "keep a small brand logo.\n"
+        "3-9s middle VFX rule: VFX must be the main visual action, not a small garnish. "
+        "Create high-impact 3A game-ad spectacle using coin explosion effects, divine "
+        "light descent, portal effects, jackpot-style feedback, boss defeat, Score, "
+        "Points, Stars, or Power rolling-number effects, and slow-motion reward bursts. "
+        "Do not reduce 3-9s to ordinary path-choice gameplay, walking, simple ground "
+        "lights, or UI-like buttons. Keep the middle cinematic and intense; at most keep "
+        "a small brand logo.\n"
         "9-12s ending rule: strictly resolve into the last frame with visible brand "
         "logo or cleaned brand name, Start, Play Now, or Explore CTA, and a clean "
         "reward-resolution final CTA frame. Do not show cash amounts, real-money claims, "
@@ -773,9 +775,16 @@ def _legacy_creative_strategy_prompt_block(creative_strategy: dict) -> str:
 
 
 def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
-    vertical = _creative_safe_prompt_text(_strategy_vertical(creative_strategy))
+    vertical = _strategy_vertical(creative_strategy)
     market = creative_strategy.get("market_context")
     audience = creative_strategy.get("audience_lens")
+    brand_display = creative_strategy.get("brand_display")
+    creative_package = str(creative_strategy.get("creative_package") or "").strip()
+    text_policy = creative_strategy.get("text_brand_timing_policy")
+    middle_vfx_policy = creative_strategy.get("middle_vfx_policy")
+    vfx_library = creative_strategy.get("vfx_library")
+    boss_matrix = creative_strategy.get("boss_matrix")
+    cta_pool = creative_strategy.get("cta_pool")
     video_guidance = creative_strategy.get("video_guidance")
     market_game_style_pack = creative_strategy.get("market_game_style_pack")
     topic_plan = creative_strategy.get("topic_angle_plan")
@@ -783,6 +792,53 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
 
     lines = [f"creative_strategy: creative_strategy.v2 {vertical}".strip()]
     lines.append("Use this as duration-adaptive video direction; fit beats to duration_seconds.")
+    if creative_package:
+        lines.append(f"Creative package: {creative_package}")
+
+    if isinstance(brand_display, dict):
+        cleaned_brand = _creative_safe_prompt_text(str(brand_display.get("cleaned_brand") or ""))
+        digit_policy = _creative_safe_prompt_text(str(brand_display.get("digit_policy") or ""))
+        if cleaned_brand:
+            lines.append(f"Visible brand: {cleaned_brand}")
+        if digit_policy:
+            lines.append(f"Brand digit policy: {digit_policy}")
+
+    if isinstance(text_policy, dict):
+        allowed = _creative_safe_prompt_list(
+            _list_value(text_policy.get("text_allowed_windows"))[:3]
+        )
+        middle_window = _creative_safe_prompt_text(str(text_policy.get("middle_window") or ""))
+        middle_rule = _creative_safe_prompt_text(str(text_policy.get("middle_text_rule") or ""))
+        if allowed or middle_window or middle_rule:
+            allowed_text = " and ".join(allowed) if allowed else "0-3s and 9-12s"
+            lines.append(
+                "Text timing: use visible text and brand lockups only in "
+                f"{allowed_text}; {middle_window or '3-9s'} middle segment {middle_rule}."
+            )
+
+    if isinstance(middle_vfx_policy, dict):
+        window = _creative_safe_prompt_text(str(middle_vfx_policy.get("window") or "3-9s"))
+        count = _creative_safe_prompt_text(
+            str(middle_vfx_policy.get("required_vfx_count") or "2-3")
+        )
+        source = _creative_safe_prompt_text(str(middle_vfx_policy.get("source") or "vfx_library"))
+        rule = _creative_safe_prompt_text(str(middle_vfx_policy.get("rule") or ""))
+        lines.append(
+            f"Middle VFX policy: {window} must select {count} VFX library items "
+            f"from {source}; {rule}"
+        )
+
+    safe_vfx = _creative_safe_prompt_list(_list_value(vfx_library)[:10])
+    if safe_vfx:
+        lines.append(f"VFX library: {', '.join(safe_vfx)}")
+
+    boss_block = _boss_matrix_summary(boss_matrix)
+    if boss_block:
+        lines.append(boss_block)
+
+    safe_ctas = _creative_safe_prompt_list(_list_value(cta_pool)[:6])
+    if safe_ctas:
+        lines.append(f"CTA pool: {', '.join(safe_ctas)}")
 
     if isinstance(market, dict):
         country = _creative_safe_prompt_text(
@@ -855,9 +911,23 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
 
 def _strategy_vertical(creative_strategy: dict) -> str:
     vertical = str(creative_strategy.get("vertical") or "").strip().casefold()
+    if vertical == "gambling":
+        return "gambling"
     if vertical == "game":
         return "game"
     return "ecommerce"
+
+
+def _boss_matrix_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts: list[str] = []
+    for key, bosses in list(value.items())[:4]:
+        angle = _creative_safe_prompt_text(str(key))
+        safe_bosses = _creative_safe_prompt_list(_list_value(bosses)[:6])
+        if angle and safe_bosses:
+            parts.append(f"{angle}: {', '.join(safe_bosses)}")
+    return f"Boss matrix: {' | '.join(parts)}" if parts else ""
 
 
 def _country_style_pack_summary(value: Any) -> str:

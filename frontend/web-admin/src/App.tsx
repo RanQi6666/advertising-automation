@@ -118,6 +118,7 @@ import type {
   VideoStoryboardResponse,
   WorkOrderDeliveryExtraction,
   WorkOrderDeliveryField,
+  WorkOrderType,
 } from "./types/domain";
 
 type ViewKey =
@@ -141,6 +142,9 @@ type ErrorScope =
   | "tasks"
   | "performance"
   | "final";
+type DeliveryConfirmForm = ReviewedDeliveryFields & {
+  work_order_type: WorkOrderType;
+};
 type ReviewEntityType = "topic" | "copy_draft" | "creative_asset" | "video_asset";
 type ReviewDecision = "approved" | "rejected" | "needs_revision";
 type PerformanceQueueStatus = "pending" | "completed" | "exception";
@@ -254,6 +258,12 @@ const DELIVERY_COUNTRY_OPTIONS = [
   { label: "巴西", value: "巴西", code: "BR" },
   { label: "墨西哥", value: "墨西哥", code: "MX" },
 ] as const;
+
+const WORK_ORDER_TYPE_OPTIONS: Array<{ value: WorkOrderType; label: string; hint: string }> = [
+  { value: "ecommerce", label: "电商类", hint: "产品卖点、场景和转化信息。" },
+  { value: "game", label: "游戏类", hint: "游戏挑战、关卡和玩法展示。" },
+  { value: "gambling", label: "博彩类", hint: "专属视觉包：品牌 VIP、特效库爆点和安全表达。" },
+];
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof BarChart3 }> = [
   { key: "dashboard", label: "工作台", icon: BarChart3 },
@@ -419,7 +429,7 @@ function App() {
   const [deliveryExtractionCache, setDeliveryExtractionCache] =
     useState<DeliveryExtractionCacheEntry | null>(null);
   const [deliveryExtraction, setDeliveryExtraction] = useState<WorkOrderDeliveryExtraction | null>(null);
-  const [deliveryConfirmForm, setDeliveryConfirmForm] = useState<ReviewedDeliveryFields>(() =>
+  const [deliveryConfirmForm, setDeliveryConfirmForm] = useState<DeliveryConfirmForm>(() =>
     emptyReviewedDeliveryFields(),
   );
   const [deliveryConfirmOpen, setDeliveryConfirmOpen] = useState(false);
@@ -1771,7 +1781,7 @@ function App() {
 
   function openDeliveryConfirmation(extraction: WorkOrderDeliveryExtraction, rawContent: string) {
     setDeliveryExtraction(extraction);
-    setDeliveryConfirmForm(buildDeliveryConfirmForm(extraction));
+    setDeliveryConfirmForm(buildDeliveryConfirmForm(extraction, rawContent));
     setDeliveryConfirmRawContent(rawContent);
     setDeliveryConfirmOpen(true);
   }
@@ -1795,7 +1805,10 @@ function App() {
       () =>
         api.createAdGenerationJob({
           rawContent: deliveryConfirmRawContent || rawWorkOrder.trim(),
-          structuredFields: { ...reviewedFields },
+          structuredFields: {
+            ...reviewedFields,
+            work_order_type: deliveryConfirmForm.work_order_type,
+          },
           deliveryExtraction,
           externalOrderId: integrationParams.externalOrderId,
           returnUrl: integrationParams.returnUrl,
@@ -3778,6 +3791,9 @@ function App() {
           form={deliveryConfirmForm}
           loading={loading === "create-ad-generation"}
           onChange={(key, value) => setDeliveryConfirmForm((current) => ({ ...current, [key]: value }))}
+          onWorkOrderTypeChange={(value) =>
+            setDeliveryConfirmForm((current) => ({ ...current, work_order_type: value }))
+          }
           onConfirm={() => void handleConfirmCreateWorkOrder()}
           onCancel={handleCancelDeliveryConfirm}
         />
@@ -6167,14 +6183,16 @@ function DeliveryConfirmDialog({
   form,
   loading,
   onChange,
+  onWorkOrderTypeChange,
   onConfirm,
   onCancel,
 }: {
   open: boolean;
   extraction: WorkOrderDeliveryExtraction | null;
-  form: ReviewedDeliveryFields;
+  form: DeliveryConfirmForm;
   loading: boolean;
   onChange: (key: keyof ReviewedDeliveryFields, value: string) => void;
+  onWorkOrderTypeChange: (value: WorkOrderType) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -6189,6 +6207,23 @@ function DeliveryConfirmDialog({
           </button>
         </div>
         <div className="delivery-grid">
+          <label>
+            <span>工单类型</span>
+            <select
+              className="select"
+              value={form.work_order_type}
+              onChange={(event) => onWorkOrderTypeChange(event.target.value as WorkOrderType)}
+            >
+              {WORK_ORDER_TYPE_OPTIONS.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <small>
+              {WORK_ORDER_TYPE_OPTIONS.find((option) => option.value === form.work_order_type)?.hint}
+            </small>
+          </label>
           {(["landing_url", "event_name", "country", "age_min", "age_max", "gender", "audience_description_raw"] as Array<
             keyof ReviewedDeliveryFields
           >).map((key) => (
@@ -8434,7 +8469,7 @@ function hashWorkOrderContent(value: string): string {
   return `${value.length}-${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
 }
 
-function emptyReviewedDeliveryFields(): ReviewedDeliveryFields {
+function emptyReviewedDeliveryFields(): DeliveryConfirmForm {
   return {
     landing_url: "",
     event_name: DEFAULT_DELIVERY_EVENT_OPTION,
@@ -8443,10 +8478,14 @@ function emptyReviewedDeliveryFields(): ReviewedDeliveryFields {
     age_max: "",
     gender: "不限",
     audience_description_raw: "",
+    work_order_type: "ecommerce",
   };
 }
 
-function buildDeliveryConfirmForm(extraction: WorkOrderDeliveryExtraction): ReviewedDeliveryFields {
+function buildDeliveryConfirmForm(
+  extraction: WorkOrderDeliveryExtraction,
+  rawContent = "",
+): DeliveryConfirmForm {
   const fields = extraction.fields;
   return {
     landing_url: deliveryFieldDisplayText(fields.landing_url),
@@ -8456,10 +8495,33 @@ function buildDeliveryConfirmForm(extraction: WorkOrderDeliveryExtraction): Revi
     age_max: deliveryAgeText(fields.age_max),
     gender: normalizeGenderLabel(deliveryFieldDisplayText(fields.gender)),
     audience_description_raw: deliveryFieldDisplayText(fields.audience_description_raw),
+    work_order_type: inferWorkOrderType(rawContent, extraction),
   };
 }
 
-function validateDeliveryConfirmForm(form: ReviewedDeliveryFields): string | null {
+function inferWorkOrderType(
+  rawContent: string,
+  extraction: WorkOrderDeliveryExtraction | null,
+): WorkOrderType {
+  const fields = extraction?.fields;
+  const signalText = [
+    rawContent,
+    fields ? deliveryFieldDisplayText(fields.landing_url) : "",
+    fields ? deliveryFieldDisplayText(fields.event_name) : "",
+    fields ? deliveryFieldDisplayText(fields.audience_description_raw) : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  if (/(first[_\s-]?recharge|recharge|casino|betting|casino_safe|slot|gaja|vip)/.test(signalText)) {
+    return "gambling";
+  }
+  if (/(game|gaming|play|level|challenge|quest|puzzle|boss|rpg)/.test(signalText)) {
+    return "game";
+  }
+  return "ecommerce";
+}
+
+function validateDeliveryConfirmForm(form: DeliveryConfirmForm): string | null {
   if (!form.landing_url.trim()) return "请补充投放链接。";
   if (!isHttpUrl(form.landing_url.trim())) return "投放链接需要是 http 或 https 开头的完整链接。";
   if (!form.country.trim()) return "请确认投放国家。";
@@ -8467,7 +8529,7 @@ function validateDeliveryConfirmForm(form: ReviewedDeliveryFields): string | nul
   return null;
 }
 
-function normalizeReviewedDeliveryFields(form: ReviewedDeliveryFields): ReviewedDeliveryFields {
+function normalizeReviewedDeliveryFields(form: DeliveryConfirmForm): ReviewedDeliveryFields {
   return {
     landing_url: form.landing_url.trim(),
     event_name: normalizeEventLabel(form.event_name) || DEFAULT_DELIVERY_EVENT_OPTION,

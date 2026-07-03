@@ -568,6 +568,8 @@ def test_storyboard_prompt_includes_keyframe_brand_aaa_timing_rules() -> None:
         "or stone guardian boss"
     ) in prompt
     assert "3-9s middle VFX rule" in prompt
+    assert "VFX must be the main visual action" in prompt
+    assert "Do not reduce 3-9s to ordinary path-choice gameplay" in prompt
     assert "coin explosion effects" in prompt
     assert "divine light descent" in prompt
     assert "portal effects" in prompt
@@ -587,6 +589,8 @@ def test_direct_video_prompt_includes_keyframe_brand_aaa_timing_rules() -> None:
     assert result is not None
     assert "0-3s opening rule" in result
     assert "3-9s middle VFX rule" in result
+    assert "VFX must be the main visual action" in result
+    assert "Do not reduce 3-9s to ordinary path-choice gameplay" in result
     assert "coin explosion effects" in result
     assert "divine light descent" in result
     assert "portal effects" in result
@@ -651,6 +655,84 @@ def test_video_storyboard_text_prompt_requires_opening_brand_without_digits() ->
 
     assert "opening frame must show the project or product name" in prompt
     assert "remove digit characters from visible brand text" in prompt
+    assert "3-9s middle VFX rule" in prompt
+    assert "VFX must be the main visual action" in prompt
+    assert "Do not reduce 3-9s to ordinary path-choice gameplay" in prompt
+
+
+@pytest.mark.asyncio
+async def test_openai_video_storyboard_generation_prompt_requires_middle_vfx_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 3,
+                    "visual": "Opening GAJA boss hook.",
+                    "subtitle": "Start",
+                    "motion": "Push in.",
+                    "voiceover": "Start.",
+                    "source_asset_ids": [],
+                    "notes": "Safe hook.",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 3,
+                    "end_second": 9,
+                    "visual": "Middle VFX spectacle.",
+                    "subtitle": "Power Up",
+                    "motion": "Portal burst.",
+                    "voiceover": "Power up.",
+                    "source_asset_ids": [],
+                    "notes": "Safe VFX.",
+                },
+            ],
+            "rationale": "Use timed VFX rules.",
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    creative_strategy = build_game_creative_strategy(
+        {
+            "product_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118&register=true",
+            "country": "India",
+        }
+    )
+    campaign = Campaign(
+        id="campaign-1",
+        name="GAJA777 campaign",
+        product_name="GAJA777",
+        audience_description="India users",
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_video_storyboard(
+        campaign=campaign,
+        draft=None,
+        assets=[],
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        context={"creative_strategy": creative_strategy},
+        instructions=None,
+    )
+
+    system = captured["system"]
+    assert isinstance(system, str)
+    assert "0-3s opening rule" in system
+    assert "3-9s middle VFX rule" in system
+    assert "VFX must be the main visual action" in system
+    assert "Do not reduce 3-9s to ordinary path-choice gameplay" in system
+    assert "9-12s ending rule" in system
 
 
 def test_gaja_video_prompt_ignores_disabled_brand_template() -> None:
@@ -719,6 +801,46 @@ def test_video_storyboard_prompt_includes_v2_duration_adaptive_strategy() -> Non
     assert "12-second first/last-frame workflow" not in prompt
     assert "challenge_failure" in prompt
     assert "One strong hook, one payoff, one CTA." in prompt
+
+
+def test_video_storyboard_prompt_includes_gambling_vfx_library_policy() -> None:
+    creative_strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "product_name": "GAJA777",
+            "project_name": "GAJA777",
+            "landing_url": "https://www.gaja777.game/#/?invite=YBG71118",
+            "country": "India",
+            "event_name": "first_recharge",
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 12,
+                "visual": "Open on a forbidden gate and end on the brand.",
+                "subtitle": "ENTER NOW",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "creative_strategy: creative_strategy.v2 gambling" in prompt
+    assert "Creative package: gambling_boss_portal_spectacle_package" in prompt
+    assert "Visible brand: GAJA" in prompt
+    assert "Text timing: use visible text and brand lockups only in 0-3s and 9-12s" in prompt
+    assert "Middle VFX policy: 3-9s must select 2-3 VFX library items" in prompt
+    assert "golden_particle_explosion" in prompt
+    assert "divine_light_descent" in prompt
+    assert "portal_gate_opening" in prompt
+    assert "space_rupture" in prompt
+    assert "Boss matrix" in prompt
+    assert "sky_portal_pressure" in prompt
+    assert "dark_element_overload" in prompt
+    assert "ancient_guardian_unlock" in prompt
 
 
 def test_video_storyboard_prompt_defaults_missing_v2_vertical_to_ecommerce() -> None:

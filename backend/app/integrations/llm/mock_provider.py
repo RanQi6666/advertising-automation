@@ -1355,6 +1355,8 @@ def _mock_safe_strategy_values(value: Any, *, limit: int) -> list[str]:
 
 def _mock_strategy_vertical(creative_strategy: dict[str, Any]) -> str:
     vertical = str(creative_strategy.get("vertical") or "").strip().casefold()
+    if vertical == "gambling":
+        return "gambling"
     if vertical == "game":
         return "game"
     return "ecommerce"

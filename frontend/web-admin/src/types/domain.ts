@@ -56,6 +56,8 @@ export interface WorkOrderDeliveryExtraction {
   review: Record<string, unknown>;
 }
 
+export type WorkOrderType = "ecommerce" | "game" | "gambling";
+
 export interface ReviewedDeliveryFields {
   landing_url: string;
   event_name: string;

@@ -243,6 +243,65 @@ async def test_publishing_ad_generation_persists_generic_creative_strategy() -> 
 
 
 @pytest.mark.asyncio
+async def test_publishing_ad_generation_passes_work_order_type_to_gambling_strategy() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        service = AdGenerationService()
+        job = await service.create_job(
+            session,
+            PublishingAdGenerationJobCreate(
+                external_order_id="order-gambling-strategy",
+                work_order=PublishingWorkOrderPayload(
+                    raw_content=(
+                        "Project: GAJA777\n"
+                        "Country: India\n"
+                        "Audience: Male 18-45\n"
+                        "Event: first_recharge\n"
+                        "Landing: https://www.gaja777.game/#/?invite=YBG71118\n"
+                        "Brief: Make a premium spectacle ad."
+                    ),
+                    delivery_extraction=_delivery_extraction(),
+                    structured_fields={
+                        "product_name": "GAJA777",
+                        "project_name": "GAJA777",
+                        "country": "India",
+                        "landing_url": "https://www.gaja777.game/#/?invite=YBG71118",
+                        "event_name": "first_recharge",
+                        "audience_description_raw": "Male 18-45",
+                        "work_order_type": "gambling",
+                    },
+                ),
+            ),
+        )
+        completed = await service.process_job(session, job.id)
+        campaign = await session.get(
+            Campaign,
+            completed.result_payload["metadata_json"]["campaign_id"],
+        )
+        work_order = await session.get(
+            WorkOrder,
+            completed.result_payload["metadata_json"]["work_order_id"],
+        )
+
+    assert campaign is not None
+    assert work_order is not None
+    assert work_order.metadata_json["work_order_type"] == "gambling"
+    assert work_order.metadata_json["work_order_type_source"] == "operator_confirmed"
+    strategy = campaign.metadata_json["creative_strategy"]
+    assert strategy["vertical"] == "gambling"
+    assert strategy["creative_package"] == "gambling_boss_portal_spectacle_package"
+    assert strategy["brand_display"]["cleaned_brand"] == "GAJA"
+    assert completed.result_payload["metadata_json"]["work_order_type"] == "gambling"
+    assert completed.result_payload["metadata_json"]["creative_strategy"]["vertical"] == "gambling"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publishing_ad_generation_result_endpoint_requires_returned_status(
     tmp_path,
 ) -> None:

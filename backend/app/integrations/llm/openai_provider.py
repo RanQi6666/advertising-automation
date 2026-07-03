@@ -402,6 +402,8 @@ class OpenAILLMProvider:
                 "the target audience language. "
                 + creative_safety_prompt_block()
                 + "\n\n"
+                + _keyframe_brand_aaa_video_storyboard_rules()
+                + "\n\n"
                 + _creative_strategy_system_instruction()
                 + "\n\n"
                 + language_requirements_prompt()
@@ -525,6 +527,8 @@ class OpenAILLMProvider:
                 "rationale may use Simplified Chinese for operator review, but any visible "
                 "text requested in visual must use the target audience language. "
                 + creative_safety_prompt_block()
+                + "\n\n"
+                + _keyframe_brand_aaa_video_storyboard_rules()
                 + "\n\n"
                 + _creative_strategy_system_instruction()
                 + "\n\n"
@@ -652,16 +656,53 @@ def _keyframe_brand_aaa_image_rules() -> str:
     return (
         "\n\n"
         "Keyframe brand and 3A image rules: "
+        "for every work-order type, use first-frame and last-frame images to carry "
+        "the main visible text, brand lockup, logo, VIP when required, and CTA; "
+        "the middle video segment should be planned as visual spectacle rather than "
+        "text display. "
         "first_frame image rule: show the visible brand logo or cleaned brand name "
-        "without numeric suffix, and feature a country-market strong visual character: "
+        "without numeric suffix plus a visible VIP mark directly under the cleaned "
+        "brand name, and feature a country-market strong visual character: "
         "epic hero, king, warrior, bird-god-style boss, giant serpent boss, or stone "
         "guardian boss. Use a cinematic 3A opening composition with portal light, "
         "golden divine light, storm clouds, particles, and high-pressure boss "
-        "confrontation. "
+        "confrontation. Use complete full-frame composition: the hero/boss, logo, "
+        "VIP mark, CTA, and any visible text must stay fully inside the safe area, "
+        "must not touch image edges, and must not be cropped. "
         "last_frame image rule: return to a clear branded CTA end frame with the visible "
         "brand logo or cleaned brand name, Start, Play Now, or Explore, and a clean "
-        "reward-resolution layout. Do not render brand-number text, cash amounts, "
-        "withdrawal/recharge/balance UI, or guaranteed winning claims."
+        "reward-resolution layout. Keep the brand/VIP/CTA lockup centered or upper-middle "
+        "with clear margins; never place it on the bottom edge. Do not render "
+        "brand-number text, cash amounts, withdrawal/recharge/balance UI, or guaranteed "
+        "winning claims."
+    )
+
+
+def _keyframe_brand_aaa_video_storyboard_rules() -> str:
+    return (
+        "Keyframe brand and 3A storyboard timing rules:\n"
+        "0-3s opening rule: write the first scene as a premium 3A hook continuing the "
+        "first frame; place the main text, visible brand logo or cleaned brand name, "
+        "VIP when required, and short hook here with an epic hero, "
+        "king, warrior, bird-god-style boss, giant serpent boss, or stone guardian boss.\n"
+        "3-9s middle VFX rule: VFX must be the main visual action, not a small garnish. "
+        "Select 2-3 VFX library items whenever creative_strategy.middle_vfx_policy or "
+        "creative_strategy.vfx_library is present. Use safe 3A spectacle beats: "
+        "portal burst, golden divine "
+        "light descent, screen-shake particle shockwave, boss-defeat energy break, "
+        "jackpot-style feedback without money claims, Score/Points/Stars/Power rolling "
+        "number effects, and slow-motion reward burst. Keep 3-9s mostly text-free: "
+        "no captions, no large text, no numbers except safe Score/Points/Stars/Power "
+        "effects, and no UI panels; at most use one tiny brand mark. Do not reduce "
+        "3-9s to ordinary "
+        "path-choice gameplay, walking, simple ground lights, or UI-like buttons. For "
+        "gambling-like work orders, keep the effects premium and abstract: avoid cash "
+        "amounts, real-money wording, withdrawal/recharge/balance UI, cards, dice, slot "
+        "machines, casino tables, and guaranteed-win language.\n"
+        "9-12s ending rule: resolve into the last frame with visible brand logo or "
+        "cleaned brand name, VIP when required, Start, Play Now, or Explore CTA, "
+        "and a stable branded end "
+        "frame. Keep brand, VIP, and CTA inside the safe area."
     )
 
 
@@ -881,6 +922,8 @@ def _video_storyboard_text_system_prompt(revision: bool) -> str:
         "but any visible text requested in the video must use the target audience language. "
         + creative_safety_prompt_block()
         + "\n\n"
+        + _keyframe_brand_aaa_video_storyboard_rules()
+        + "\n\n"
         + _creative_strategy_system_instruction()
         + "\n\n"
         + language_requirements_prompt()
@@ -898,6 +941,18 @@ def _creative_strategy_system_instruction() -> str:
         "schema allows it. For copy, image, storyboard, and video, follow "
         "market_context, audience_lens, copy_guidance, image_guidance, "
         "video_guidance, market_game_style_pack, and compliance_guardrails. If "
+        "text_brand_timing_policy is present, keep visible text, brand lockups, "
+        "logo, VIP, and CTA concentrated in 0-3s and 9-12s; the 3-9s middle "
+        "segment should have no captions, no large text, no numbers, and no UI "
+        "panels except an optional tiny brand mark. If middle_vfx_policy is "
+        "present, the 3-9s middle segment must select 2-3 VFX library items as "
+        "the main action; do not replace the VFX library with generic cinematic "
+        "wording. If creative_package is gambling_boss_portal_spectacle_package, "
+        "Boss is a VFX source and entrance opener, not a combat, leveling, "
+        "equipment, or gameplay progression character. For that package, follow "
+        "boss_matrix, scene_pool, vfx_library, cta_pool, and gambling_safety_rules: "
+        "show boss or mysterious entrance arrival, godlike VFX release, world "
+        "distortion, portal/gate/vault opening, then cleaned brand plus VIP and CTA. If "
         "market_game_style_pack is present, use it as mandatory internal game creative "
         "direction for topic angles, copy hooks, image briefs, storyboard scenes, and "
         "video prompts: adapt the visual world, abstract AAA-style genre archetypes, "

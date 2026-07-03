@@ -93,6 +93,19 @@ def test_openai_creative_strategy_instruction_does_not_force_gaja_lobby_style() 
     assert "dark neon app lobby" not in instruction
 
 
+def test_openai_creative_strategy_instruction_requires_global_text_timing_and_vfx_library() -> None:
+    instruction = _creative_strategy_system_instruction()
+
+    assert "text_brand_timing_policy" in instruction
+    assert "0-3s and 9-12s" in instruction
+    assert "3-9s middle segment" in instruction
+    assert "middle_vfx_policy" in instruction
+    assert "select 2-3 VFX library items" in instruction
+    assert "gambling_boss_portal_spectacle_package" in instruction
+    assert "Boss is a VFX source and entrance opener" in instruction
+    assert "not a combat, leveling, equipment, or gameplay progression character" in instruction
+
+
 def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> None:
     prompt = _prompt_from_brief(
         ImageBrief(
@@ -123,6 +136,28 @@ def test_volcengine_image_prompt_is_platform_neutral_and_blocks_ui_chrome() -> N
     assert "Visible text hard ban" in prompt
     assert "Game creative safety" in prompt
     assert "provided product or brand name" in prompt
+
+
+def test_volcengine_image_prompt_keeps_brand_vip_and_cta_inside_safe_area() -> None:
+    prompt = _prompt_from_brief(
+        ImageBrief(
+            image_index=1,
+            title="GAJA keyframe hook",
+            short_text="GAJA",
+            visual_direction=(
+                "first_frame image rule: show a royal fantasy boss scene with the "
+                "GAJA brand lockup and VIP mark."
+            ),
+            size="9:16",
+        )
+    )
+
+    assert "Full-frame composition" in prompt
+    assert "logo, VIP mark, CTA" in prompt
+    assert "inside the central safe area" in prompt
+    assert "must not be cropped" in prompt
+    assert "place VIP directly under the cleaned brand name" in prompt
+    assert "Do not place brand text, VIP, or CTA at the bottom edge" in prompt
 
 
 @pytest.mark.asyncio
@@ -279,6 +314,9 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
     assert "metallic GAJA game hub" in system
     assert "no visible brand-number text" in system
     assert "first_frame image rule" in system
+    assert "visible VIP mark directly under the cleaned brand name" in system
+    assert "complete full-frame composition" in system
+    assert "must stay fully inside the safe area" in system
     assert (
         "epic hero, king, warrior, bird-god-style boss, giant serpent boss, "
         "or stone guardian boss"

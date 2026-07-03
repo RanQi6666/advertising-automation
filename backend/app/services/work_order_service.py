@@ -100,11 +100,23 @@ class WorkOrderService:
         parsed_fields = parse_work_order_text(payload.raw_content)
         reviewed_fields = payload.reviewed_delivery_fields or {}
         llm_fields = payload.llm_delivery_fields or {}
+        work_order_type = _normalize_work_order_type(
+            payload.work_order_type
+            or (payload.metadata_json or {}).get("work_order_type")
+            or _nested_metadata_value(
+                (payload.metadata_json or {}).get("structured_fields"),
+                "work_order_type",
+            )
+            or reviewed_fields.get("work_order_type")
+        )
         metadata_json = {
             **(payload.metadata_json or {}),
             "llm_delivery_fields": llm_fields,
             "reviewed_delivery_fields": reviewed_fields,
         }
+        if work_order_type:
+            metadata_json["work_order_type"] = work_order_type
+            metadata_json.setdefault("work_order_type_source", "operator_confirmed")
         reviewed_landing_url = _reviewed_text(reviewed_fields, "landing_url")
         reviewed_event_name = _reviewed_text(reviewed_fields, "event_name")
         reviewed_country = _reviewed_text(reviewed_fields, "country")
@@ -417,6 +429,46 @@ def _normalize_gender(gender: str | None) -> str:
     if gender == "女":
         return "female"
     return "all"
+
+
+def _normalize_work_order_type(value: object) -> str | None:
+    if isinstance(value, dict):
+        for key in ("normalized_value", "value", "code", "id", "label", "name"):
+            normalized = _normalize_work_order_type(value.get(key))
+            if normalized:
+                return normalized
+        return None
+    text = _optional_text(value)
+    if not text:
+        return None
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "ecommerce": "ecommerce",
+        "e_commerce": "ecommerce",
+        "commerce": "ecommerce",
+        "shop": "ecommerce",
+        "game": "game",
+        "games": "game",
+        "gaming": "game",
+        "gambling": "gambling",
+        "gambling_like": "gambling",
+        "gambling_like_safe_game_ad": "gambling",
+        "casino_safe": "gambling",
+        "betting_safe": "gambling",
+    }
+    return aliases.get(normalized)
+
+
+def _nested_metadata_value(value: object, target_key: str) -> object | None:
+    if not isinstance(value, dict):
+        return None
+    for key, item in value.items():
+        if str(key).casefold() == target_key.casefold():
+            return item
+        nested = _nested_metadata_value(item, target_key)
+        if nested not in (None, ""):
+            return nested
+    return None
 
 
 def _find_audience_raw(
