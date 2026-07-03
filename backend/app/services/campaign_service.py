@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models.brand import Brand
@@ -7,6 +7,7 @@ from backend.app.db.models.client import Client
 from backend.app.db.models.work_order import WorkOrder
 from backend.app.schemas.campaign import BrandCreate, CampaignCreate, ClientCreate
 from backend.app.schemas.work_order import CampaignFromWorkOrderRequest
+from backend.app.services.external_sources import EXTERNAL_PLACEHOLDER_CAMPAIGN_SOURCES
 from backend.app.services.utils import get_required
 
 
@@ -96,8 +97,13 @@ class CampaignService:
     async def list_campaigns(
         self, session: AsyncSession, limit: int, offset: int
     ) -> list[Campaign]:
+        source = Campaign.metadata_json["source"].as_string()
         result = await session.execute(
-            select(Campaign).order_by(Campaign.created_at.desc()).limit(limit).offset(offset)
+            select(Campaign)
+            .where(or_(source.is_(None), source.not_in(EXTERNAL_PLACEHOLDER_CAMPAIGN_SOURCES)))
+            .order_by(Campaign.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
