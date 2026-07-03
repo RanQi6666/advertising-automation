@@ -432,6 +432,7 @@ function App() {
   const [deliveryConfirmForm, setDeliveryConfirmForm] = useState<DeliveryConfirmForm>(() =>
     emptyReviewedDeliveryFields(),
   );
+  const [workOrderTypeTouched, setWorkOrderTypeTouched] = useState(false);
   const [deliveryConfirmOpen, setDeliveryConfirmOpen] = useState(false);
   const [deliveryConfirmRawContent, setDeliveryConfirmRawContent] = useState("");
 
@@ -1743,9 +1744,29 @@ function App() {
     if (!sample) return;
     setSelectedSampleWorkOrderId(sample.id);
     setRawWorkOrder(sample.content);
+    setWorkOrderTypeTouched(false);
+    setDeliveryConfirmForm((current) => ({
+      ...current,
+      work_order_type: inferWorkOrderType(sample.content, null),
+    }));
     setDeliveryExtraction(null);
     setDeliveryConfirmRawContent("");
     setDeliveryConfirmOpen(false);
+  }
+
+  function handleRawWorkOrderChange(value: string) {
+    setRawWorkOrder(value);
+    if (!workOrderTypeTouched) {
+      setDeliveryConfirmForm((current) => ({
+        ...current,
+        work_order_type: inferWorkOrderType(value, null),
+      }));
+    }
+  }
+
+  function handleWorkOrderTypeChange(value: WorkOrderType) {
+    setWorkOrderTypeTouched(true);
+    setDeliveryConfirmForm((current) => ({ ...current, work_order_type: value }));
   }
 
   async function handleCreateWorkOrder() {
@@ -1781,7 +1802,11 @@ function App() {
 
   function openDeliveryConfirmation(extraction: WorkOrderDeliveryExtraction, rawContent: string) {
     setDeliveryExtraction(extraction);
-    setDeliveryConfirmForm(buildDeliveryConfirmForm(extraction, rawContent));
+    const extractedForm = buildDeliveryConfirmForm(extraction, rawContent);
+    setDeliveryConfirmForm((current) => ({
+      ...extractedForm,
+      work_order_type: workOrderTypeTouched ? current.work_order_type : extractedForm.work_order_type,
+    }));
     setDeliveryConfirmRawContent(rawContent);
     setDeliveryConfirmOpen(true);
   }
@@ -3629,7 +3654,9 @@ function App() {
         {activeView === "work-orders" && (
           <WorkOrdersView
             rawWorkOrder={rawWorkOrder}
-            setRawWorkOrder={setRawWorkOrder}
+            setRawWorkOrder={handleRawWorkOrderChange}
+            workOrderType={deliveryConfirmForm.work_order_type}
+            onWorkOrderTypeChange={handleWorkOrderTypeChange}
             sampleWorkOrders={sampleWorkOrders}
             selectedSampleWorkOrderId={selectedSampleWorkOrderId}
             onSelectSampleWorkOrder={handleSelectSampleWorkOrder}
@@ -3791,9 +3818,7 @@ function App() {
           form={deliveryConfirmForm}
           loading={loading === "create-ad-generation"}
           onChange={(key, value) => setDeliveryConfirmForm((current) => ({ ...current, [key]: value }))}
-          onWorkOrderTypeChange={(value) =>
-            setDeliveryConfirmForm((current) => ({ ...current, work_order_type: value }))
-          }
+          onWorkOrderTypeChange={handleWorkOrderTypeChange}
           onConfirm={() => void handleConfirmCreateWorkOrder()}
           onCancel={handleCancelDeliveryConfirm}
         />
@@ -4077,6 +4102,8 @@ function MessageCenter({
 function WorkOrdersView({
   rawWorkOrder,
   setRawWorkOrder,
+  workOrderType,
+  onWorkOrderTypeChange,
   sampleWorkOrders,
   selectedSampleWorkOrderId,
   onSelectSampleWorkOrder,
@@ -4091,6 +4118,8 @@ function WorkOrdersView({
 }: {
   rawWorkOrder: string;
   setRawWorkOrder: (value: string) => void;
+  workOrderType: WorkOrderType;
+  onWorkOrderTypeChange: (value: WorkOrderType) => void;
   sampleWorkOrders: readonly SampleWorkOrderOption[];
   selectedSampleWorkOrderId: string;
   onSelectSampleWorkOrder: (sampleId: string) => void;
@@ -4120,20 +4149,38 @@ function WorkOrdersView({
             <span>{createButtonLabel}</span>
           </button>
         </div>
-        <div className="work-order-template-row">
-          <label htmlFor="sample-work-order">测试工单</label>
-          <select
-            id="sample-work-order"
-            className="select work-order-template-select"
-            value={selectedSampleWorkOrderId}
-            onChange={(event) => onSelectSampleWorkOrder(event.target.value)}
-          >
-            {sampleWorkOrders.map((sample) => (
-              <option key={sample.id} value={sample.id}>
-                {sample.label}
-              </option>
-            ))}
-          </select>
+        <div className="work-order-create-controls">
+          <div className="work-order-type-row">
+            <label htmlFor="work-order-type">工单类型</label>
+            <select
+              id="work-order-type"
+              className="select work-order-type-select"
+              value={workOrderType}
+              onChange={(event) => onWorkOrderTypeChange(event.target.value as WorkOrderType)}
+            >
+              {WORK_ORDER_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <small>{WORK_ORDER_TYPE_OPTIONS.find((option) => option.value === workOrderType)?.hint}</small>
+          </div>
+          <div className="work-order-template-row">
+            <label htmlFor="sample-work-order">测试工单</label>
+            <select
+              id="sample-work-order"
+              className="select work-order-template-select"
+              value={selectedSampleWorkOrderId}
+              onChange={(event) => onSelectSampleWorkOrder(event.target.value)}
+            >
+              {sampleWorkOrders.map((sample) => (
+                <option key={sample.id} value={sample.id}>
+                  {sample.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         <textarea
           className="work-order-input"

@@ -515,6 +515,17 @@ test("media-heavy previews defer offscreen images and large video downloads", ()
   assert.match(appSource, /preload="metadata"/);
 });
 
+test("work order creation page exposes work order type selector before confirmation", () => {
+  const workOrdersSource = componentSource("WorkOrdersView", "DeliveryConfirmDialog");
+
+  assert.match(workOrdersSource, /workOrderType/);
+  assert.match(workOrdersSource, /onWorkOrderTypeChange/);
+  assert.match(workOrdersSource, /className="work-order-type-row"/);
+  assert.match(workOrdersSource, /value=\{workOrderType\}/);
+  assert.match(workOrdersSource, /WORK_ORDER_TYPE_OPTIONS\.map/);
+  assert.match(workOrdersSource, /WORK_ORDER_TYPE_OPTIONS\.find/);
+});
+
 test("video keyframe image previews preserve full vertical frames", () => {
   assert.match(appSource, /function imagePreviewClassName\(asset: CreativeAsset\)/);
   assert.match(appSource, /isKeyframeVariantAsset\(asset\)/);

@@ -1939,23 +1939,43 @@ input:focus-visible {
   color: #94a3b8;
 }
 
-.work-order-template-row {
+.work-order-create-controls {
   display: grid;
-  grid-template-columns: 96px minmax(0, 260px);
-  gap: 10px;
-  align-items: center;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+  gap: 12px;
   width: calc(100% - 28px);
   margin: 14px 14px 0;
 }
 
+.work-order-type-row,
+.work-order-template-row {
+  display: grid;
+  gap: 6px;
+}
+
+.work-order-type-row label,
 .work-order-template-row label {
   color: var(--muted);
   font-size: 12px;
   font-weight: 820;
 }
 
+.work-order-type-row small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.work-order-type-select,
 .work-order-template-select {
   width: 100%;
+  max-width: none;
+}
+
+@media (max-width: 720px) {
+  .work-order-create-controls {
+    grid-template-columns: 1fr;
+  }
 }
 
 .work-order-input,
