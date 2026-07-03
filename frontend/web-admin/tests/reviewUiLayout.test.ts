@@ -515,6 +515,15 @@ test("media-heavy previews defer offscreen images and large video downloads", ()
   assert.match(appSource, /preload="metadata"/);
 });
 
+test("video keyframe image previews preserve full vertical frames", () => {
+  assert.match(appSource, /function imagePreviewClassName\(asset: CreativeAsset\)/);
+  assert.match(appSource, /isKeyframeVariantAsset\(asset\)/);
+  assert.match(appSource, /"asset-image keyframe-image"/);
+  assert.match(stylesSource, /\.asset-image\.keyframe-image\s*\{/);
+  assert.match(stylesSource, /aspect-ratio:\s*9\s*\/\s*16/);
+  assert.match(stylesSource, /object-fit:\s*contain/);
+});
+
 test("heavy media and task components are memoized and list calculations are cached", () => {
   assert.match(appSource, /const CreativeSlotCard = React\.memo\(function CreativeSlotCard/);
   assert.match(appSource, /const CreativeAssetMiniCard = React\.memo\(function CreativeAssetMiniCard/);

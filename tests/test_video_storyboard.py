@@ -829,7 +829,7 @@ def test_video_storyboard_prompt_includes_gambling_vfx_library_policy() -> None:
     )
 
     assert "creative_strategy: creative_strategy.v2 gambling" in prompt
-    assert "Creative package: gambling_boss_portal_spectacle_package" in prompt
+    assert "Creative package: gambling_vfx_spectacle_package" in prompt
     assert "Visible brand: GAJA" in prompt
     assert "Text timing: use visible text and brand lockups only in 0-3s and 9-12s" in prompt
     assert "Middle VFX policy: 3-9s must select 2-3 VFX library items" in prompt
@@ -838,9 +838,18 @@ def test_video_storyboard_prompt_includes_gambling_vfx_library_policy() -> None:
     assert "portal_gate_opening" in prompt
     assert "space_rupture" in prompt
     assert "Boss matrix" in prompt
-    assert "sky_portal_pressure" in prompt
+    assert "sky_rupture_spectacle" in prompt
     assert "dark_element_overload" in prompt
-    assert "ancient_guardian_unlock" in prompt
+    assert "ancient_power_awakening" in prompt
+    assert "Reveal mechanisms:" in prompt
+    assert "sky_rupture" in prompt
+    assert "energy_throne" in prompt
+    assert "abstract_power_vortex" in prompt
+    assert "at most one variant may use a physical door/gate/portal/vault composition" in prompt
+    assert (
+        "Do not default every gambling creative to a physical door, gate, portal, or vault"
+        in prompt
+    )
 
 
 def test_video_storyboard_prompt_defaults_missing_v2_vertical_to_ecommerce() -> None:

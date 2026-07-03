@@ -8008,6 +8008,13 @@ function areaLabel(value: string): string {
   return labels[value] ?? value;
 }
 
+function imagePreviewClassName(asset: CreativeAsset): string {
+  if (isKeyframeVariantAsset(asset) || mediaPreviewAspectClass(asset.size) === "portrait") {
+    return "asset-image keyframe-image";
+  }
+  return "asset-image";
+}
+
 const ImagePreview = React.memo(function ImagePreview({ asset }: { asset: CreativeAsset }) {
   if (!asset.url) {
     return (
@@ -8019,7 +8026,7 @@ const ImagePreview = React.memo(function ImagePreview({ asset }: { asset: Creati
   }
   return (
     <img
-      className="asset-image"
+      className={imagePreviewClassName(asset)}
       src={displayAssetUrl(asset.url)}
       alt={asset.alt_text || "creative"}
       loading="lazy"

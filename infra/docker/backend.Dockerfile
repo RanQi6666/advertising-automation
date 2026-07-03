@@ -12,8 +12,8 @@ WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./
 COPY backend ./backend
 
-RUN python -m pip install --upgrade pip \
-    && python -m pip install .
+RUN python -m pip install --upgrade pip --retries 10 --timeout 60 --resume-retries 10 \
+    && python -m pip install --retries 10 --timeout 60 --resume-retries 10 .
 
 EXPOSE 8001
 

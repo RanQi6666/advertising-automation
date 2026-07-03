@@ -103,7 +103,10 @@ def test_builds_operator_selected_gambling_strategy_with_vfx_library_policy() ->
 
     assert strategy["schema_version"] == "creative_strategy.v2"
     assert strategy["vertical"] == "gambling"
-    assert strategy["creative_package"] == "gambling_boss_portal_spectacle_package"
+    assert strategy["creative_package"] == "gambling_vfx_spectacle_package"
+    assert strategy["visual_language"] == "boss_or_mysterious_energy_source_as_vfx_driver"
+    assert "mystery_reveal_climax" in strategy["core_formula"]
+    assert "portal_gate_or_vault_opens" not in strategy["core_formula"]
     assert strategy["classification"]["method"] == "operator_selected"
     assert strategy["brand_display"]["source_name"] == "GAJA777"
     assert strategy["brand_display"]["cleaned_brand"] == "GAJA"
@@ -121,16 +124,28 @@ def test_builds_operator_selected_gambling_strategy_with_vfx_library_policy() ->
     assert "not generic cinematic wording" in strategy["middle_vfx_policy"]["rule"]
 
     assert {item["angle_type"] for item in strategy["topic_angle_plan"]} == {
-        "sky_portal_pressure",
+        "sky_rupture_spectacle",
         "dark_element_overload",
-        "ancient_guardian_unlock",
+        "ancient_power_awakening",
     }
     assert {item["angle_type"] for item in strategy["topic_angle_plan"]}.isdisjoint(
         {"challenge_failure", "comeback_growth", "reward_burst"}
     )
-    assert "bird_god" in strategy["boss_matrix"]["sky_portal_pressure"]
+    assert "bird_god" in strategy["boss_matrix"]["sky_rupture_spectacle"]
     assert "six_armed_overlord" in strategy["boss_matrix"]["dark_element_overload"]
-    assert "serpent_guardian" in strategy["boss_matrix"]["ancient_guardian_unlock"]
+    assert "serpent_guardian" in strategy["boss_matrix"]["ancient_power_awakening"]
+    assert {
+        "sky_rupture",
+        "storm_eye",
+        "energy_throne",
+        "crystal_core",
+        "golden_light_column",
+        "ancient_seal_awakening",
+        "abstract_power_vortex",
+    } <= set(strategy["reveal_mechanism_pool"])
+    assert "forbidden_gate" not in strategy["scene_pool"]
+    assert "sealed_vault" not in strategy["scene_pool"]
+    assert "at most one of the three gambling variants" in strategy["reveal_diversity_rule"]
     assert {
         "golden_particle_explosion",
         "divine_light_descent",

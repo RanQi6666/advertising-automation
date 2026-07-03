@@ -101,8 +101,17 @@ def test_openai_creative_strategy_instruction_requires_global_text_timing_and_vf
     assert "3-9s middle segment" in instruction
     assert "middle_vfx_policy" in instruction
     assert "select 2-3 VFX library items" in instruction
-    assert "gambling_boss_portal_spectacle_package" in instruction
-    assert "Boss is a VFX source and entrance opener" in instruction
+    assert "gambling_vfx_spectacle_package" in instruction
+    assert "Boss or mysterious energy source is a VFX driver" in instruction
+    assert (
+        "Do not default every gambling creative to a physical door, gate, portal, or vault"
+        in instruction
+    )
+    assert (
+        "at most one variant may use a physical door/gate/portal/vault composition"
+        in instruction
+    )
+    assert "portal/gate/vault opening" not in instruction
     assert "not a combat, leveling, equipment, or gameplay progression character" in instruction
 
 
@@ -317,6 +326,10 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
     assert "visible VIP mark directly under the cleaned brand name" in system
     assert "complete full-frame composition" in system
     assert "must stay fully inside the safe area" in system
+    assert "Large cinematic brand typography is allowed" in system
+    assert "safe text zone begins at least 10% below the top edge" in system
+    assert "brand/VIP/CTA lockup above 45% image height" in system
+    assert "oversized masthead typography" not in system
     assert (
         "epic hero, king, warrior, bird-god-style boss, giant serpent boss, "
         "or stone guardian boss"

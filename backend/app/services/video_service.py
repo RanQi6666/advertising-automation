@@ -784,6 +784,8 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     middle_vfx_policy = creative_strategy.get("middle_vfx_policy")
     vfx_library = creative_strategy.get("vfx_library")
     boss_matrix = creative_strategy.get("boss_matrix")
+    reveal_mechanism_pool = creative_strategy.get("reveal_mechanism_pool")
+    reveal_diversity_rule = creative_strategy.get("reveal_diversity_rule")
     cta_pool = creative_strategy.get("cta_pool")
     video_guidance = creative_strategy.get("video_guidance")
     market_game_style_pack = creative_strategy.get("market_game_style_pack")
@@ -794,6 +796,12 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     lines.append("Use this as duration-adaptive video direction; fit beats to duration_seconds.")
     if creative_package:
         lines.append(f"Creative package: {creative_package}")
+    if creative_package == "gambling_vfx_spectacle_package":
+        lines.append(
+            "Gambling reveal diversity: Do not default every gambling creative to a "
+            "physical door, gate, portal, or vault; at most one variant may use a "
+            "physical door/gate/portal/vault composition."
+        )
 
     if isinstance(brand_display, dict):
         cleaned_brand = _creative_safe_prompt_text(str(brand_display.get("cleaned_brand") or ""))
@@ -835,6 +843,15 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     boss_block = _boss_matrix_summary(boss_matrix)
     if boss_block:
         lines.append(boss_block)
+
+    safe_reveals = _creative_safe_prompt_list(_list_value(reveal_mechanism_pool)[:10])
+    if safe_reveals:
+        lines.append(f"Reveal mechanisms: {', '.join(safe_reveals)}")
+
+    if isinstance(reveal_diversity_rule, str) and reveal_diversity_rule.strip():
+        safe_reveal_rule = _creative_safe_prompt_text(reveal_diversity_rule)
+        if safe_reveal_rule:
+            lines.append(f"Reveal diversity rule: {safe_reveal_rule}")
 
     safe_ctas = _creative_safe_prompt_list(_list_value(cta_pool)[:6])
     if safe_ctas:

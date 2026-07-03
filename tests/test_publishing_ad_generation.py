@@ -293,7 +293,7 @@ async def test_publishing_ad_generation_passes_work_order_type_to_gambling_strat
     assert work_order.metadata_json["work_order_type_source"] == "operator_confirmed"
     strategy = campaign.metadata_json["creative_strategy"]
     assert strategy["vertical"] == "gambling"
-    assert strategy["creative_package"] == "gambling_boss_portal_spectacle_package"
+    assert strategy["creative_package"] == "gambling_vfx_spectacle_package"
     assert strategy["brand_display"]["cleaned_brand"] == "GAJA"
     assert completed.result_payload["metadata_json"]["work_order_type"] == "gambling"
     assert completed.result_payload["metadata_json"]["creative_strategy"]["vertical"] == "gambling"

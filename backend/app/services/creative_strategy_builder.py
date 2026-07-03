@@ -71,13 +71,13 @@ VFX_LIBRARY = [
     "score_points_stars_power_roll",
 ]
 GAMBLING_BOSS_MATRIX = {
-    "sky_portal_pressure": [
+    "sky_rupture_spectacle": [
         "bird_god",
         "phoenix_king",
         "storm_bird_king",
         "dragon_descendant_lord",
         "four_wing_monarch",
-        "golden_wing_gatekeeper",
+        "golden_wing_sky_lord",
     ],
     "dark_element_overload": [
         "six_armed_overlord",
@@ -87,7 +87,7 @@ GAMBLING_BOSS_MATRIX = {
         "frost_judge",
         "mechanical_deity",
     ],
-    "ancient_guardian_unlock": [
+    "ancient_power_awakening": [
         "serpent_guardian",
         "golden_scale_serpent",
         "golden_statue",
@@ -97,13 +97,25 @@ GAMBLING_BOSS_MATRIX = {
     ],
 }
 GAMBLING_SCENE_POOL = [
-    "forbidden_gate",
-    "choose_your_fate_doors",
-    "sealed_vault",
     "sky_temple",
     "ancient_ruins",
     "storm_cloud_realm",
     "golden_sanctum",
+    "shadow_energy_throne",
+    "floating_crystal_citadel",
+    "sandstone_festival_city",
+]
+GAMBLING_REVEAL_MECHANISM_POOL = [
+    "sky_rupture",
+    "storm_eye",
+    "energy_throne",
+    "crystal_core",
+    "golden_light_column",
+    "ancient_seal_awakening",
+    "abstract_power_vortex",
+    "forbidden_gate_optional",
+    "portal_gate_optional",
+    "sealed_vault_optional",
 ]
 GAMBLING_CTA_POOL = [
     "ENTER NOW",
@@ -289,6 +301,8 @@ def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "core_formula",
         "boss_matrix",
         "scene_pool",
+        "reveal_mechanism_pool",
+        "reveal_diversity_rule",
         "cta_pool",
         "gambling_safety_rules",
         "topic_angle_plan",
@@ -527,30 +541,30 @@ def _topic_angle_plan(vertical: str) -> list[dict[str, Any]]:
         return [
             {
                 "slot": 1,
-                "angle_type": "sky_portal_pressure",
+                "angle_type": "sky_rupture_spectacle",
                 "purpose": (
-                    "Test sky-scale pressure, flying boss arrival, divine light, "
-                    "space rupture, and portal opening."
+                    "Test sky-scale pressure, flying boss or energy-source arrival, "
+                    "divine light, feather meteor storm, and sky rupture."
                 ),
-                "avoid_repeating": ["dark_element_overload", "ancient_guardian_unlock"],
+                "avoid_repeating": ["dark_element_overload", "ancient_power_awakening"],
             },
             {
                 "slot": 2,
                 "angle_type": "dark_element_overload",
                 "purpose": (
                     "Test dark entrance pressure, multi-element overload, space collapse, "
-                    "and giant gate reveal."
+                    "and abstract power-vortex reveal."
                 ),
-                "avoid_repeating": ["sky_portal_pressure", "ancient_guardian_unlock"],
+                "avoid_repeating": ["sky_rupture_spectacle", "ancient_power_awakening"],
             },
             {
                 "slot": 3,
-                "angle_type": "ancient_guardian_unlock",
+                "angle_type": "ancient_power_awakening",
                 "purpose": (
-                    "Test ruins, vault, or temple guardian awakening, seal shatter, "
-                    "golden particle burst, and entrance unlock."
+                    "Test ruins or temple guardian awakening, seal shatter, "
+                    "golden particle burst, and mystery reveal climax."
                 ),
-                "avoid_repeating": ["sky_portal_pressure", "dark_element_overload"],
+                "avoid_repeating": ["sky_rupture_spectacle", "dark_element_overload"],
             },
         ]
     if vertical == "game":
@@ -605,9 +619,9 @@ def _copy_guidance(
         hooks = ["Can you pass this challenge?", "Try again and level up.", "Unlock the reward."]
     elif vertical == "gambling":
         hooks = [
-            "Open the forbidden entrance.",
+            "Something powerful has awakened.",
             "Choose carefully.",
-            "Unlock the hidden spectacle.",
+            "Enter the unknown spectacle.",
         ]
     elif vertical == "ecommerce":
         hooks = [
@@ -642,8 +656,9 @@ def _image_guidance(vertical: str) -> dict[str, Any]:
         return {
             "composition": (
                 "Use first/last-frame key art: first frame shows cleaned brand plus VIP "
-                "and a strong mysterious entrance or boss-as-VFX-source hook; last frame "
-                "shows cleaned brand plus VIP and CTA in safe area."
+                "and a strong boss or mysterious energy-source hook; last frame shows "
+                "large cleaned brand plus VIP and CTA fully inside the safe area. "
+                "Do not make door, gate, portal, or vault compositions the default."
             ),
             "avoid": [
                 "casino props",
@@ -676,15 +691,19 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
         return {
             "duration_adaptive": True,
             "opening": (
-                "0-3s: brand and VIP are visible with a mysterious boss, gate, vault, "
-                "or fate-choice hook."
+                "0-3s: brand and VIP are visible with a mysterious boss or energy "
+                "source hook; large brand typography is allowed if fully inside the "
+                "safe area."
             ),
             "middle": (
-                "3-9s: no large text; Boss is a VFX source and entrance opener. "
-                "Combine 2-3 items from vfx_library into the main spectacle."
+                "3-9s: no large text; boss or energy source drives the spectacle. "
+                "Combine 2-3 items from vfx_library into sky rupture, storm eye, "
+                "energy throne, crystal core, light column, seal awakening, or "
+                "abstract power-vortex beats."
             ),
             "ending": (
-                "9-12s: resolve into cleaned brand plus VIP and CTA after the entrance opens."
+                "9-12s: resolve into cleaned brand plus VIP and CTA after a mystery "
+                "reveal climax, keeping the full brand/VIP/CTA lockup complete."
             ),
             "forbidden_story_patterns": [
                 "no combat plot",
@@ -710,23 +729,32 @@ def _video_guidance(vertical: str) -> dict[str, Any]:
 
 def _gambling_creative_package() -> dict[str, Any]:
     return {
-        "creative_package": "gambling_boss_portal_spectacle_package",
-        "visual_language": "boss_as_vfx_source_portal_unlock",
+        "creative_package": "gambling_vfx_spectacle_package",
+        "visual_language": "boss_or_mysterious_energy_source_as_vfx_driver",
         "core_formula": [
-            "boss_or_mysterious_entrance_arrival",
-            "boss_releases_godlike_vfx",
+            "boss_or_mysterious_energy_source_arrival",
+            "vfx_library_burst",
             "world_distortion",
-            "portal_gate_or_vault_opens",
+            "mystery_reveal_climax",
             "cleaned_brand_vip_cta",
         ],
         "boss_matrix": GAMBLING_BOSS_MATRIX,
         "scene_pool": GAMBLING_SCENE_POOL,
+        "reveal_mechanism_pool": GAMBLING_REVEAL_MECHANISM_POOL,
+        "reveal_diversity_rule": (
+            "Do not default every gambling creative to a physical door, gate, portal, "
+            "or vault; at most one of the three gambling variants may use a physical "
+            "door/gate/portal/vault composition. Prefer sky rupture, storm eye, energy "
+            "throne, crystal core, golden light column, ancient seal awakening, or "
+            "abstract power vortex for the other variants."
+        ),
         "cta_pool": GAMBLING_CTA_POOL,
         "gambling_safety_rules": [
-            "Boss is a VFX source and entrance opener, not a combat character.",
+            "Boss or mysterious energy source is a VFX driver, not a combat character.",
             "Do not show fighting, leveling, equipment upgrades, or gameplay UI progression.",
-            "Use curiosity, pressure, and entrance reveal instead of direct gambling mechanics.",
+            "Use curiosity, pressure, and mystery reveal instead of direct gambling mechanics.",
             "Middle 3-9s must be built from 2-3 VFX library items.",
+            "Door, gate, portal, and vault imagery is optional and must not dominate all variants.",
         ],
     }
 
