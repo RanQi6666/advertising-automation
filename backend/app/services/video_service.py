@@ -607,6 +607,7 @@ def _storyboard_to_prompt(
     lines = [
         "Create a short ad video using this approved storyboard:",
         creative_safety_prompt_block(),
+        _keyframe_brand_aaa_video_rules(),
     ]
     strategy_block = _creative_strategy_prompt_block(creative_strategy)
     if strategy_block:
@@ -644,15 +645,42 @@ def _prompt_with_creative_strategy(
         if has_safety_block
         else sanitize_creative_safety_text(stripped_prompt)
     )
+    timing_rules = _keyframe_brand_aaa_video_rules()
+    has_timing_rules = "0-3s opening rule" in stripped_prompt
     if strategy_block and "creative_strategy:" not in stripped_prompt:
         parts = [safe_prompt]
         if not has_safety_block:
             parts.append(safety_block)
+        if not has_timing_rules:
+            parts.append(timing_rules)
         parts.append(strategy_block)
         return "\n\n".join(parts)
     if has_safety_block:
+        if has_timing_rules:
+            return safe_prompt
+        return f"{safe_prompt}\n\n{timing_rules}"
+    if has_timing_rules:
         return safe_prompt
-    return f"{safe_prompt}\n\n{safety_block}"
+    return f"{safe_prompt}\n\n{safety_block}\n\n{timing_rules}"
+
+
+def _keyframe_brand_aaa_video_rules() -> str:
+    return (
+        "Keyframe brand and 3A timing rules:\n"
+        "0-3s opening rule: strictly continue the first frame with visible brand logo "
+        "or cleaned brand name, plus a country-market strong visual character such as "
+        "epic hero, king, warrior, bird-god-style boss, giant serpent boss, or stone "
+        "guardian boss.\n"
+        "3-9s middle VFX rule: create high-impact 3A game-ad spectacle using coin "
+        "explosion effects, divine light descent, portal effects, jackpot-style "
+        "feedback, boss defeat, Score, Points, Stars, or Power rolling-number effects, "
+        "and slow-motion reward bursts. Keep the middle cinematic and intense; at most "
+        "keep a small brand logo.\n"
+        "9-12s ending rule: strictly resolve into the last frame with visible brand "
+        "logo or cleaned brand name, Start, Play Now, or Explore CTA, and a clean "
+        "reward-resolution final CTA frame. Do not show cash amounts, real-money claims, "
+        "withdrawal UI, recharge UI, balance UI, or guaranteed winning language."
+    )
 
 
 def _creative_strategy_prompt_block(creative_strategy: dict | None) -> str:

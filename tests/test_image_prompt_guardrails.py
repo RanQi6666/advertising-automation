@@ -278,6 +278,13 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
     assert "last-frame" in system
     assert "metallic GAJA game hub" in system
     assert "no visible brand-number text" in system
+    assert "first_frame image rule" in system
+    assert (
+        "epic hero, king, warrior, bird-god-style boss, giant serpent boss, "
+        "or stone guardian boss"
+    ) in system
+    assert "last_frame image rule" in system
+    assert "Start, Play Now, or Explore" in system
     assert payload["draft_metadata"]["creative_strategy"]["template_id"] == "mini_game_pool"
     assert payload["storyboard_context"]["creative_strategy"]["template_id"] == "mini_game_pool"
     payload_text = json.dumps(payload, ensure_ascii=False)

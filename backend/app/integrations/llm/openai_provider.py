@@ -342,6 +342,7 @@ class OpenAILLMProvider:
                 "first-frame hook image and one last-frame resolution image for the same "
                 "12-second video idea. Make each pair visually coherent while keeping the "
                 "three groups distinct enough for an operator to choose between. "
+                + _keyframe_brand_aaa_image_rules()
                 + creative_safety_prompt_block()
                 + "\n\n"
                 + _creative_strategy_system_instruction()
@@ -645,6 +646,23 @@ def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def _creative_payload_json(payload: dict[str, Any]) -> str:
     return json.dumps(sanitize_creative_safety_payload(payload), ensure_ascii=False)
+
+
+def _keyframe_brand_aaa_image_rules() -> str:
+    return (
+        "\n\n"
+        "Keyframe brand and 3A image rules: "
+        "first_frame image rule: show the visible brand logo or cleaned brand name "
+        "without numeric suffix, and feature a country-market strong visual character: "
+        "epic hero, king, warrior, bird-god-style boss, giant serpent boss, or stone "
+        "guardian boss. Use a cinematic 3A opening composition with portal light, "
+        "golden divine light, storm clouds, particles, and high-pressure boss "
+        "confrontation. "
+        "last_frame image rule: return to a clear branded CTA end frame with the visible "
+        "brand logo or cleaned brand name, Start, Play Now, or Explore, and a clean "
+        "reward-resolution layout. Do not render brand-number text, cash amounts, "
+        "withdrawal/recharge/balance UI, or guaranteed winning claims."
+    )
 
 
 def _ad_performance_analysis_system_prompt() -> str:

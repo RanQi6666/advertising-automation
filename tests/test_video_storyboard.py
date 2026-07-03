@@ -549,6 +549,54 @@ def test_video_storyboard_prompt_includes_creative_text_and_prop_bans() -> None:
         assert banned in prompt
 
 
+def test_storyboard_prompt_includes_keyframe_brand_aaa_timing_rules() -> None:
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 12,
+                "visual": "Open with a GAJA challenge and resolve on a CTA.",
+                "subtitle": "Play Now",
+            }
+        ]
+    )
+
+    assert "0-3s opening rule" in prompt
+    assert (
+        "epic hero, king, warrior, bird-god-style boss, giant serpent boss, "
+        "or stone guardian boss"
+    ) in prompt
+    assert "3-9s middle VFX rule" in prompt
+    assert "coin explosion effects" in prompt
+    assert "divine light descent" in prompt
+    assert "portal effects" in prompt
+    assert "jackpot-style feedback" in prompt
+    assert "boss defeat" in prompt
+    assert "Score, Points, Stars, or Power" in prompt
+    assert "9-12s ending rule" in prompt
+    assert "Do not show cash amounts" in prompt
+
+
+def test_direct_video_prompt_includes_keyframe_brand_aaa_timing_rules() -> None:
+    result = _prompt_with_creative_strategy(
+        "Create a 12-second GAJA challenge video.",
+        None,
+    )
+
+    assert result is not None
+    assert "0-3s opening rule" in result
+    assert "3-9s middle VFX rule" in result
+    assert "coin explosion effects" in result
+    assert "divine light descent" in result
+    assert "portal effects" in result
+    assert "jackpot-style feedback" in result
+    assert "boss defeat" in result
+    assert "Score, Points, Stars, or Power" in result
+    assert "9-12s ending rule" in result
+    assert "Do not show cash amounts" in result
+
+
 def test_video_prompt_with_existing_safety_block_preserves_prompt_text() -> None:
     prompt = f"Open on a low-text app lobby with abstract G mark.\n{creative_safety_prompt_block()}"
 
