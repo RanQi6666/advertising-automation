@@ -1,5 +1,6 @@
 import base64
 import mimetypes
+import shutil
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -36,6 +37,47 @@ class ImageStorageService:
         public_url = self.public_url_for_storage_key(storage_key)
         if not public_url:
             raise ProviderError("Failed to build local image public URL.")
+        return public_url, storage_key
+
+    async def transfer_external_image(
+        self,
+        source_url: str | None,
+        job_id: str,
+        image_index: int,
+        *,
+        source_storage_key: str | None = None,
+    ) -> tuple[str, str]:
+        if self.settings.object_storage_provider != "local":
+            raise ProviderError(
+                f"Unsupported object storage provider: {self.settings.object_storage_provider}"
+            )
+
+        extension = _external_image_extension(source_url, source_storage_key)
+        relative_path = (
+            Path("images")
+            / "external_image_generation"
+            / job_id
+            / f"{max(int(image_index), 1)}{extension}"
+        )
+        target_path = self.storage_root / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if source_storage_key and source_storage_key.startswith("local://"):
+            source_relative_path = _relative_path_from_storage_key(source_storage_key)
+            source_path = self.storage_root / Path(source_relative_path)
+            if not source_path.exists():
+                raise ProviderError("Provider image storage key does not exist locally.")
+            if source_path.resolve() != target_path.resolve():
+                shutil.copyfile(source_path, target_path)
+        elif source_url:
+            await self._download(source_url, target_path)
+        else:
+            raise ProviderError("Image provider returned no image URL or storage key.")
+
+        storage_key = f"local://{relative_path.as_posix()}"
+        public_url = self.public_url_for_storage_key(storage_key)
+        if not public_url:
+            raise ProviderError("Failed to build external image public URL.")
         return public_url, storage_key
 
     def public_url_for_storage_key(self, storage_key: str | None) -> str | None:
@@ -115,7 +157,7 @@ class ImageStorageService:
 
 def _extension_from_url(url: str) -> str:
     suffix = Path(urlparse(url).path).suffix.lower()
-    return suffix if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".jpg"
+    return suffix if suffix in _IMAGE_EXTENSIONS else ".jpg"
 
 
 def _mime_type_from_path(path: Path) -> str:
@@ -131,3 +173,16 @@ def _relative_path_from_storage_key(storage_key: str) -> str:
     if not raw_path or relative_path.is_absolute() or ".." in relative_path.parts:
         raise ProviderError("Invalid local image storage key.")
     return relative_path.as_posix()
+
+
+def _external_image_extension(source_url: str | None, source_storage_key: str | None) -> str:
+    if source_url:
+        return _extension_from_url(source_url)
+    if source_storage_key:
+        suffix = Path(_relative_path_from_storage_key(source_storage_key)).suffix.lower()
+        if suffix in _IMAGE_EXTENSIONS:
+            return suffix
+    return ".jpg"
+
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}

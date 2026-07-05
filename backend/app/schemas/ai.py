@@ -26,6 +26,7 @@ class ImageBrief(BaseModel):
     short_text: str
     visual_direction: str
     size: str = "1:1"
+    raw_prompt: str | None = None
 
 
 class VideoStoryboardScene(BaseModel):

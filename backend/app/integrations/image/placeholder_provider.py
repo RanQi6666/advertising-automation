@@ -15,10 +15,13 @@ class PlaceholderImageProvider:
         for brief in briefs:
             image_id = str(uuid4())
             relative_path = Path("images") / "placeholder" / f"{image_id}.svg"
+            prompt = brief.raw_prompt or (
+                f"{brief.title}: {brief.visual_direction}. Text: {brief.short_text}"
+            )
             (storage_root / relative_path).write_text(_svg_for_brief(brief), encoding="utf-8")
             images.append(
                 GeneratedImage(
-                    prompt=f"{brief.title}: {brief.visual_direction}. Text: {brief.short_text}",
+                    prompt=prompt,
                     storage_key=f"local://{relative_path.as_posix()}",
                     alt_text=brief.short_text,
                     size=brief.size,

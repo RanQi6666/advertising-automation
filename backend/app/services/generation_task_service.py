@@ -54,7 +54,7 @@ TEXT_TASK_TYPES = {
     "video_storyboard_generate",
     "video_storyboard_rewrite",
 }
-IMAGE_TASK_TYPES = {"image_generate"}
+IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
 VIDEO_TASK_TYPES = {"video_generate"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 ACTIVE_TASK_STATUSES = {"queued", "running"}
@@ -1011,6 +1011,13 @@ class GenerationTaskService:
         raise AppError(f"Unsupported text task type: {task.task_type}")
 
     async def _run_image_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
+        if task.task_type == "external_image_generate":
+            from backend.app.services.external_image_generation_service import (
+                ExternalImageGenerationService,
+            )
+
+            return await ExternalImageGenerationService().execute_task(session, task)
+
         from backend.app.schemas.creative import CreativeGenerateRequest
         from backend.app.services.creative_service import CreativeService
 

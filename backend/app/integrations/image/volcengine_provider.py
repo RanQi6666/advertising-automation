@@ -30,7 +30,7 @@ class VolcengineImageProvider:
     async def generate_images(self, briefs: list[ImageBrief]) -> list[GeneratedImage]:
         images: list[GeneratedImage] = []
         for brief in briefs:
-            prompt = _prompt_from_brief(brief)
+            prompt = brief.raw_prompt or _prompt_from_brief(brief)
             response = await self.client.images.generate(
                 model=self.model,
                 prompt=prompt,
