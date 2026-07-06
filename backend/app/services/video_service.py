@@ -778,7 +778,13 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
     vertical = _strategy_vertical(creative_strategy)
     market = creative_strategy.get("market_context")
     audience = creative_strategy.get("audience_lens")
+    brand_profile = creative_strategy.get("brand_profile")
     brand_display = creative_strategy.get("brand_display")
+    style_pack_id = creative_strategy.get("style_pack_id")
+    style_pack = creative_strategy.get("style_pack")
+    country_overlay = creative_strategy.get("country_overlay")
+    boss_guidance = creative_strategy.get("boss_guidance")
+    reference_signal_pack = creative_strategy.get("reference_signal_pack")
     creative_package = str(creative_strategy.get("creative_package") or "").strip()
     text_policy = creative_strategy.get("text_brand_timing_policy")
     middle_vfx_policy = creative_strategy.get("middle_vfx_policy")
@@ -803,6 +809,14 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
             "physical door/gate/portal/vault composition."
         )
 
+    style_pack_block = _style_pack_summary(style_pack_id, style_pack)
+    if style_pack_block:
+        lines.append(style_pack_block)
+
+    brand_profile_block = _brand_profile_summary(brand_profile)
+    if brand_profile_block:
+        lines.append(brand_profile_block)
+
     if isinstance(brand_display, dict):
         cleaned_brand = _creative_safe_prompt_text(str(brand_display.get("cleaned_brand") or ""))
         digit_policy = _creative_safe_prompt_text(str(brand_display.get("digit_policy") or ""))
@@ -810,6 +824,18 @@ def _creative_strategy_v2_prompt_block(creative_strategy: dict) -> str:
             lines.append(f"Visible brand: {cleaned_brand}")
         if digit_policy:
             lines.append(f"Brand digit policy: {digit_policy}")
+
+    country_overlay_block = _country_overlay_summary(country_overlay)
+    if country_overlay_block:
+        lines.append(country_overlay_block)
+
+    boss_guidance_block = _boss_guidance_summary(boss_guidance)
+    if boss_guidance_block:
+        lines.append(boss_guidance_block)
+
+    reference_signal_block = _reference_signal_summary(reference_signal_pack)
+    if reference_signal_block:
+        lines.append(reference_signal_block)
 
     if isinstance(text_policy, dict):
         allowed = _creative_safe_prompt_list(
@@ -945,6 +971,99 @@ def _boss_matrix_summary(value: Any) -> str:
         if angle and safe_bosses:
             parts.append(f"{angle}: {', '.join(safe_bosses)}")
     return f"Boss matrix: {' | '.join(parts)}" if parts else ""
+
+
+def _style_pack_summary(style_pack_id: Any, style_pack: Any) -> str:
+    safe_id = _creative_safe_prompt_text(str(style_pack_id or ""))
+    parts = [f"Style pack: {safe_id}" if safe_id else ""]
+    if isinstance(style_pack, dict):
+        base = _creative_safe_prompt_text(str(style_pack.get("base_pack_id") or ""))
+        overlay = _creative_safe_prompt_text(str(style_pack.get("country_overlay_id") or ""))
+        composition = _creative_safe_prompt_text(str(style_pack.get("composition") or ""))
+        if base:
+            parts.append(f"base {base}")
+        if overlay:
+            parts.append(f"country overlay {overlay}")
+        if composition:
+            parts.append(f"composition {composition}")
+    return "; ".join(part for part in parts if part)
+
+
+def _brand_profile_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    visible = _creative_safe_prompt_text(str(value.get("visible_name") or ""))
+    raw = _creative_safe_prompt_text(str(value.get("raw_name") or ""))
+    source = _creative_safe_prompt_text(str(value.get("source_field") or ""))
+    digit_policy = _creative_safe_prompt_text(str(value.get("digit_policy") or ""))
+    if not visible and not raw:
+        return ""
+    parts = [f"visible {visible}" if visible else "", f"raw {raw}" if raw else ""]
+    if source:
+        parts.append(f"source {source}")
+    if digit_policy:
+        parts.append(f"digit policy {digit_policy}")
+    return f"Brand profile: {'; '.join(part for part in parts if part)}"
+
+
+def _country_overlay_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    overlay_id = _creative_safe_prompt_text(str(value.get("overlay_id") or ""))
+    country_code = _creative_safe_prompt_text(str(value.get("country_code") or ""))
+    parts = [f"Country overlay: {overlay_id} {country_code}".strip()]
+    preferred_bosses = _creative_safe_prompt_list(
+        _list_value(value.get("preferred_boss_groups"))[:4]
+    )
+    preferred_scenes = _creative_safe_prompt_list(_list_value(value.get("preferred_scenes"))[:5])
+    preferred_reveals = _creative_safe_prompt_list(
+        _list_value(value.get("preferred_reveal_mechanisms"))[:5]
+    )
+    visual_bias = _creative_safe_prompt_list(_list_value(value.get("visual_bias"))[:5])
+    avoid = _creative_safe_prompt_list(_list_value(value.get("avoid"))[:5])
+    if preferred_bosses:
+        parts.append(f"preferred boss groups {', '.join(preferred_bosses)}")
+    if preferred_scenes:
+        parts.append(f"preferred scenes {', '.join(preferred_scenes)}")
+    if preferred_reveals:
+        parts.append(f"preferred reveals {', '.join(preferred_reveals)}")
+    if visual_bias:
+        parts.append(f"visual bias {', '.join(visual_bias)}")
+    if avoid:
+        parts.append(f"avoid {'; '.join(avoid)}")
+    return " | ".join(part for part in parts if part.strip())
+
+
+def _boss_guidance_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    role = _creative_safe_prompt_text(str(value.get("role") or ""))
+    parts = [f"Boss guidance: {role}" if role else ""]
+    must_show = _creative_safe_prompt_list(_list_value(value.get("must_show"))[:5])
+    must_avoid = _creative_safe_prompt_list(_list_value(value.get("must_avoid"))[:5])
+    if must_show:
+        parts.append(f"must show {', '.join(must_show)}")
+    if must_avoid:
+        parts.append(f"must avoid {', '.join(must_avoid)}")
+    return "; ".join(part for part in parts if part)
+
+
+def _reference_signal_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    source = _creative_safe_prompt_text(str(value.get("source") or ""))
+    parts = [f"Reference signal: {source}" if source else "Reference signal"]
+    for key, label in (
+        ("rhythm_bias", "rhythm"),
+        ("visual_bias", "visual"),
+        ("copy_bias", "copy"),
+        ("boss_bias", "boss"),
+        ("avoid", "avoid"),
+    ):
+        safe_values = _creative_safe_prompt_list(_list_value(value.get(key))[:5])
+        if safe_values:
+            parts.append(f"{label} {', '.join(safe_values)}")
+    return " | ".join(part for part in parts if part.strip())
 
 
 def _country_style_pack_summary(value: Any) -> str:

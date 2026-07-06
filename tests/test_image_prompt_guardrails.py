@@ -345,6 +345,72 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_brief_prompt_names_new_strategy_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Boss challenge",
+                    "short_text": "Play Now",
+                    "visual_direction": "Show an original boss challenge.",
+                    "size": "9:16",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    creative_strategy = build_creative_strategy(
+        {
+            "work_order_type": "game",
+            "product_name": "Puzzle Quest 2",
+            "country": "India",
+            "brief": "Create a cinematic game ad with a playable boss challenge.",
+            "reference_signal_pack": {
+                "source": "manual_reference_video_analysis",
+                "rhythm_bias": ["0-3s challenge reveal", "3-9s player retry"],
+            },
+        }
+    )
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Beat the boss challenge.",
+        headline="Play Now",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_image_briefs(
+        draft=draft,
+        count=1,
+        size="9:16",
+        storyboard_context={"creative_strategy": creative_strategy},
+    )
+
+    system = captured["system"]
+    payload = captured["payload"]
+    assert isinstance(system, str)
+    assert isinstance(payload, dict)
+    assert "brand_profile" in system
+    assert "style_pack_id" in system
+    assert "country_overlay" in system
+    assert "boss_guidance" in system
+    assert "reference_signal_pack" in system
+    strategy_payload = payload["draft_metadata"]["creative_strategy"]
+    assert strategy_payload["style_pack_id"] == "game/IN/boss_challenge_fantasy"
+    assert strategy_payload["boss_guidance"]["role"] == "playable challenge obstacle"
+
+
+@pytest.mark.asyncio
 async def test_openai_image_brief_prompt_carries_country_concepts_and_layout_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -240,7 +240,7 @@ HOLIDAYS = {
 }
 
 
-def build_creative_strategy(
+def _build_creative_strategy_base(
     context: Mapping[str, Any],
     *,
     today: date | None = None,
@@ -281,6 +281,16 @@ def build_creative_strategy(
     return strategy
 
 
+def build_creative_strategy(
+    context: Mapping[str, Any],
+    *,
+    today: date | None = None,
+) -> dict[str, Any]:
+    from backend.app.services.creative_strategy.resolver import resolve_creative_strategy
+
+    return resolve_creative_strategy(context, today=today)
+
+
 def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -293,9 +303,15 @@ def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "market_context",
         "audience_lens",
         "brand_display",
+        "brand_profile",
+        "brand_policy_pack",
         "text_brand_timing_policy",
         "middle_vfx_policy",
         "vfx_library",
+        "style_pack_id",
+        "style_pack",
+        "country_overlay",
+        "boss_guidance",
         "creative_package",
         "visual_language",
         "core_formula",
@@ -310,6 +326,7 @@ def compact_creative_strategy(value: Any) -> dict[str, Any] | None:
         "image_guidance",
         "video_guidance",
         "market_game_style_pack",
+        "reference_signal_pack",
         "compliance_guardrails",
         # legacy keys remain allowed so older metadata still works downstream
         "template_id",

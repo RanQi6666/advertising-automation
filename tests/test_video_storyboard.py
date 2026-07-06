@@ -959,6 +959,47 @@ def test_video_storyboard_prompt_includes_market_game_style_pack_gameplay_proces
         assert banned not in strategy_section
 
 
+def test_video_storyboard_prompt_includes_new_strategy_package_fields() -> None:
+    creative_strategy = build_creative_strategy(
+        {
+            "work_order_type": "game",
+            "product_name": "Puzzle Quest 2",
+            "country": "India",
+            "brief": "Create a cinematic game ad with a playable boss challenge.",
+            "reference_signal_pack": {
+                "source": "manual_reference_video_analysis",
+                "rhythm_bias": ["0-3s challenge reveal", "3-9s player retry"],
+                "visual_bias": ["golden_light_column"],
+            },
+        }
+    )
+
+    prompt = _storyboard_to_prompt(
+        [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 4,
+                "visual": "Open with a cinematic boss challenge.",
+                "subtitle": "Start",
+            }
+        ],
+        creative_strategy=creative_strategy,
+    )
+
+    assert "Style pack: game/IN/boss_challenge_fantasy" in prompt
+    assert "base game/base/cinematic_mission" in prompt
+    assert "Brand profile: visible Puzzle Quest" in prompt
+    assert "Country overlay: country/overlays/IN IN" in prompt
+    assert "preferred reveals golden_light_column" in prompt
+    assert "Boss guidance: playable challenge obstacle" in prompt
+    assert "must show player action" in prompt
+    assert "must avoid real-money game entertainment mechanics" in prompt
+    assert "Reference signal: manual_reference_video_analysis" in prompt
+    assert "0-3s challenge reveal" in prompt
+    assert "golden_light_column" in prompt
+
+
 @pytest.mark.asyncio
 async def test_openai_video_storyboard_payload_compacts_metadata(
     monkeypatch: pytest.MonkeyPatch,

@@ -164,6 +164,99 @@ def test_builds_operator_selected_gambling_strategy_with_vfx_library_policy() ->
     assert "Guaranteed Win" in guardrail_text
 
 
+def test_strategy_resolver_adds_dynamic_brand_profile_and_brand_policy() -> None:
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "project_name": "Royal Spin 88",
+            "product_name": "Royal Spin 88",
+            "country": "India",
+            "brief": "Premium safe gambling-like spectacle.",
+        },
+        today=date(2026, 7, 6),
+    )
+
+    assert strategy["brand_profile"] == {
+        "raw_name": "Royal Spin 88",
+        "visible_name": "Royal Spin",
+        "source_field": "product_name",
+        "digit_policy": "remove_digits_for_visible_brand",
+    }
+    assert strategy["brand_policy_pack"]["source"] == "universal_brand_policy"
+    assert "0-3s" in strategy["brand_policy_pack"]["visible_text_windows"]
+    assert "9-12s" in strategy["brand_policy_pack"]["visible_text_windows"]
+    assert "Do not invent brand names." in strategy["brand_policy_pack"]["forbidden"]
+
+
+def test_india_gambling_uses_base_style_pack_with_country_overlay() -> None:
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "product_name": "GAJA777",
+            "country": "India",
+            "brief": "Create a premium gambling-like short video without money claims.",
+        },
+        today=date(2026, 7, 6),
+    )
+
+    assert strategy["style_pack_id"] == "gambling/IN/vfx_spectacle_current"
+    assert strategy["style_pack"]["base_pack_id"] == "gambling/base/vfx_spectacle"
+    assert strategy["style_pack"]["country_overlay_id"] == "country/overlays/IN"
+    assert strategy["country_overlay"]["country_code"] == "IN"
+    assert (
+        "golden_light_column"
+        in strategy["country_overlay"]["preferred_reveal_mechanisms"]
+    )
+    assert "real deity names or real religious figures" in strategy["country_overlay"]["avoid"]
+    assert "bird_god" in strategy["boss_matrix"]["sky_rupture_spectacle"]
+    assert "sandstone_festival_city" in strategy["scene_pool"]
+    assert (
+        "Boss or mysterious energy source is a VFX driver, not a combat character."
+        in strategy["gambling_safety_rules"]
+    )
+
+
+def test_game_strategy_uses_india_boss_challenge_style_pack() -> None:
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "game",
+            "product_name": "Puzzle Quest 2",
+            "country": "India",
+            "brief": "Create a cinematic game ad with a playable boss challenge.",
+        },
+        today=date(2026, 7, 6),
+    )
+
+    assert strategy["style_pack_id"] == "game/IN/boss_challenge_fantasy"
+    assert strategy["boss_guidance"]["role"] == "playable challenge obstacle"
+    assert "player action" in strategy["boss_guidance"]["must_show"]
+    assert "real-money gambling mechanics" in strategy["boss_guidance"]["must_avoid"]
+    assert strategy["market_game_style_pack"]["style_pack_id"] == (
+        "game/IN/boss_challenge_fantasy"
+    )
+
+
+def test_reference_signal_pack_is_preserved_without_overriding_style_pack() -> None:
+    reference_signal_pack = {
+        "source": "manual_reference_video_analysis",
+        "rhythm_bias": ["0-3s brand plus boss arrival", "3-9s low-text VFX"],
+        "visual_bias": ["golden_light_column", "storm_eye"],
+    }
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "product_name": "Royal Spin 88",
+            "country": "India",
+            "reference_signal_pack": reference_signal_pack,
+        },
+        today=date(2026, 7, 6),
+    )
+
+    assert strategy["style_pack_id"] == "gambling/IN/vfx_spectacle_current"
+    assert strategy["reference_signal_pack"] == reference_signal_pack
+    assert "golden_light_column" in strategy["reveal_mechanism_pool"]
+
+
 def test_builds_india_game_market_style_pack_for_male_18_24() -> None:
     strategy = build_creative_strategy(
         {
@@ -350,8 +443,30 @@ def test_compact_strategy_keeps_v2_fields_and_drops_large_unknown_blob() -> None
     assert compact["vertical"] == "game"
     assert "topic_angle_plan" in compact
     assert "market_game_style_pack" in compact
+    assert compact["brand_profile"]["visible_name"] == "Puzzle Quest"
+    assert compact["style_pack_id"] == "game/default/cinematic_mission"
     assert "raw_content" not in compact
     assert "SHOULD NOT LEAK" not in str(compact)
+
+
+def test_compact_strategy_keeps_reference_signal_pack() -> None:
+    strategy = build_creative_strategy(
+        {
+            "work_order_type": "gambling",
+            "product_name": "Royal Spin 88",
+            "country": "India",
+            "reference_signal_pack": {
+                "source": "manual_reference_video_analysis",
+                "visual_bias": ["golden_light_column"],
+            },
+        },
+        today=date(2026, 7, 6),
+    )
+    compact = compact_creative_strategy(strategy)
+
+    assert compact is not None
+    assert compact["style_pack_id"] == "gambling/IN/vfx_spectacle_current"
+    assert compact["reference_signal_pack"]["visual_bias"] == ["golden_light_column"]
 
 
 def test_compact_strategy_drops_disabled_gaja_brand_template() -> None:
