@@ -847,7 +847,10 @@ class GenerationTaskService:
             try:
                 result = await self._run_task(session, task)
             except Exception as exc:
-                await self._mark_failed(session, task, exc)
+                await session.rollback()
+                task = await session.get(GenerationTask, task_id)
+                if task is not None:
+                    await self._mark_failed(session, task, exc)
                 return
             await self._mark_succeeded(session, task, result)
 

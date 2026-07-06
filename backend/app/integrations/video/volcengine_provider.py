@@ -136,7 +136,8 @@ class VolcengineVideoProvider:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.request(method, url, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Volcengine video API request failed: {exc}") from exc
+            message = str(exc) or exc.__class__.__name__
+            raise ProviderError(f"Volcengine video API request failed: {message}") from exc
 
         if response.status_code >= 400:
             raise ProviderError(

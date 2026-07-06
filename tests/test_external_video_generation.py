@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import get_session
 from backend.app.integrations.video import factory as video_factory
 from backend.app.integrations.video.base import VideoGenerationStart, VideoGenerationStatus
+from backend.app.integrations.video.volcengine_provider import VolcengineVideoProvider
 from backend.app.main import create_app
 from backend.app.services import external_video_generation_service as external_video_service_module
 from backend.app.services import generation_task_service as task_module
@@ -111,6 +113,14 @@ class FailingIfStartedVideoProvider:
         raise AssertionError("status polling is not part of the create request")
 
 
+class TimeoutStartVideoProvider:
+    async def start_generation(self, request):
+        raise ProviderError("Volcengine video API request failed: WriteTimeout")
+
+    async def get_generation_status(self, provider_job_id: str):
+        raise AssertionError("status polling is not part of start task failure")
+
+
 class FakeVideoStorage:
     transfer_calls: list[dict[str, str]] = []
 
@@ -195,6 +205,46 @@ def test_volcengine_video_timeout_seconds_is_passed_to_provider(
     video_factory.get_video_provider()
 
     assert captured["timeout_seconds"] == 123.5
+
+
+@pytest.mark.asyncio
+async def test_volcengine_video_request_error_includes_exception_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimeoutClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def request(self, method, url, headers=None, **kwargs):
+            raise httpx.WriteTimeout("")
+
+    monkeypatch.setattr(httpx, "AsyncClient", TimeoutClient)
+    provider = VolcengineVideoProvider(
+        api_key="video-api-key",
+        base_url="https://ark.example.test/api/v3",
+        model="seedance-test",
+        resolution="720p",
+        image_mode="first_last_frame",
+        min_duration_seconds=4,
+        max_duration_seconds=12,
+        max_reference_images=2,
+        generate_audio=True,
+        watermark=False,
+        return_last_frame=False,
+        execution_expires_after=172800,
+        priority=0,
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider._request("POST", provider.tasks_url, json={"model": "seedance-test"})
+
+    assert str(exc_info.value) == "Volcengine video API request failed: WriteTimeout"
 
 
 @pytest.mark.asyncio
@@ -437,6 +487,78 @@ async def test_external_video_generation_start_task_failure_marks_video_failed(
     assert "duration_seconds" in (failed_video.error_message or "")
 
     await _engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_task_failure_survives_video_failure_rollback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        video_service_module,
+        "get_video_provider",
+        lambda settings: TimeoutStartVideoProvider(),
+    )
+    monkeypatch.setattr(
+        external_video_service_module,
+        "VIDEO_START_RETRY_DELAYS_SECONDS",
+        (0, 0),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(external_request_id="video-start-timeout"),
+        )
+        created = create_response.json()["data"]
+        assert len(enqueued) == 1
+        start_task_id, start_queue_name, _priority = enqueued[0]
+        assert start_queue_name == VIDEO_QUEUE_NAME
+
+        await GenerationTaskService().process_task(start_task_id)
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    async with session_factory() as session:
+        start_task = await session.get(GenerationTask, start_task_id)
+        video = await session.get(VideoAsset, created["job_id"])
+
+    assert create_response.status_code == 202
+    assert start_task is not None
+    assert start_task.status == "failed"
+    assert start_task.error_code == "provider_timeout"
+    assert start_task.error_message == "Volcengine video API request failed: WriteTimeout"
+    assert video is not None
+    assert video.status == VideoStatus.FAILED.value
+    assert video.error_message == "Volcengine video API request failed: WriteTimeout"
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
