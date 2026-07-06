@@ -341,7 +341,14 @@ class OpenAILLMProvider:
                 "video_keyframe_variants, create paired variants: each group has one "
                 "first-frame hook image and one last-frame resolution image for the same "
                 "12-second video idea. Make each pair visually coherent while keeping the "
-                "three groups distinct enough for an operator to choose between. "
+                "three groups distinct enough for an operator to choose between. If "
+                "storyboard_context.selected_topic is provided, treat selected_topic as "
+                "the selected campaign direction for every image brief. Do not distribute "
+                "image briefs across creative_strategy.topic_angle_plan; use "
+                "topic_angle_plan only as background strategy, and keep all briefs aligned "
+                "to selected_topic.angle_type, selected_topic.topic_angle, and the "
+                "approved copy unless operator feedback explicitly asks for a different "
+                "direction. "
                 + _keyframe_brand_aaa_image_rules()
                 + creative_safety_prompt_block()
                 + "\n\n"
@@ -1600,7 +1607,67 @@ def _compact_image_storyboard_context(value: dict | None) -> dict[str, Any] | No
         }
     if creative_strategy:
         context["creative_strategy"] = creative_strategy
+    selected_topic = _compact_selected_topic_context(value.get("selected_topic"))
+    if selected_topic:
+        context["selected_topic"] = selected_topic
     return context
+
+
+def _compact_selected_topic_context(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    selected_topic: dict[str, Any] = {
+        "id": _truncate(_coerce_optional_text(value.get("id")), 80),
+        "title": _truncate(_coerce_optional_text(value.get("title")), 240),
+        "angle": _truncate(_coerce_optional_text(value.get("angle")), 500),
+        "angle_type": _truncate(_coerce_optional_text(value.get("angle_type")), 120),
+        "audience": _truncate(_coerce_optional_text(value.get("audience")), 240),
+        "risk_notes": _truncate(_coerce_optional_text(value.get("risk_notes")), 300),
+    }
+    selling_points = value.get("selling_points")
+    if isinstance(selling_points, list):
+        selected_topic["selling_points"] = [
+            item
+            for item in (
+                _truncate(_coerce_optional_text(point), 160)
+                for point in selling_points[:6]
+            )
+            if item
+        ]
+    topic_angle = value.get("topic_angle")
+    if isinstance(topic_angle, dict):
+        selected_topic["topic_angle"] = {
+            key: item
+            for key, item in {
+                "slot": topic_angle.get("slot"),
+                "angle_type": _truncate(
+                    _coerce_optional_text(topic_angle.get("angle_type")),
+                    120,
+                ),
+                "purpose": _truncate(
+                    _coerce_optional_text(topic_angle.get("purpose")),
+                    500,
+                ),
+                "avoid_repeating": _compact_string_list(
+                    topic_angle.get("avoid_repeating"),
+                    limit=6,
+                    item_limit=120,
+                ),
+            }.items()
+            if item not in (None, "", [])
+        }
+    return {key: item for key, item in selected_topic.items() if item not in (None, "", [])} or None
+
+
+def _compact_string_list(value: Any, *, limit: int, item_limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value[:limit]:
+        text = _truncate(_coerce_optional_text(item), item_limit)
+        if text:
+            items.append(text)
+    return items
 
 
 def _compact_creative_strategy(value: Any) -> dict[str, Any] | None:

@@ -345,6 +345,77 @@ async def test_openai_image_brief_prompt_carries_game_creative_strategy(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_brief_prompt_locks_to_selected_topic_angle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(api_key="test-key", model="test-model")
+    captured: dict[str, object] = {}
+
+    async def fake_json_completion(system: str, user: str) -> dict:
+        captured["system"] = system
+        captured["payload"] = json.loads(user)
+        return {
+            "briefs": [
+                {
+                    "image_index": 1,
+                    "title": "Reward payoff",
+                    "short_text": "Unlock the reward",
+                    "visual_direction": "Show the selected reward payoff angle.",
+                    "size": "9:16",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json_completion", fake_json_completion)
+    creative_strategy = {
+        "schema_version": "creative_strategy.v2",
+        "topic_angle_plan": [
+            {"slot": 1, "angle_type": "challenge_failure", "purpose": "failure hook"},
+            {"slot": 2, "angle_type": "comeback_growth", "purpose": "growth hook"},
+            {"slot": 3, "angle_type": "reward_burst", "purpose": "reward hook"},
+        ],
+        "image_guidance": {"composition": "Use a gameplay visual."},
+    }
+    draft = CopyDraft(
+        id="draft-1",
+        campaign_id="campaign-1",
+        topic_id="topic-1",
+        body="Reward-led copy.",
+        headline="Unlock the reward",
+        version=1,
+        metadata_json={"creative_strategy": creative_strategy},
+    )
+
+    await provider.generate_image_briefs(
+        draft=draft,
+        count=3,
+        size="9:16",
+        storyboard_context={
+            "creative_strategy": creative_strategy,
+            "selected_topic": {
+                "id": "topic-1",
+                "title": "Reward payoff",
+                "angle": "reward_burst: show the satisfying unlock payoff",
+                "angle_type": "reward_burst",
+                "topic_angle": creative_strategy["topic_angle_plan"][2],
+            },
+        },
+    )
+
+    system = captured["system"]
+    payload = captured["payload"]
+    assert isinstance(system, str)
+    assert isinstance(payload, dict)
+    assert "selected_topic" in system
+    assert "Do not distribute image briefs across creative_strategy.topic_angle_plan" in system
+    assert payload["storyboard_context"]["selected_topic"]["angle_type"] == "reward_burst"
+    assert (
+        payload["storyboard_context"]["selected_topic"]["topic_angle"]["purpose"]
+        == "reward hook"
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_image_brief_prompt_names_new_strategy_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

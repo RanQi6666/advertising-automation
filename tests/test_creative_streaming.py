@@ -10,6 +10,7 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import CreativeStatus
+from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 from backend.app.schemas.creative import CreativeGenerateRequest
 from backend.app.services import creative_service
@@ -125,6 +126,74 @@ async def test_stream_creatives_yields_three_assets_incrementally(monkeypatch) -
         assert len(stored_assets) == 3
         assert {asset.metadata_json["image_index"] for asset in stored_assets} == {1, 2, 3}
         assert all(asset.metadata_json["streamed"] is True for asset in stored_assets)
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generate_creatives_passes_selected_topic_context_to_image_briefs(
+    monkeypatch,
+) -> None:
+    _patch_image_provider(monkeypatch, FakeImageProvider())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    strategy = {
+        "schema_version": "creative_strategy.v2",
+        "topic_angle_plan": [
+            {"slot": 1, "angle_type": "challenge_failure", "purpose": "failure hook"},
+            {"slot": 2, "angle_type": "comeback_growth", "purpose": "growth hook"},
+            {"slot": 3, "angle_type": "reward_burst", "purpose": "reward hook"},
+        ],
+        "image_guidance": {"composition": "Use a gameplay visual."},
+    }
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-1", name="Campaign", metadata_json={})
+        topic = ContentTopic(
+            id="topic-1",
+            campaign_id=campaign.id,
+            title="Reward payoff",
+            angle="reward_burst: show the satisfying unlock payoff",
+            audience="Mobile game players",
+            selling_points=["Unlock payoff", "Fast progress"],
+            source_data={
+                "creative_strategy": strategy,
+                "topic_angle": strategy["topic_angle_plan"][2],
+                "angle_type": "reward_burst",
+            },
+        )
+        draft = CopyDraft(
+            id="draft-1",
+            campaign_id=campaign.id,
+            topic_id=topic.id,
+            body="Ad copy",
+            headline="Unlock the reward",
+            metadata_json={"creative_strategy": strategy},
+        )
+        session.add_all([campaign, topic, draft])
+        await session.commit()
+
+        service = CreativeService()
+        service.llm = FakeLLMProvider()  # type: ignore[assignment]
+
+        assets = await service.generate_creatives(
+            session,
+            CreativeGenerateRequest(draft_id=draft.id, count=3, size="1:1"),
+        )
+
+        llm_call = service.llm.calls[0]  # type: ignore[attr-defined]
+        selected_topic = llm_call["storyboard_context"]["selected_topic"]
+        assert selected_topic["id"] == topic.id
+        assert selected_topic["angle_type"] == "reward_burst"
+        assert selected_topic["topic_angle"]["purpose"] == "reward hook"
+        assert selected_topic["selling_points"] == ["Unlock payoff", "Fast progress"]
+        assert all(
+            asset.metadata_json["storyboard_context"]["selected_topic"]["angle_type"]
+            == "reward_burst"
+            for asset in assets
+        )
 
     await engine.dispose()
 

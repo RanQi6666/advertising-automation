@@ -10,6 +10,7 @@ from backend.app.core.errors import ProviderError
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import CreativeStatus
+from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.image import get_image_provider
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
@@ -77,11 +78,13 @@ class CreativeService:
     ) -> list[CreativeAsset]:
         draft = await get_required(session, CopyDraft, draft_id)
         creative_strategy = _creative_strategy_from_draft(draft)
+        selected_topic = await _selected_topic_context(session, draft)
         storyboard_context = _storyboard_context(
             storyboard or [],
             storyboard_text,
             keyframe_plan,
             creative_strategy,
+            selected_topic,
         )
         slot_indices = _target_slot_indices(
             count=count,
@@ -135,11 +138,13 @@ class CreativeService:
     ) -> list[ImageBrief]:
         draft = await get_required(session, CopyDraft, payload.draft_id)
         creative_strategy = _creative_strategy_from_draft(draft)
+        selected_topic = await _selected_topic_context(session, draft)
         storyboard_context = _storyboard_context(
             payload.storyboard,
             payload.storyboard_text,
             _keyframe_plan(payload),
             creative_strategy,
+            selected_topic,
         )
         return await self.prepare_image_briefs_for_slots(
             draft=draft,  # type: ignore[arg-type]
@@ -184,11 +189,13 @@ class CreativeService:
         slot_indices = _slot_indices(payload)
         keyframe_plan = _keyframe_plan(payload)
         creative_strategy = _creative_strategy_from_draft(draft)
+        selected_topic = await _selected_topic_context(session, draft)
         storyboard_context = _storyboard_context(
             payload.storyboard,
             payload.storyboard_text,
             keyframe_plan,
             creative_strategy,
+            selected_topic,
         )
         yield {"type": "start", "limit": len(slot_indices), "indices": slot_indices}
         for index in slot_indices:
@@ -334,12 +341,22 @@ class CreativeService:
         draft = await get_required(session, CopyDraft, source_asset.draft_id)
         slot_index = _asset_image_index(source_asset, default=1)
         target_size = size or source_asset.size
+        creative_strategy = _creative_strategy_from_draft(draft)
+        selected_topic = await _selected_topic_context(session, draft)
+        storyboard_context = _storyboard_context(
+            [],
+            None,
+            None,
+            creative_strategy,
+            selected_topic,
+        )
         briefs = await self._generate_image_briefs_via_text_queue(
             draft=draft,  # type: ignore[arg-type]
             count=1,
             size=target_size,
             feedback=feedback,
             source_asset=source_asset,  # type: ignore[arg-type]
+            storyboard_context=storyboard_context,
             streamed=False,
         )
         briefs = _briefs_for_slots(briefs, [slot_index])
@@ -352,11 +369,8 @@ class CreativeService:
             version=source_asset.version + 1,
             extra_metadata={
                 "streamed": False,
-                **(
-                    {"creative_strategy": _creative_strategy_from_draft(draft)}
-                    if _creative_strategy_from_draft(draft)
-                    else {}
-                ),
+                **({"storyboard_context": storyboard_context} if storyboard_context else {}),
+                **({"creative_strategy": creative_strategy} if creative_strategy else {}),
                 **_source_keyframe_metadata(source_asset),
                 "revision_feedback": feedback,
                 "source_creative_asset_id": source_asset.id,
@@ -574,10 +588,17 @@ def _storyboard_context(
     storyboard_text: str | None,
     keyframe_plan: dict | None = None,
     creative_strategy: dict | None = None,
+    selected_topic: dict | None = None,
 ) -> dict | None:
     clean_scenes = [scene for scene in storyboard if isinstance(scene, dict)]
     clean_text = (storyboard_text or "").strip()
-    if not clean_scenes and not clean_text and not keyframe_plan and not creative_strategy:
+    if (
+        not clean_scenes
+        and not clean_text
+        and not keyframe_plan
+        and not creative_strategy
+        and not selected_topic
+    ):
         return None
     context = {
         "storyboard": clean_scenes[:10],
@@ -587,7 +608,62 @@ def _storyboard_context(
         context["keyframe_plan"] = keyframe_plan
     if creative_strategy:
         context["creative_strategy"] = creative_strategy
+    if selected_topic:
+        context["selected_topic"] = selected_topic
     return context
+
+
+async def _selected_topic_context(session: AsyncSession, draft: CopyDraft) -> dict | None:
+    topic_id = getattr(draft, "topic_id", None)
+    if not topic_id:
+        return None
+    topic = await session.get(ContentTopic, topic_id)
+    if topic is None:
+        return None
+    return _topic_context(topic)
+
+
+def _topic_context(topic: ContentTopic) -> dict:
+    source_data = topic.source_data if isinstance(topic.source_data, dict) else {}
+    topic_angle = source_data.get("topic_angle")
+    clean_topic_angle = _clean_topic_angle(topic_angle if isinstance(topic_angle, dict) else None)
+    angle_type = _clean_text(source_data.get("angle_type")) or (
+        _clean_text(clean_topic_angle.get("angle_type")) if clean_topic_angle else None
+    )
+    context = {
+        "id": topic.id,
+        "title": _clean_text(topic.title),
+        "angle": _clean_text(topic.angle),
+        "angle_type": angle_type,
+        "audience": _clean_text(topic.audience),
+        "selling_points": [
+            item for item in (topic.selling_points or []) if isinstance(item, str) and item.strip()
+        ][:6],
+        "risk_notes": _clean_text(topic.risk_notes),
+        "topic_angle": clean_topic_angle,
+    }
+    return {key: value for key, value in context.items() if value not in (None, "", [])}
+
+
+def _clean_topic_angle(value: dict | None) -> dict | None:
+    if not value:
+        return None
+    clean = {
+        "slot": value.get("slot"),
+        "angle_type": _clean_text(value.get("angle_type")),
+        "purpose": _clean_text(value.get("purpose")),
+        "avoid_repeating": [
+            item for item in (value.get("avoid_repeating") or []) if isinstance(item, str)
+        ][:6],
+    }
+    return {key: item for key, item in clean.items() if item not in (None, "", [])} or None
+
+
+def _clean_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _creative_metadata(
