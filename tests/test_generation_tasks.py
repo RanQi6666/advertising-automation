@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from backend.app.api.v1.endpoints import creatives as creatives_endpoint
 from backend.app.api.v1.endpoints import generation_tasks as generation_tasks_endpoint
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import Base, utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
 from backend.app.db.models.campaign import Campaign
@@ -1500,6 +1501,71 @@ async def test_generation_task_auto_retries_retryable_provider_failure(
     assert stored.metadata_json["auto_retry"]["remaining_attempts"] == 2
     assert stored.metadata_json["auto_retry"]["delay_seconds"] == 10
     assert stored.metadata_json["auto_retry"]["last_error_code"] == "provider_timeout"
+
+    await engine.dispose()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_generation_task_auto_retries_gateway_provider_error(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_ENABLED", "true")
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_DELAYS_SECONDS", "0")
+    get_settings.cache_clear()
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'auto-retry-provider-error.sqlite'}"
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled: list[tuple[str, str, int, int]] = []
+
+    def capture_schedule(task, countdown_seconds: int) -> None:
+        scheduled.append((task.id, task.queue_name, task.priority, countdown_seconds))
+
+    monkeypatch.setattr(task_module, "_schedule_auto_retry_task", capture_schedule)
+
+    async with session_factory() as session:
+        campaign = Campaign(
+            id="campaign-auto-retry-provider-error-1",
+            name="Auto Retry Provider Error Campaign",
+            metadata_json={},
+        )
+        session.add(campaign)
+        await session.commit()
+
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id="external-image-auto-retry-1",
+            campaign_id=campaign.id,
+            payload={"prompt": "slow image", "count": 1, "size": "1:1"},
+            priority=2,
+            max_attempts=3,
+        )
+        task.status = "running"
+        task.attempt_count = 1
+        task.started_at = utcnow() - timedelta(seconds=5)
+        await session.commit()
+
+        await GenerationTaskService()._mark_failed(
+            session,
+            task,
+            ProviderError("Gateway image API returned HTTP 502: bad gateway"),
+        )
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "queued"
+    assert stored.retryable is False
+    assert stored.error_code == "unknown_provider_error"
+    assert scheduled == [(stored.id, IMAGE_QUEUE_NAME, 2, 0)]
+    assert stored.metadata_json["auto_retry"]["status"] == "scheduled"
+    assert stored.metadata_json["auto_retry"]["next_attempt"] == 2
 
     await engine.dispose()
     get_settings.cache_clear()

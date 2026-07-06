@@ -14,6 +14,10 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.session import get_session
 from backend.app.main import create_app
+from backend.app.schemas.external_image_generation import ExternalImageGenerationCreate
+from backend.app.services.external_image_generation_service import (
+    ExternalImageGenerationService,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +139,30 @@ async def test_external_image_generation_creates_async_job_and_polling_returns_s
     assert await _count_rows(engine, CopyDraft) == 0
     assert await _count_rows(engine, CreativeAsset) == 0
     assert await _count_rows(engine, VideoAsset) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_image_generation_max_attempts_uses_settings(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS", "2")
+    get_settings.cache_clear()
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        filename="external-image-generation-attempts.db",
+    )
+
+    async with session_factory() as session:
+        task = await ExternalImageGenerationService().create_job(
+            session,
+            ExternalImageGenerationCreate.model_validate(
+                _image_payload(external_request_id="configured-attempts")
+            ),
+        )
+
+    assert task.max_attempts == 2
     await engine.dispose()
 
 

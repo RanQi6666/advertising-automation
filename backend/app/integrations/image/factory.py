@@ -46,5 +46,6 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             response_format=settings.model_gateway_image_response_format,
             extra_body=settings.model_gateway_image_extra_body,
             storage_root=settings.local_storage_root,
+            timeout_seconds=settings.model_gateway_image_timeout_seconds,
         )
     raise ProviderError(f"Unsupported image provider: {settings.image_provider}")

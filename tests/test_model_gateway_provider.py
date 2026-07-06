@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 
@@ -93,6 +94,25 @@ def test_gateway_image_factory_requires_image_model() -> None:
 
     with pytest.raises(ProviderError, match="MODEL_GATEWAY_IMAGE_MODEL"):
         get_image_provider(settings)
+
+
+@pytest.mark.asyncio
+async def test_gateway_image_factory_uses_configured_image_timeout() -> None:
+    settings = Settings(
+        image_provider="gateway",
+        model_gateway_api_key="gateway-key",
+        model_gateway_base_url="http://127.0.0.1:3000/v1",
+        model_gateway_image_model="gateway-image-model",
+        model_gateway_image_timeout_seconds=345,
+    )
+
+    provider = get_image_provider(settings)
+
+    assert isinstance(provider, GatewayImageProvider)
+    try:
+        assert provider._http_client.timeout.read == 345
+    finally:
+        await provider._http_client.aclose()
 
 
 def test_model_options_expose_configured_gateway_models_without_keys() -> None:
@@ -260,11 +280,62 @@ async def test_gateway_image_provider_supports_base64_response(tmp_path) -> None
     assert stored_path.read_bytes() == b"fake image bytes"
 
 
-def _brief() -> ImageBrief:
+@pytest.mark.asyncio
+async def test_gateway_image_provider_generates_multiple_images_concurrently_in_order() -> None:
+    slow_returned_after_fast_started = asyncio.Event()
+    fast_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        prompt = payload["prompt"]
+        image_url = f"https://images.example.test/{prompt.replace(' ', '-')}.png"
+        if prompt == "slow prompt":
+            await asyncio.wait_for(fast_started.wait(), timeout=0.2)
+            slow_returned_after_fast_started.set()
+        elif prompt == "fast prompt":
+            fast_started.set()
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"url": image_url}
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:3000/v1",
+    ) as client:
+        provider = GatewayImageProvider(
+            api_key="gateway-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="gateway-image-model",
+            provider_size="1024x1024",
+            http_client=client,
+        )
+
+        images = await provider.generate_images(
+            [
+                _brief(image_index=1, raw_prompt="slow prompt"),
+                _brief(image_index=2, raw_prompt="fast prompt"),
+            ]
+        )
+
+    assert slow_returned_after_fast_started.is_set()
+    assert [image.url for image in images] == [
+        "https://images.example.test/slow-prompt.png",
+        "https://images.example.test/fast-prompt.png",
+    ]
+    assert [image.metadata["image_index"] for image in images] == [1, 2]
+
+
+def _brief(image_index: int = 1, raw_prompt: str | None = None) -> ImageBrief:
     return ImageBrief(
-        image_index=1,
+        image_index=image_index,
         title="Product scene",
         short_text="Try it today",
         visual_direction="Show a clean Facebook placement without Meta UI.",
         size="1:1",
+        raw_prompt=raw_prompt,
     )

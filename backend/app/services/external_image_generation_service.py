@@ -59,7 +59,7 @@ class ExternalImageGenerationService:
                 "size": payload.size,
                 "model_id": payload.model_id,
             },
-            max_attempts=1,
+            max_attempts=get_settings().external_image_generation_max_attempts,
             metadata={
                 "source": EXTERNAL_IMAGE_GENERATION_SOURCE,
                 "external_request_id": external_request_id,
