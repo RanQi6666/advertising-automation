@@ -1,7 +1,7 @@
 from functools import lru_cache
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5433/ad_automation"
     sync_database_url: str | None = None
     create_db_on_startup: bool = False
+    db_pool_size: int = Field(default=5, ge=1, le=100)
+    db_max_overflow: int = Field(default=5, ge=0, le=100)
 
     secret_key: str = "change-me-in-production"
     ai_ads_access_token: str | None = None
@@ -42,6 +44,7 @@ class Settings(BaseSettings):
     )
     celery_broker_url: str = "redis://127.0.0.1:6379/0"
     celery_result_backend: str = "redis://127.0.0.1:6379/1"
+    redis_url: str | None = None
     text_queue_concurrency: int = Field(default=6, ge=1, le=64)
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
@@ -61,6 +64,9 @@ class Settings(BaseSettings):
     model_provider_text_concurrency: int = Field(default=6, ge=1, le=64)
     model_provider_image_concurrency: int = Field(default=6, ge=1, le=32)
     model_provider_video_concurrency: int = Field(default=1, ge=1, le=16)
+    llm_text_rpm_limit: int = Field(default=60, ge=1, le=100000)
+    llm_text_max_inflight: int = Field(default=16, ge=1, le=1000)
+    job_status_cache_ttl_seconds: int = Field(default=600, ge=10, le=86400)
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"
     model_gateway_image_response_format: str | None = None
@@ -128,6 +134,12 @@ class Settings(BaseSettings):
                 if part.strip() and int(part.strip()) >= 0
             ]
         return value
+
+    @model_validator(mode="after")
+    def fill_redis_url(self) -> Self:
+        if not self.redis_url:
+            self.redis_url = self.celery_broker_url
+        return self
 
 @lru_cache
 def get_settings() -> Settings:

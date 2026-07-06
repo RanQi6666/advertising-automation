@@ -1494,12 +1494,17 @@ async def test_generation_task_auto_retries_retryable_provider_failure(
     assert stored.finished_at is None
     assert stored.duration_ms is None
     assert stored.queued_at > stored.created_at
-    assert scheduled == [(stored.id, IMAGE_QUEUE_NAME, 4, 10)]
+    assert len(scheduled) == 1
+    scheduled_task_id, scheduled_queue_name, scheduled_priority, scheduled_delay = scheduled[0]
+    assert scheduled_task_id == stored.id
+    assert scheduled_queue_name == IMAGE_QUEUE_NAME
+    assert scheduled_priority == 4
+    assert 10 <= scheduled_delay <= 13
     assert stored.metadata_json["auto_retry"]["status"] == "scheduled"
     assert stored.metadata_json["auto_retry"]["next_attempt"] == 2
     assert stored.metadata_json["auto_retry"]["max_attempts"] == 3
     assert stored.metadata_json["auto_retry"]["remaining_attempts"] == 2
-    assert stored.metadata_json["auto_retry"]["delay_seconds"] == 10
+    assert stored.metadata_json["auto_retry"]["delay_seconds"] == scheduled_delay
     assert stored.metadata_json["auto_retry"]["last_error_code"] == "provider_timeout"
 
     await engine.dispose()

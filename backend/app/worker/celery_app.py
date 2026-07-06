@@ -18,4 +18,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_queue="text_queue",
     timezone="Asia/Shanghai",
+    beat_schedule={
+        "recover-stale-generation-tasks": {
+            "task": "generation_tasks.recover_stale",
+            "schedule": settings.generation_task_recovery_interval_seconds,
+        },
+    },
 )

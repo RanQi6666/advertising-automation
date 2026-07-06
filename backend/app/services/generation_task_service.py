@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -53,6 +54,10 @@ TEXT_TASK_TYPES = {
     "copy_revise",
     "video_storyboard_generate",
     "video_storyboard_rewrite",
+    "external_work_order_analysis",
+    "external_topic_selection",
+    "external_copy_generation",
+    "external_video_storyboard",
 }
 IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
 VIDEO_TASK_TYPES = {"video_generate", "video_transfer"}
@@ -1008,6 +1013,18 @@ class GenerationTaskService:
             )
             return _video_storyboard_task_result(storyboard)
 
+        if task.task_type in {
+            "external_work_order_analysis",
+            "external_topic_selection",
+            "external_copy_generation",
+            "external_video_storyboard",
+        }:
+            from backend.app.services.external_ai_generation_service import (
+                ExternalAIGenerationService,
+            )
+
+            return await ExternalAIGenerationService().execute_task(session, task)
+
         raise AppError(f"Unsupported text task type: {task.task_type}")
 
     async def _run_image_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
@@ -1148,6 +1165,11 @@ class GenerationTaskService:
         await session.commit()
         await session.refresh(task)
 
+        if _should_cache_terminal_task_status(task):
+            from backend.app.services.llm_rate_limit import cache_generation_task_terminal_status
+
+            await cache_generation_task_terminal_status(task)
+
     async def _mark_failed(
         self,
         session: AsyncSession,
@@ -1188,6 +1210,12 @@ class GenerationTaskService:
         task.duration_ms = _duration_ms(task.started_at, task.finished_at)
         task.metadata_json = _finish_auto_retry_metadata(task, status="exhausted")
         await session.commit()
+        await session.refresh(task)
+
+        if _should_cache_terminal_task_status(task):
+            from backend.app.services.llm_rate_limit import cache_generation_task_terminal_status
+
+            await cache_generation_task_terminal_status(task)
         await session.refresh(task)
 
     async def _update_task_result(
@@ -1339,11 +1367,24 @@ def _should_auto_retry_task(task: GenerationTask, error_code: str) -> bool:
     )
 
 
+def _should_cache_terminal_task_status(task: GenerationTask) -> bool:
+    return task.task_type in {
+        "external_work_order_analysis",
+        "external_topic_selection",
+        "external_copy_generation",
+        "external_video_storyboard",
+    }
+
+
 def _auto_retry_delay_seconds(task: GenerationTask) -> int:
     delays = get_settings().generation_task_auto_retry_delays_seconds or [10]
     clean_delays = [max(int(value), 0) for value in delays] or [10]
     index = max(task.attempt_count - 1, 0)
-    return clean_delays[min(index, len(clean_delays) - 1)]
+    base_delay = clean_delays[min(index, len(clean_delays) - 1)]
+    if base_delay <= 0:
+        return 0
+    jitter_max = max(1, int(base_delay * 0.3))
+    return base_delay + random.randint(0, jitter_max)
 
 
 def _scheduled_auto_retry_metadata(

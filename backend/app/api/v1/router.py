@@ -7,6 +7,7 @@ from backend.app.api.v1.endpoints import (
     campaigns,
     copywriting,
     creatives,
+    external_ai_generation,
     external_image_generation,
     external_video_generation,
     generation_attempts,
@@ -89,6 +90,10 @@ api_router.include_router(
 api_router.include_router(
     material_generation.router,
     tags=["material-generation"],
+)
+api_router.include_router(
+    external_ai_generation.router,
+    tags=["ai-generation"],
 )
 api_router.include_router(
     external_image_generation.router,

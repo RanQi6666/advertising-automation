@@ -4,6 +4,7 @@ services:
   db:
     image: postgres:16
     restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-200}"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
@@ -52,7 +53,10 @@ services:
         condition: service_healthy
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn backend.app.main:app --host 0.0.0.0 --port 8001"
+             gunicorn backend.app.main:app
+             -k uvicorn.workers.UvicornWorker
+             -w ${BACKEND_WORKERS:-4}
+             -b 0.0.0.0:8001"
     healthcheck:
       test:
         [
@@ -91,8 +95,36 @@ services:
       celery -A backend.app.worker.celery_app:celery_app worker
       --loglevel=INFO
       --queues=text_queue
-      --concurrency=${TEXT_QUEUE_CONCURRENCY:-6}
+      --concurrency=${TEXT_QUEUE_CONCURRENCY:-8}
       --hostname=text@%h
+    deploy:
+      replicas: ${WORKER_TEXT_REPLICAS:-2}
+
+  worker_beat:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env.production}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
+      LOCAL_STORAGE_ROOT: /data/storage
+      GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - storage_data:/data/storage
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A backend.app.worker.celery_app:celery_app beat
+      --loglevel=INFO
 
   worker_image:
     build:
