@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -20,6 +20,7 @@ from backend.app.schemas.external_video_generation import (
 from backend.app.services.external_video_generation_service import (
     ExternalVideoGenerationService,
 )
+from backend.app.services.generation_task_dispatcher import schedule_generation_task
 
 
 class ExternalVideoGenerationRoute(APIRoute):
@@ -57,9 +58,12 @@ router = APIRouter(
 async def create_video_generation_job(
     payload: ExternalVideoGenerationCreate,
     session: DbSession,
+    background_tasks: BackgroundTasks,
 ):
     try:
-        job = await _service().create_video(session, payload)
+        job, task = await _service().create_video(session, payload)
+        if task is not None:
+            schedule_generation_task(task, background_tasks)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=_job_envelope(job).model_dump(),

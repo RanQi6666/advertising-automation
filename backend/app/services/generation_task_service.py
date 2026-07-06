@@ -60,7 +60,7 @@ TEXT_TASK_TYPES = {
     "external_video_storyboard",
 }
 IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
-VIDEO_TASK_TYPES = {"video_generate", "video_transfer"}
+VIDEO_TASK_TYPES = {"video_generate", "video_transfer", "external_video_start"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 IDEMPOTENCY_KEY_METADATA_FIELD = "idempotency_key"
@@ -1096,7 +1096,13 @@ class GenerationTaskService:
             raise AppError("video_id is required for video tasks.")
 
         service = VideoService()
-        if task.task_type == "video_transfer":
+        if task.task_type == "external_video_start":
+            from backend.app.services.external_video_generation_service import (
+                ExternalVideoGenerationService,
+            )
+
+            video = await ExternalVideoGenerationService().execute_start_task(session, task)
+        elif task.task_type == "video_transfer":
             video = await service.transfer_completed_video(session, video_id)
         else:
             video = await service.start_video_generation(session, video_id)

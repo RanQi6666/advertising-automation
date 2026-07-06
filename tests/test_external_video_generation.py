@@ -103,6 +103,14 @@ class FakeExternalUrlVideoProvider:
         )
 
 
+class FailingIfStartedVideoProvider:
+    async def start_generation(self, request):
+        raise ProviderError("provider start must not run during create request")
+
+    async def get_generation_status(self, provider_job_id: str):
+        raise AssertionError("status polling is not part of the create request")
+
+
 class FakeVideoStorage:
     transfer_calls: list[dict[str, str]] = []
 
@@ -190,10 +198,32 @@ def test_volcengine_video_timeout_seconds_is_passed_to_provider(
 
 
 @pytest.mark.asyncio
-async def test_external_video_generation_creates_async_job_and_polling_returns_url(
+async def test_external_video_generation_create_returns_job_without_starting_provider(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        video_service_module,
+        "get_video_provider",
+        lambda settings: FailingIfStartedVideoProvider(),
+    )
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
     client, engine, app, _session_factory = await _client_with_db(
         tmp_path,
         monkeypatch,
@@ -223,17 +253,21 @@ async def test_external_video_generation_creates_async_job_and_polling_returns_u
     assert create_body["message"] == "processing"
     assert created["status"] == "processing"
     assert poll_response.status_code == 200
-    assert poll_body["code"] == 0
-    assert poll_body["message"] == "success"
+    assert poll_body["code"] == 1001
+    assert poll_body["message"] == "processing"
     assert polled["job_id"] == created["job_id"]
-    assert polled["status"] == "succeeded"
-    assert polled["url"].startswith("https://ai.example.test/storage/videos/")
+    assert polled["status"] == "processing"
+    assert "url" not in polled
+    assert len(enqueued) == 1
+    start_task_id, start_queue_name, _priority = enqueued[0]
+    assert start_queue_name == VIDEO_QUEUE_NAME
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         campaigns = (await session.execute(select(Campaign))).scalars().all()
         assets = (await session.execute(select(CreativeAsset))).scalars().all()
         videos = (await session.execute(select(VideoAsset))).scalars().all()
         work_orders = (await session.execute(select(WorkOrder))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
 
     assert len(campaigns) == 1
     assert campaigns[0].work_order_id is None
@@ -248,8 +282,91 @@ async def test_external_video_generation_creates_async_job_and_polling_returns_u
     assert len(videos) == 1
     assert videos[0].prompt == _video_payload()["storyboard_text"]
     assert videos[0].storyboard == []
+    assert videos[0].status == VideoStatus.REQUESTED.value
+    assert videos[0].provider_job_id is None
     assert videos[0].metadata_json["source"] == EXTERNAL_SOURCE
     assert videos[0].metadata_json["external_request_id"] == "external-video-1"
+    assert len(tasks) == 1
+    assert tasks[0].id == start_task_id
+    assert tasks[0].queue_name == VIDEO_QUEUE_NAME
+    assert tasks[0].task_type == "external_video_start"
+    assert tasks[0].business_type == EXTERNAL_SOURCE
+    assert tasks[0].business_id == videos[0].id
+    assert tasks[0].payload_json == {"video_id": videos[0].id}
+    assert tasks[0].metadata_json["source"] == EXTERNAL_SOURCE
+    assert tasks[0].metadata_json["external_request_id"] == "external-video-1"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_start_task_then_polling_returns_url(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(external_request_id="external-video-start-task"),
+        )
+        created = create_response.json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert len(enqueued) == 1
+    start_task_id, start_queue_name, _priority = enqueued[0]
+    assert start_queue_name == VIDEO_QUEUE_NAME
+
+    await GenerationTaskService().process_task(start_task_id)
+
+    client, _second_engine, app, _second_session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    try:
+        poll_response = client.get(
+            f"/api/v1/integrations/video-generation/jobs/{created['job_id']}",
+            headers=_authorized_headers(),
+        )
+        poll_body = poll_response.json()
+        polled = poll_body["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert poll_response.status_code == 200
+    assert poll_body["code"] == 0
+    assert poll_body["message"] == "success"
+    assert polled["job_id"] == created["job_id"]
+    assert polled["status"] == "succeeded"
+    assert polled["url"].startswith("https://ai.example.test/storage/videos/")
 
     await engine.dispose()
 
@@ -272,11 +389,15 @@ async def test_external_video_generation_retries_transient_start_failure(
         service = ExternalVideoGenerationService()
         service.video_service = fake_video_service
 
-        job = await service.create_video(
+        job, task = await service.create_video(
             session,
             external_video_service_module.ExternalVideoGenerationCreate.model_validate(
                 _video_payload(external_request_id="video-start-retry")
             ),
+        )
+        assert task is not None
+        job = external_video_service_module.ExternalVideoGenerationService()._job_read(
+            await service.execute_start_task(session, task)
         )
 
     assert fake_video_service.calls == 3
@@ -287,7 +408,7 @@ async def test_external_video_generation_retries_transient_start_failure(
 
 
 @pytest.mark.asyncio
-async def test_external_video_generation_does_not_retry_app_error_on_start(
+async def test_external_video_generation_start_task_failure_marks_video_failed(
     tmp_path,
 ) -> None:
     _engine, session_factory = await _session_factory(tmp_path, "video-start-app-error.db")
@@ -297,15 +418,23 @@ async def test_external_video_generation_does_not_retry_app_error_on_start(
         service = ExternalVideoGenerationService()
         service.video_service = fake_video_service
 
+        job, task = await service.create_video(
+            session,
+            external_video_service_module.ExternalVideoGenerationCreate.model_validate(
+                _video_payload(external_request_id="video-start-app-error")
+            ),
+        )
+        assert task is not None
+
         with pytest.raises(AppError, match="duration_seconds"):
-            await service.create_video(
-                session,
-                external_video_service_module.ExternalVideoGenerationCreate.model_validate(
-                    _video_payload(external_request_id="video-start-app-error")
-                ),
-            )
+            await service.execute_start_task(session, task)
+
+        failed_video = await session.get(VideoAsset, job.job_id)
 
     assert fake_video_service.calls == 1
+    assert failed_video is not None
+    assert failed_video.status == VideoStatus.FAILED.value
+    assert "duration_seconds" in (failed_video.error_message or "")
 
     await _engine.dispose()
 
@@ -354,6 +483,11 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
             json=_video_payload(external_request_id="video-transfer-outside-get"),
         )
         created = create_response.json()["data"]
+        assert len(enqueued) == 1
+        start_task_id, start_queue_name, _start_priority = enqueued[0]
+        assert start_queue_name == VIDEO_QUEUE_NAME
+
+        await GenerationTaskService().process_task(start_task_id)
 
         first_poll_response = client.get(
             f"/api/v1/integrations/video-generation/jobs/{created['job_id']}",
@@ -369,14 +503,17 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
     assert first_polled["status"] == "processing"
     assert "url" not in first_polled
     assert FakeVideoStorage.transfer_calls == []
-    assert len(enqueued) == 1
-    transfer_task_id, transfer_queue_name, _priority = enqueued[0]
+    assert len(enqueued) == 2
+    transfer_task_id, transfer_queue_name, _priority = enqueued[1]
     assert transfer_queue_name == VIDEO_QUEUE_NAME
 
     async with session_factory() as session:
+        start_task = await session.get(GenerationTask, start_task_id)
         transfer_task = await session.get(GenerationTask, transfer_task_id)
         video = await session.get(VideoAsset, created["job_id"])
 
+    assert start_task is not None
+    assert start_task.task_type == "external_video_start"
     assert transfer_task is not None
     assert transfer_task.task_type == "video_transfer"
     assert transfer_task.business_id == created["job_id"]
@@ -543,6 +680,23 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
     client, engine, app, _session_factory = await _client_with_db(
         tmp_path,
         monkeypatch,
@@ -570,8 +724,12 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
 
     assert len(videos) == 1
+    assert len(tasks) == 1
+    assert tasks[0].task_type == "external_video_start"
+    assert len(enqueued) == 1
     await engine.dispose()
 
 

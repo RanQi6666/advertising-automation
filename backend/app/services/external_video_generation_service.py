@@ -13,6 +13,7 @@ from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.enums import VideoStatus
+from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.schemas.external_video_generation import (
@@ -20,10 +21,12 @@ from backend.app.schemas.external_video_generation import (
     ExternalVideoGenerationJobRead,
 )
 from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
+from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import VideoService
 
 VIDEO_START_RETRY_DELAYS_SECONDS = (0.2, 0.5)
+EXTERNAL_VIDEO_START_TASK_TYPE = "external_video_start"
 
 
 @dataclass(frozen=True)
@@ -36,12 +39,13 @@ class ExternalVideoGenerationService:
     def __init__(self) -> None:
         self.image_storage = ImageStorageService()
         self.video_service = VideoService()
+        self.task_service = GenerationTaskService()
 
     async def create_video(
         self,
         session: AsyncSession,
         payload: ExternalVideoGenerationCreate,
-    ) -> ExternalVideoGenerationJobRead:
+    ) -> tuple[ExternalVideoGenerationJobRead, GenerationTask | None]:
         storyboard_text = payload.storyboard_text.strip()
         if not storyboard_text:
             raise AppError("storyboard_text is required")
@@ -50,7 +54,7 @@ class ExternalVideoGenerationService:
 
         existing = await self._find_existing_video(session, payload.external_request_id)
         if existing:
-            return self._job_read(existing)
+            return self._job_read(existing), None
 
         decoded_images = [_decode_base64_image(image) for image in payload.images]
         max_bytes = self.image_storage.settings.image_download_max_bytes
@@ -123,6 +127,7 @@ class ExternalVideoGenerationService:
                 storyboard=[],
                 duration_seconds=payload.duration_seconds,
                 aspect_ratio=payload.aspect_ratio,
+                status=VideoStatus.REQUESTED.value,
                 metadata_json={
                     "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
                     "external_request_id": payload.external_request_id,
@@ -135,8 +140,23 @@ class ExternalVideoGenerationService:
             session.add(video)
             await session.flush()
 
-            started = await self._start_video_generation_with_retries(session, video)
-            return self._job_read(started)
+            # create_task 会提交当前 session；调度前必须让独立 worker 看见 video 和 task。
+            task = await self.task_service.create_task(
+                session,
+                queue_name=VIDEO_QUEUE_NAME,
+                task_type=EXTERNAL_VIDEO_START_TASK_TYPE,
+                business_type=EXTERNAL_VIDEO_GENERATION_SOURCE,
+                business_id=video.id,
+                campaign_id=campaign.id,
+                payload={"video_id": video.id},
+                max_attempts=1,
+                metadata={
+                    "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
+                    "external_request_id": payload.external_request_id,
+                },
+            )
+            await session.refresh(video)
+            return self._job_read(video), task
         except Exception:
             await session.rollback()
             raise
@@ -146,16 +166,39 @@ class ExternalVideoGenerationService:
         session: AsyncSession,
         job_id: str,
     ) -> ExternalVideoGenerationJobRead:
-        video = await session.get(VideoAsset, job_id)
-        if video is None or (video.metadata_json or {}).get(
-            "source"
-        ) != EXTERNAL_VIDEO_GENERATION_SOURCE:
-            raise NotFoundError("video job not found")
+        video = await self._load_external_video(session, job_id)
 
         if video.status == VideoStatus.GENERATING.value and video.provider_job_id:
             video = await self.video_service.refresh_video_generation(session, video.id)
 
         return self._job_read(video)
+
+    async def execute_start_task(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+    ) -> VideoAsset:
+        if task.task_type != EXTERNAL_VIDEO_START_TASK_TYPE:
+            raise AppError(f"Unsupported external video task type: {task.task_type}")
+
+        payload = task.payload_json or {}
+        video_id = str(payload.get("video_id") or task.business_id or "").strip()
+        if not video_id:
+            raise AppError("video_id is required for external video start tasks.")
+
+        video = await self._load_external_video(session, video_id)
+        if video.provider_job_id and video.status in {
+            VideoStatus.GENERATING.value,
+            VideoStatus.GENERATED.value,
+            VideoStatus.APPROVED.value,
+        }:
+            return video
+
+        try:
+            return await self._start_video_generation_with_retries(session, video)
+        except Exception as exc:
+            await self._mark_video_start_failed(session, video_id, exc)
+            raise
 
     def _build_source_assets(
         self,
@@ -217,6 +260,38 @@ class ExternalVideoGenerationService:
             ):
                 return video
         return None
+
+    async def _load_external_video(self, session: AsyncSession, video_id: str) -> VideoAsset:
+        video = await session.get(VideoAsset, video_id)
+        if video is None or (video.metadata_json or {}).get(
+            "source"
+        ) != EXTERNAL_VIDEO_GENERATION_SOURCE:
+            raise NotFoundError("video job not found")
+        return video
+
+    async def _mark_video_start_failed(
+        self,
+        session: AsyncSession,
+        video_id: str,
+        exc: Exception,
+    ) -> None:
+        await session.rollback()
+        video = await session.get(VideoAsset, video_id)
+        if video is None or (video.metadata_json or {}).get(
+            "source"
+        ) != EXTERNAL_VIDEO_GENERATION_SOURCE:
+            return
+
+        message = str(exc) or exc.__class__.__name__
+        video.status = VideoStatus.FAILED.value
+        video.error_message = message
+        video.metadata_json = {
+            **(video.metadata_json or {}),
+            "implementation_status": "provider_start_failed",
+            "provider_start_error": message,
+        }
+        await session.commit()
+        await session.refresh(video)
 
     def _store_source_image(
         self,
