@@ -51,12 +51,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head &&
-             gunicorn backend.app.main:app
-             -k uvicorn.workers.UvicornWorker
-             -w ${BACKEND_WORKERS:-4}
-             -b 0.0.0.0:8001"
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && exec gunicorn backend.app.main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} -b 0.0.0.0:8001",
+      ]
     healthcheck:
       test:
         [
