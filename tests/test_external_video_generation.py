@@ -4,14 +4,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.creative_asset import CreativeAsset
+from backend.app.db.models.enums import VideoStatus
+from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import get_session
+from backend.app.integrations.video import factory as video_factory
+from backend.app.integrations.video.base import VideoGenerationStart, VideoGenerationStatus
 from backend.app.main import create_app
+from backend.app.services import external_video_generation_service as external_video_service_module
+from backend.app.services import generation_task_service as task_module
+from backend.app.services import video_service as video_service_module
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.external_video_generation_service import ExternalVideoGenerationService
+from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
+from backend.app.services.video_service import VideoService
 
 EXTERNAL_SOURCE = "external_video_generation"
 ONE_PIXEL_PNG_BASE64 = (
@@ -55,7 +66,7 @@ async def _client_with_db(tmp_path, monkeypatch: pytest.MonkeyPatch, token: str 
     app = create_app()
     app.dependency_overrides[get_session] = override_get_session
     client = TestClient(app)
-    return client, engine, app
+    return client, engine, app, session_factory
 
 
 def _authorized_headers(token: str = "video-token") -> dict[str, str]:
@@ -74,12 +85,120 @@ def _video_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
+class FakeExternalUrlVideoProvider:
+    async def start_generation(self, request):
+        return VideoGenerationStart(
+            provider_job_id="provider-video-job-external",
+            provider_status="queued",
+            raw_response={"id": "provider-video-job-external", "status": "queued"},
+            request_payload={"prompt": request.prompt},
+        )
+
+    async def get_generation_status(self, provider_job_id: str):
+        return VideoGenerationStatus(
+            provider_job_id=provider_job_id,
+            provider_status="succeeded",
+            video_url="https://volcengine.example.test/video-output.mp4",
+            raw_response={"id": provider_job_id, "status": "succeeded"},
+        )
+
+
+class FakeVideoStorage:
+    transfer_calls: list[dict[str, str]] = []
+
+    def __init__(self, settings=None) -> None:
+        self.settings = settings or get_settings()
+
+    async def transfer_provider_video(
+        self,
+        source_url: str,
+        video_id: str,
+        provider_job_id: str,
+    ) -> tuple[str, str]:
+        self.transfer_calls.append(
+            {
+                "source_url": source_url,
+                "video_id": video_id,
+                "provider_job_id": provider_job_id,
+            }
+        )
+        storage_key = f"local://videos/{video_id}/{provider_job_id}.mp4"
+        public_url = self.public_url_for_storage_key(storage_key)
+        assert public_url is not None
+        return public_url, storage_key
+
+    def public_url_for_storage_key(self, storage_key: str | None) -> str | None:
+        if not storage_key or not storage_key.startswith("local://"):
+            return None
+        relative_path = storage_key.removeprefix("local://").lstrip("/")
+        return f"{self.settings.public_base_url.rstrip('/')}/storage/{relative_path}"
+
+    def storage_key_for_public_url(self, url: str | None) -> str | None:
+        if not url:
+            return None
+        prefix = f"{self.settings.public_base_url.rstrip('/')}/storage/"
+        if not url.startswith(prefix):
+            return None
+        return f"local://{url.removeprefix(prefix)}"
+
+
+class TransientStartVideoService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def start_video_generation(self, session, video_id: str):
+        self.calls += 1
+        if self.calls < 3:
+            raise ProviderError("Volcengine video API returned 502: Bad Gateway")
+        video = await session.get(VideoAsset, video_id)
+        assert video is not None
+        video.provider_job_id = "provider-video-job-retried"
+        video.status = VideoStatus.GENERATING.value
+        video.error_message = None
+        await session.commit()
+        await session.refresh(video)
+        return video
+
+
+class InvalidStartVideoService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def start_video_generation(self, session, video_id: str):
+        self.calls += 1
+        raise AppError("duration_seconds is out of range")
+
+
+def test_volcengine_video_timeout_seconds_is_passed_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeVolcengineVideoProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setenv("VIDEO_PROVIDER", "volcengine")
+    monkeypatch.setenv("VOLCENGINE_VIDEO_API_KEY", "video-api-key")
+    monkeypatch.setenv("VOLCENGINE_VIDEO_TIMEOUT_SECONDS", "123.5")
+    get_settings.cache_clear()
+    monkeypatch.setattr(video_factory, "VolcengineVideoProvider", FakeVolcengineVideoProvider)
+
+    video_factory.get_video_provider()
+
+    assert captured["timeout_seconds"] == 123.5
+
+
 @pytest.mark.asyncio
 async def test_external_video_generation_creates_async_job_and_polling_returns_url(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     try:
         create_response = client.post(
             "/api/v1/integrations/video-generation/videos",
@@ -136,11 +255,198 @@ async def test_external_video_generation_creates_async_job_and_polling_returns_u
 
 
 @pytest.mark.asyncio
+async def test_external_video_generation_retries_transient_start_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _engine, session_factory = await _session_factory(tmp_path, "video-start-retry.db")
+    fake_video_service = TransientStartVideoService()
+    monkeypatch.setattr(
+        external_video_service_module,
+        "VIDEO_START_RETRY_DELAYS_SECONDS",
+        (0, 0),
+        raising=False,
+    )
+
+    async with session_factory() as session:
+        service = ExternalVideoGenerationService()
+        service.video_service = fake_video_service
+
+        job = await service.create_video(
+            session,
+            external_video_service_module.ExternalVideoGenerationCreate.model_validate(
+                _video_payload(external_request_id="video-start-retry")
+            ),
+        )
+
+    assert fake_video_service.calls == 3
+    assert job.status == "processing"
+    assert job.job_id
+
+    await _engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_does_not_retry_app_error_on_start(
+    tmp_path,
+) -> None:
+    _engine, session_factory = await _session_factory(tmp_path, "video-start-app-error.db")
+    fake_video_service = InvalidStartVideoService()
+
+    async with session_factory() as session:
+        service = ExternalVideoGenerationService()
+        service.video_service = fake_video_service
+
+        with pytest.raises(AppError, match="duration_seconds"):
+            await service.create_video(
+                session,
+                external_video_service_module.ExternalVideoGenerationCreate.model_validate(
+                    _video_payload(external_request_id="video-start-app-error")
+                ),
+            )
+
+    assert fake_video_service.calls == 1
+
+    await _engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_polling_schedules_transfer_without_downloading_in_request(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    FakeVideoStorage.transfer_calls = []
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        video_service_module,
+        "get_video_provider",
+        lambda settings: FakeExternalUrlVideoProvider(),
+    )
+    monkeypatch.setattr(video_service_module, "VideoStorageService", FakeVideoStorage)
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", None)
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(external_request_id="video-transfer-outside-get"),
+        )
+        created = create_response.json()["data"]
+
+        first_poll_response = client.get(
+            f"/api/v1/integrations/video-generation/jobs/{created['job_id']}",
+            headers=_authorized_headers(),
+        )
+        first_polled = first_poll_response.json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert first_poll_response.status_code == 200
+    assert first_polled["status"] == "processing"
+    assert "url" not in first_polled
+    assert FakeVideoStorage.transfer_calls == []
+    assert len(enqueued) == 1
+    transfer_task_id, transfer_queue_name, _priority = enqueued[0]
+    assert transfer_queue_name == VIDEO_QUEUE_NAME
+
+    async with session_factory() as session:
+        transfer_task = await session.get(GenerationTask, transfer_task_id)
+        video = await session.get(VideoAsset, created["job_id"])
+
+    assert transfer_task is not None
+    assert transfer_task.task_type == "video_transfer"
+    assert transfer_task.business_id == created["job_id"]
+    assert video is not None
+    assert video.status == VideoStatus.GENERATED.value
+    assert video.url is None
+    assert video.metadata_json["implementation_status"] == "pending_transfer"
+    assert video.metadata_json["provider_video_url"] == "https://volcengine.example.test/video-output.mp4"
+
+    await GenerationTaskService().process_task(transfer_task_id)
+
+    assert FakeVideoStorage.transfer_calls == [
+        {
+            "source_url": "https://volcengine.example.test/video-output.mp4",
+            "video_id": created["job_id"],
+            "provider_job_id": "provider-video-job-external",
+        }
+    ]
+
+    async with session_factory() as session:
+        await VideoService().transfer_completed_video(session, created["job_id"])
+        stored_video = await session.get(VideoAsset, created["job_id"])
+
+    assert FakeVideoStorage.transfer_calls == [
+        {
+            "source_url": "https://volcengine.example.test/video-output.mp4",
+            "video_id": created["job_id"],
+            "provider_job_id": "provider-video-job-external",
+        }
+    ]
+    assert stored_video is not None
+    assert stored_video.url == (
+        f"https://ai.example.test/storage/videos/{created['job_id']}/"
+        "provider-video-job-external.mp4"
+    )
+    assert stored_video.metadata_json["implementation_status"] == "transferred"
+
+    client, final_engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    try:
+        final_poll_response = client.get(
+            f"/api/v1/integrations/video-generation/jobs/{created['job_id']}",
+            headers=_authorized_headers(),
+        )
+        final_polled = final_poll_response.json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert final_poll_response.status_code == 200
+    assert final_polled["status"] == "succeeded"
+    assert final_polled["url"] == stored_video.url
+
+    await final_engine.dispose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_external_video_generation_rejects_image_counts_other_than_two(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     try:
         response = client.post(
             "/api/v1/integrations/video-generation/videos",
@@ -162,7 +468,11 @@ async def test_external_video_generation_rejects_structured_storyboard_field(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     try:
         response = client.post(
             "/api/v1/integrations/video-generation/videos",
@@ -183,7 +493,11 @@ async def test_external_video_generation_requires_storyboard_text(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     try:
         payload = _video_payload()
         payload.pop("storyboard_text")
@@ -206,7 +520,11 @@ async def test_external_video_generation_requires_ai_ads_access_token(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     try:
         response = client.post(
             "/api/v1/integrations/video-generation/videos",
@@ -225,7 +543,11 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    client, engine, app, _session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
     payload = _video_payload(external_request_id="external-video-idempotent")
     try:
         first = client.post(

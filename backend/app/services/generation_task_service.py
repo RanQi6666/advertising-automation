@@ -55,7 +55,7 @@ TEXT_TASK_TYPES = {
     "video_storyboard_rewrite",
 }
 IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
-VIDEO_TASK_TYPES = {"video_generate"}
+VIDEO_TASK_TYPES = {"video_generate", "video_transfer"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 IDEMPOTENCY_KEY_METADATA_FIELD = "idempotency_key"
@@ -1076,9 +1076,13 @@ class GenerationTaskService:
         payload = task.payload_json or {}
         video_id = str(payload.get("video_id") or task.business_id or "")
         if not video_id:
-            raise AppError("video_id is required for video generation tasks.")
+            raise AppError("video_id is required for video tasks.")
 
-        video = await VideoService().start_video_generation(session, video_id)
+        service = VideoService()
+        if task.task_type == "video_transfer":
+            video = await service.transfer_completed_video(session, video_id)
+        else:
+            video = await service.start_video_generation(session, video_id)
         serialized_video = VideoAssetRead.model_validate(video).model_dump(mode="json")
         return {
             "video_id": video.id,

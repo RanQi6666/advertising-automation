@@ -412,6 +412,10 @@ class VideoService:
         provider_video_url = provider_status.video_url
         stored_video_url = None
         stored_storage_key = None
+        implementation_status = "provider_status_synced"
+        video_transfer_status = None
+        storage_note = "Provider status was synced without scheduling storage transfer."
+        should_schedule_transfer = False
         if provider_status.video_url and provider_status.provider_status == "succeeded":
             local_storage_key = self.video_storage.storage_key_for_public_url(
                 provider_status.video_url
@@ -421,16 +425,18 @@ class VideoService:
                 stored_video_url = self.video_storage.public_url_for_storage_key(
                     local_storage_key
                 )
+                video.url = stored_video_url
+                video.storage_key = stored_storage_key
+                implementation_status = "transferred"
+                video_transfer_status = "completed"
+                storage_note = "Provider video is already available in configured storage."
             else:
-                stored_video_url, stored_storage_key = (
-                    await self.video_storage.transfer_provider_video(
-                        source_url=provider_status.video_url,
-                        video_id=video.id,
-                        provider_job_id=provider_status.provider_job_id,
-                    )
-                )
-            video.url = stored_video_url
-            video.storage_key = stored_storage_key
+                should_schedule_transfer = True
+                video.url = None
+                video.storage_key = None
+                implementation_status = "pending_transfer"
+                video_transfer_status = "pending"
+                storage_note = "Provider video transfer is scheduled in the video background queue."
         elif provider_status.video_url:
             video.url = provider_status.video_url
         self._normalize_local_video_url(video)
@@ -438,7 +444,7 @@ class VideoService:
         video.metadata_json = _merge_metadata(
             video.metadata_json,
             {
-                "implementation_status": "provider_status_synced",
+                "implementation_status": implementation_status,
                 "video_provider": self.settings.video_provider,
                 "provider_status": provider_status.provider_status,
                 "provider_status_response": provider_status.raw_response,
@@ -446,14 +452,117 @@ class VideoService:
                 "stored_video_url": stored_video_url,
                 "stored_storage_key": stored_storage_key,
                 "last_frame_url": provider_status.last_frame_url,
-                "storage_note": (
-                    "Provider video was transferred to configured object storage when succeeded."
-                ),
+                "video_transfer_status": video_transfer_status,
+                "storage_note": storage_note,
+            },
+        )
+        await session.commit()
+        await session.refresh(video)
+        if should_schedule_transfer:
+            transfer_task = await self._schedule_video_transfer_task(session, video)
+            video.metadata_json = _merge_metadata(
+                video.metadata_json,
+                {"video_transfer_task_id": transfer_task.id},
+            )
+            await session.commit()
+            await session.refresh(video)
+        return video  # type: ignore[return-value]
+
+    async def transfer_completed_video(
+        self,
+        session: AsyncSession,
+        video_id: str,
+    ) -> VideoAsset:
+        video = await get_required(session, VideoAsset, video_id)
+        stored_video_url = self.video_storage.public_url_for_storage_key(video.storage_key)
+        if stored_video_url:
+            video.url = stored_video_url
+            video.metadata_json = _merge_metadata(
+                video.metadata_json,
+                {
+                    "implementation_status": "transferred",
+                    "video_transfer_status": "completed",
+                    "stored_video_url": stored_video_url,
+                    "stored_storage_key": video.storage_key,
+                    "storage_note": "Provider video is already stored locally.",
+                },
+            )
+            await session.commit()
+            await session.refresh(video)
+            return video  # type: ignore[return-value]
+
+        metadata = video.metadata_json or {}
+        provider_video_url = metadata.get("provider_video_url")
+        if not isinstance(provider_video_url, str) or not provider_video_url.strip():
+            provider_video_url = video.url
+        if not isinstance(provider_video_url, str) or not provider_video_url.strip():
+            raise AppError("Provider video URL is missing for transfer.")
+
+        local_storage_key = self.video_storage.storage_key_for_public_url(provider_video_url)
+        if local_storage_key:
+            stored_storage_key = local_storage_key
+            stored_video_url = self.video_storage.public_url_for_storage_key(local_storage_key)
+        else:
+            stored_video_url, stored_storage_key = await self.video_storage.transfer_provider_video(
+                source_url=provider_video_url,
+                video_id=video.id,
+                provider_job_id=video.provider_job_id or video.id,
+            )
+
+        video.url = stored_video_url
+        video.storage_key = stored_storage_key
+        video.status = VideoStatus.GENERATED.value
+        video.error_message = None
+        video.metadata_json = _merge_metadata(
+            video.metadata_json,
+            {
+                "implementation_status": "transferred",
+                "video_transfer_status": "completed",
+                "provider_video_url": provider_video_url,
+                "stored_video_url": stored_video_url,
+                "stored_storage_key": stored_storage_key,
+                "storage_note": "Provider video was transferred by the video background queue.",
             },
         )
         await session.commit()
         await session.refresh(video)
         return video  # type: ignore[return-value]
+
+    async def _schedule_video_transfer_task(
+        self,
+        session: AsyncSession,
+        video: VideoAsset,
+    ):
+        from backend.app.services.generation_task_dispatcher import schedule_generation_task
+        from backend.app.services.generation_task_service import (
+            VIDEO_QUEUE_NAME,
+            GenerationTaskService,
+        )
+
+        metadata = video.metadata_json or {}
+        provider_video_url = metadata.get("provider_video_url")
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type="video_transfer",
+            business_type="video_asset",
+            business_id=video.id,
+            campaign_id=video.campaign_id,
+            payload={
+                "video_id": video.id,
+                "provider_job_id": video.provider_job_id,
+                "provider_video_url": provider_video_url,
+            },
+            max_attempts=3,
+            metadata={
+                "source": "video_transfer",
+                "video_id": video.id,
+                "provider_job_id": video.provider_job_id,
+                "provider_video_url": provider_video_url,
+            },
+        )
+        schedule_generation_task(task)
+        return task
 
     async def _load_source_assets(
         self,

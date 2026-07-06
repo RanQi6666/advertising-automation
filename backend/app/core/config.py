@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     volcengine_video_generate_audio: bool = True
     volcengine_video_watermark: bool = False
     volcengine_video_return_last_frame: bool = False
+    volcengine_video_timeout_seconds: float = Field(default=60.0, ge=1, le=600)
     volcengine_video_execution_expires_after: int = Field(default=172800, ge=3600, le=259200)
     volcengine_video_priority: int = Field(default=0, ge=0, le=9)
     volcengine_video_safety_identifier: str | None = None

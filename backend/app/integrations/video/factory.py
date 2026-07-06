@@ -32,6 +32,7 @@ def get_video_provider(settings: Settings | None = None) -> VideoProvider:
             generate_audio=settings.volcengine_video_generate_audio,
             watermark=settings.volcengine_video_watermark,
             return_last_frame=settings.volcengine_video_return_last_frame,
+            timeout_seconds=settings.volcengine_video_timeout_seconds,
             execution_expires_after=settings.volcengine_video_execution_expires_after,
             priority=settings.volcengine_video_priority,
             safety_identifier=settings.volcengine_video_safety_identifier,

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.errors import AppError, NotFoundError
+from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -21,6 +22,8 @@ from backend.app.schemas.external_video_generation import (
 from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import VideoService
+
+VIDEO_START_RETRY_DELAYS_SECONDS = (0.2, 0.5)
 
 
 @dataclass(frozen=True)
@@ -132,7 +135,7 @@ class ExternalVideoGenerationService:
             session.add(video)
             await session.flush()
 
-            started = await self.video_service.start_video_generation(session, video.id)
+            started = await self._start_video_generation_with_retries(session, video)
             return self._job_read(started)
         except Exception:
             await session.rollback()
@@ -250,6 +253,27 @@ class ExternalVideoGenerationService:
             aspect_ratio=video.aspect_ratio,
         )
 
+    async def _start_video_generation_with_retries(
+        self,
+        session: AsyncSession,
+        video: VideoAsset,
+    ) -> VideoAsset:
+        max_attempts = len(VIDEO_START_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self.video_service.start_video_generation(session, video.id)
+            except ProviderError as exc:
+                if (
+                    video.provider_job_id
+                    or attempt >= max_attempts
+                    or not _is_retryable_video_start_error(exc)
+                ):
+                    raise
+                delay = VIDEO_START_RETRY_DELAYS_SECONDS[attempt - 1]
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        raise RuntimeError("video start retry loop exhausted unexpectedly")
+
 
 def _decode_base64_image(value: str) -> DecodedImage:
     text = (value or "").strip()
@@ -302,8 +326,27 @@ def _extension_for_mime_type(mime_type: str) -> str:
 
 
 def _external_status(video: VideoAsset) -> str:
-    if video.status in {VideoStatus.GENERATED.value, VideoStatus.APPROVED.value}:
+    if video.status in {VideoStatus.GENERATED.value, VideoStatus.APPROVED.value} and video.url:
         return "succeeded"
     if video.status == VideoStatus.FAILED.value:
         return "failed"
     return "processing"
+
+
+def _is_retryable_video_start_error(exc: ProviderError) -> bool:
+    message = str(exc).lower()
+    retryable_markers = (
+        "request failed",
+        "timeout",
+        "timed out",
+        "connection",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "internal server error",
+        "returned 500",
+        "returned 502",
+        "returned 503",
+        "returned 504",
+    )
+    return any(marker in message for marker in retryable_markers)
