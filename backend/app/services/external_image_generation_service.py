@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 from uuid import uuid4
 
@@ -348,7 +349,15 @@ class ExternalImageGenerationService:
             )
             for index in range(1, count + 1)
         ]
-        generated_images = await provider.generate_images(briefs)
+        generated_lists = await asyncio.gather(
+            *(
+                self.task_service.run_in_image_provider(
+                    lambda brief=brief: provider.generate_images([brief])
+                )
+                for brief in briefs
+            )
+        )
+        generated_images = [image for images in generated_lists for image in images]
         if len(generated_images) < count:
             raise ProviderError("Image provider returned fewer images than requested.")
 
