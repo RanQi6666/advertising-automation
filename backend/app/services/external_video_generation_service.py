@@ -26,7 +26,12 @@ from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import VideoService
 
 VIDEO_START_RETRY_DELAYS_SECONDS = (0.2, 0.5)
+EXTERNAL_VIDEO_FAILED_REQUEUE_LIMIT = 2
 EXTERNAL_VIDEO_START_TASK_TYPE = "external_video_start"
+LEGACY_EMPTY_VOLCENGINE_VIDEO_ERROR = "Volcengine video API request failed:"
+LEGACY_EMPTY_VOLCENGINE_VIDEO_ERROR_MESSAGE = (
+    "Volcengine video API request failed: request failed before response"
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,14 @@ class ExternalVideoGenerationService:
 
         existing = await self._find_existing_video(session, payload.external_request_id)
         if existing:
+            retry_task = await self._requeue_failed_external_video_if_safe(
+                session,
+                existing,
+                external_request_id=payload.external_request_id,
+            )
+            if retry_task is not None:
+                await session.refresh(existing)
+                return self._job_read(existing), retry_task
             return self._job_read(existing), None
 
         decoded_images = [_decode_base64_image(image) for image in payload.images]
@@ -293,6 +306,47 @@ class ExternalVideoGenerationService:
         await session.commit()
         await session.refresh(video)
 
+    async def _requeue_failed_external_video_if_safe(
+        self,
+        session: AsyncSession,
+        video: VideoAsset,
+        *,
+        external_request_id: str | None,
+    ) -> GenerationTask | None:
+        if not _should_requeue_failed_external_video(video):
+            return None
+
+        metadata = video.metadata_json or {}
+        retry_count = _external_retry_count(metadata)
+        if retry_count >= EXTERNAL_VIDEO_FAILED_REQUEUE_LIMIT:
+            return None
+
+        previous_error = _display_video_error(video.error_message)
+        video.status = VideoStatus.REQUESTED.value
+        video.error_message = None
+        video.metadata_json = {
+            **metadata,
+            "implementation_status": "requeued_after_provider_start_failed",
+            "previous_provider_start_error": previous_error,
+            "external_retry_count": retry_count + 1,
+        }
+        return await self.task_service.create_task(
+            session,
+            queue_name=VIDEO_QUEUE_NAME,
+            task_type=EXTERNAL_VIDEO_START_TASK_TYPE,
+            business_type=EXTERNAL_VIDEO_GENERATION_SOURCE,
+            business_id=video.id,
+            campaign_id=video.campaign_id,
+            payload={"video_id": video.id},
+            max_attempts=1,
+            metadata={
+                "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
+                "external_request_id": external_request_id,
+                "requeued_after_provider_start_failed": True,
+                "external_retry_count": retry_count + 1,
+            },
+        )
+
     def _store_source_image(
         self,
         *,
@@ -323,7 +377,7 @@ class ExternalVideoGenerationService:
             video_url=video.url
             if video.status in {VideoStatus.GENERATED.value, VideoStatus.APPROVED.value}
             else None,
-            error_message=video.error_message,
+            error_message=_display_video_error(video.error_message),
             duration_seconds=video.duration_seconds,
             aspect_ratio=video.aspect_ratio,
         )
@@ -409,7 +463,11 @@ def _external_status(video: VideoAsset) -> str:
 
 
 def _is_retryable_video_start_error(exc: ProviderError) -> bool:
-    message = str(exc).lower()
+    return _is_retryable_video_start_message(str(exc))
+
+
+def _is_retryable_video_start_message(message: str) -> bool:
+    message = message.lower()
     retryable_markers = (
         "request failed",
         "timeout",
@@ -425,3 +483,32 @@ def _is_retryable_video_start_error(exc: ProviderError) -> bool:
         "returned 504",
     )
     return any(marker in message for marker in retryable_markers)
+
+
+def _display_video_error(message: str | None) -> str | None:
+    if message is None:
+        return None
+    normalized = message.strip()
+    if not normalized:
+        return None
+    if normalized == LEGACY_EMPTY_VOLCENGINE_VIDEO_ERROR:
+        return LEGACY_EMPTY_VOLCENGINE_VIDEO_ERROR_MESSAGE
+    return normalized
+
+
+def _should_requeue_failed_external_video(video: VideoAsset) -> bool:
+    if video.status != VideoStatus.FAILED.value:
+        return False
+    if video.provider_job_id:
+        return False
+    message = _display_video_error(video.error_message)
+    if not message:
+        return False
+    return _is_retryable_video_start_message(message)
+
+
+def _external_retry_count(metadata: dict) -> int:
+    try:
+        return int(metadata.get("external_retry_count") or 0)
+    except (TypeError, ValueError):
+        return 0

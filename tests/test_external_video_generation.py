@@ -856,6 +856,256 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
 
 
 @pytest.mark.asyncio
+async def test_external_video_generation_requeues_retryable_failed_duplicate_request(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    payload = _video_payload(external_request_id="external-video-requeue")
+    try:
+        first = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        first_job_id = first.json()["data"]["job_id"]
+        assert len(enqueued) == 1
+
+        async with session_factory() as session:
+            video = await session.get(VideoAsset, first_job_id)
+            assert video is not None
+            video.status = VideoStatus.FAILED.value
+            video.error_message = "Volcengine video API request failed: "
+            video.metadata_json = {
+                **(video.metadata_json or {}),
+                "implementation_status": "provider_start_failed",
+                "provider_start_error": "Volcengine video API request failed: ",
+            }
+            tasks = (
+                (
+                    await session.execute(
+                        select(GenerationTask).where(GenerationTask.business_id == first_job_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for task in tasks:
+                task.status = "failed"
+                task.error_code = "provider_timeout"
+                task.error_message = "Volcengine video API request failed: "
+            await session.commit()
+
+        enqueued.clear()
+        second = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["code"] == 1001
+    assert second.json()["message"] == "processing"
+    assert second.json()["data"]["job_id"] == first_job_id
+    assert second.json()["data"]["status"] == "processing"
+    assert len(enqueued) == 1
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        video = await session.get(VideoAsset, first_job_id)
+        tasks = (
+            (
+                await session.execute(
+                    select(GenerationTask)
+                    .where(GenerationTask.business_id == first_job_id)
+                    .order_by(GenerationTask.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert video is not None
+    assert video.status == VideoStatus.REQUESTED.value
+    assert video.error_message is None
+    assert video.metadata_json["external_retry_count"] == 1
+    assert video.metadata_json["previous_provider_start_error"] == (
+        "Volcengine video API request failed: request failed before response"
+    )
+    assert len(tasks) == 2
+    assert tasks[-1].status == "queued"
+    assert tasks[-1].task_type == "external_video_start"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_does_not_requeue_provider_backed_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    payload = _video_payload(external_request_id="external-video-provider-failed")
+    try:
+        first = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        first_job_id = first.json()["data"]["job_id"]
+        assert len(enqueued) == 1
+
+        async with session_factory() as session:
+            video = await session.get(VideoAsset, first_job_id)
+            assert video is not None
+            video.status = VideoStatus.FAILED.value
+            video.provider_job_id = "provider-video-job-created"
+            video.error_message = "provider task failed"
+            tasks = (
+                (
+                    await session.execute(
+                        select(GenerationTask).where(GenerationTask.business_id == first_job_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for task in tasks:
+                task.status = "failed"
+            await session.commit()
+
+        enqueued.clear()
+        second = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["code"] == 5001
+    assert second.json()["data"]["job_id"] == first_job_id
+    assert second.json()["data"]["status"] == "failed"
+    assert second.json()["data"]["error"] == "provider task failed"
+    assert enqueued == []
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+
+    assert len(tasks) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_normalizes_legacy_empty_request_error(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    payload = _video_payload(external_request_id="external-video-legacy-empty-error")
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+        job_id = create_response.json()["data"]["job_id"]
+
+        async with session_factory() as session:
+            video = await session.get(VideoAsset, job_id)
+            assert video is not None
+            video.status = VideoStatus.FAILED.value
+            video.provider_job_id = "provider-video-job-created"
+            video.error_message = "Volcengine video API request failed: "
+            await session.commit()
+
+        poll_response = client.get(
+            f"/api/v1/integrations/video-generation/jobs/{job_id}",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert poll_response.status_code == 200
+    assert poll_response.json()["code"] == 5001
+    assert poll_response.json()["data"]["error"] == (
+        "Volcengine video API request failed: request failed before response"
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_campaign_list_filters_external_generation_placeholders(tmp_path) -> None:
     engine, session_factory = await _session_factory(tmp_path, "campaign-filter.db")
     async with session_factory() as session:
