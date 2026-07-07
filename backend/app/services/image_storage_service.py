@@ -3,6 +3,7 @@ import mimetypes
 import shutil
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -78,6 +79,32 @@ class ImageStorageService:
         public_url = self.public_url_for_storage_key(storage_key)
         if not public_url:
             raise ProviderError("Failed to build external image public URL.")
+        return public_url, storage_key
+
+    def store_uploaded_source_image(
+        self,
+        data: bytes,
+        content_type: str | None,
+    ) -> tuple[str, str]:
+        if self.settings.object_storage_provider != "local":
+            raise ProviderError(
+                f"Unsupported object storage provider: {self.settings.object_storage_provider}"
+            )
+        if not data:
+            raise ProviderError("Uploaded source image is empty.")
+
+        extension = _extension_from_content_type(content_type)
+        relative_path = (
+            Path("images") / "external_image_source" / f"{uuid4()}{extension}"
+        )
+        target_path = self.storage_root / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(data)
+
+        storage_key = f"local://{relative_path.as_posix()}"
+        public_url = self.public_url_for_storage_key(storage_key)
+        if not public_url:
+            raise ProviderError("Failed to build uploaded source image public URL.")
         return public_url, storage_key
 
     def public_url_for_storage_key(self, storage_key: str | None) -> str | None:
@@ -158,6 +185,21 @@ class ImageStorageService:
 def _extension_from_url(url: str) -> str:
     suffix = Path(urlparse(url).path).suffix.lower()
     return suffix if suffix in _IMAGE_EXTENSIONS else ".jpg"
+
+
+def _extension_from_content_type(content_type: str | None) -> str:
+    normalized = (content_type or "").split(";")[0].strip().lower()
+    if normalized in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if normalized == "image/png":
+        return ".png"
+    if normalized == "image/webp":
+        return ".webp"
+    if normalized == "image/gif":
+        return ".gif"
+    if normalized == "image/svg+xml":
+        return ".svg"
+    return ".jpg"
 
 
 def _mime_type_from_path(path: Path) -> str:

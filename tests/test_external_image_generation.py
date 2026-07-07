@@ -318,6 +318,180 @@ async def test_external_image_revision_endpoint_returns_new_job_and_polling_reus
 
 
 @pytest.mark.asyncio
+async def test_external_image_edit_service_creates_from_image_job_and_executes_with_reference(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        filename="external-image-edit-service.db",
+    )
+    source_bytes = b"uploaded source image bytes"
+
+    async with session_factory() as session:
+        service = ExternalImageGenerationService()
+        _, source_storage_key = service.image_storage.store_uploaded_source_image(
+            source_bytes,
+            "image/png",
+        )
+        task = await service.create_edit_job(
+            session,
+            source_storage_key=source_storage_key,
+            prompt="Make the background brighter while keeping the product unchanged",
+            count=1,
+            size="1:1",
+            model_id="source-edit-model",
+            external_request_id="uploaded-edit-service",
+        )
+        result = await service.execute_task(session, task)
+
+    expected_data_url = (
+        "data:image/png;base64," + base64.b64encode(source_bytes).decode("ascii")
+    )
+    assert task.queue_name == "image_queue"
+    assert task.task_type == "external_image_generate"
+    assert task.payload_json["mode"] == "from_image"
+    assert task.payload_json["source_storage_key"] == source_storage_key
+    assert task.payload_json["reference_image_data_url"] == expected_data_url
+    assert task.payload_json["prompt"] == (
+        "Make the background brighter while keeping the product unchanged"
+    )
+    assert task.metadata_json["source"] == "external_image_edit"
+    assert task.metadata_json["mode"] == "from_image"
+    assert result["mode"] == "from_image"
+    assert result["images"][0]["prompt"] == (
+        "Make the background brighter while keeping the product unchanged"
+    )
+    assert result["images"][0]["metadata"]["mode"] == "from_image"
+    assert result["images"][0]["metadata"]["source_storage_key"] == source_storage_key
+    assert result["images"][0]["url"].startswith("https://ai.example.test/storage/")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_image_edit_endpoint_accepts_multipart_and_polling_returns_result(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/image-generation/edits",
+            headers=_authorized_headers(),
+            data={
+                "external_request_id": "uploaded-edit-api",
+                "prompt": "Make the product photo suitable for a square ad",
+                "count": "1",
+                "size": "1:1",
+            },
+            files={"image": ("source.png", _uploaded_png_bytes(), "image/png")},
+        )
+        create_data = create_response.json()["data"]
+        poll_response = client.get(
+            f"/api/v1/integrations/image-generation/jobs/{create_data['job_id']}",
+            headers=_authorized_headers(),
+        )
+        polled = poll_response.json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert create_data["status"] == "processing"
+    assert create_data["count"] == 1
+    assert create_data["size"] == "1:1"
+    assert create_data["mode"] == "from_image"
+    assert poll_response.status_code == 200
+    assert polled["status"] == "succeeded"
+    assert polled["mode"] == "from_image"
+    assert polled["images"][0]["prompt"] == (
+        "Make the product photo suitable for a square ad"
+    )
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        task = (
+            await session.execute(
+                select(GenerationTask).where(
+                    GenerationTask.business_id == "uploaded-edit-api"
+                )
+            )
+        ).scalar_one()
+    assert task.payload_json["mode"] == "from_image"
+    assert task.payload_json["source_storage_key"].startswith(
+        "local://images/external_image_source/"
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_image_edit_endpoint_rejects_missing_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/image-generation/edits",
+            headers=_authorized_headers(),
+            data={"prompt": "Use this source image"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+
+
+@pytest.mark.asyncio
+async def test_external_image_edit_endpoint_rejects_non_image_content_type(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/image-generation/edits",
+            headers=_authorized_headers(),
+            data={"prompt": "Use this source image"},
+            files={"image": ("source.txt", b"not image", "text/plain")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert "Unsupported image content type" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_external_image_edit_endpoint_rejects_oversized_image(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IMAGE_DOWNLOAD_MAX_BYTES", "4")
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/image-generation/edits",
+            headers=_authorized_headers(),
+            data={"prompt": "Use this source image"},
+            files={"image": ("source.png", b"12345", "image/png")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert "Uploaded image exceeds configured size limit" in response.json()["message"]
+
+
+@pytest.mark.asyncio
 async def test_external_image_generation_requires_token_and_allows_query_token(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -392,6 +566,12 @@ async def test_external_image_generation_reuses_duplicate_external_request_id(
     assert first.json()["data"]["job_id"] == second.json()["data"]["job_id"]
     assert await _count_rows(engine, GenerationTask) == 1
     await engine.dispose()
+
+
+def _uploaded_png_bytes() -> bytes:
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
 
 
 @pytest.mark.asyncio

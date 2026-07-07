@@ -1,12 +1,25 @@
 from collections.abc import Awaitable, Callable
+from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from backend.app.api.deps import DbSession, require_ai_ads_access_token
+from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.schemas.external_image_generation import (
     IMAGE_GENERATION_CODE_PROCESSING,
@@ -22,6 +35,15 @@ from backend.app.services.external_image_generation_service import (
     ExternalImageGenerationService,
 )
 from backend.app.services.generation_task_dispatcher import schedule_generation_task
+
+IMAGE_UPLOAD_CONTENT_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/svg+xml",
+    "image/webp",
+}
 
 
 class ExternalImageGenerationRoute(APIRoute):
@@ -70,6 +92,62 @@ async def create_image_generation_job(
                 job_id=task.id,
                 count=int((task.payload_json or {}).get("count") or payload.count),
                 size=str((task.payload_json or {}).get("size") or payload.size),
+            ).model_dump(),
+        )
+    except ProviderError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code=IMAGE_GENERATION_CODE_PROVIDER_ERROR,
+        )
+    except AppError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_400_BAD_REQUEST,
+            code=IMAGE_GENERATION_CODE_VALIDATION_ERROR,
+        )
+
+
+@router.post(
+    "/edits",
+    response_model=ExternalImageGenerationEnvelope,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_uploaded_image_edit_job(
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+    image: Annotated[UploadFile, File(...)],
+    prompt: Annotated[str, Form(min_length=1)],
+    count: Annotated[int, Form(ge=1, le=5)] = 1,
+    size: Annotated[str | None, Form()] = None,
+    model_id: Annotated[str | None, Form(max_length=128)] = None,
+    external_request_id: Annotated[str | None, Form(max_length=128)] = None,
+):
+    try:
+        image_data, content_type = await _read_uploaded_image(image)
+        service = _service()
+        _, source_storage_key = service.image_storage.store_uploaded_source_image(
+            image_data,
+            content_type,
+        )
+        task = await service.create_edit_job(
+            session,
+            source_storage_key=source_storage_key,
+            prompt=prompt,
+            count=count,
+            size=size,
+            model_id=model_id,
+            external_request_id=external_request_id,
+        )
+        schedule_generation_task(task, background_tasks)
+        task_payload = task.payload_json or {}
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=_creation_envelope(
+                job_id=task.id,
+                count=int(task_payload.get("count") or count),
+                size=str(task_payload.get("size") or size or "1:1"),
+                mode=_clean_mode(task_payload.get("mode")),
             ).model_dump(),
         )
     except ProviderError as exc:
@@ -231,4 +309,17 @@ def _error_response(exc: Exception, status_code: int, *, code: int) -> JSONRespo
 
 def _clean_mode(value: object) -> str | None:
     text = str(value or "").strip()
-    return text if text in {"edit", "generate"} else None
+    return text if text in {"edit", "generate", "from_image"} else None
+
+
+async def _read_uploaded_image(image: UploadFile) -> tuple[bytes, str]:
+    content_type = (image.content_type or "").split(";")[0].strip().lower()
+    if content_type not in IMAGE_UPLOAD_CONTENT_TYPES:
+        raise AppError("Unsupported image content type")
+
+    image_data = await image.read()
+    if not image_data:
+        raise AppError("Uploaded image is empty")
+    if len(image_data) > get_settings().image_download_max_bytes:
+        raise AppError("Uploaded image exceeds configured size limit")
+    return image_data, content_type

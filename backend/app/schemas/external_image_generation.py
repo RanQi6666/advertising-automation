@@ -44,7 +44,7 @@ class ExternalImageGenerationJobRead(BaseModel):
     size: str
     model_id: str | None = None
     source_job_id: str | None = None
-    mode: Literal["edit", "generate"] | None = None
+    mode: Literal["edit", "generate", "from_image"] | None = None
 
 
 class ExternalImageGenerationEnvelope(BaseModel):

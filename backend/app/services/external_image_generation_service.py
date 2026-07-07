@@ -23,6 +23,7 @@ from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.model_selection import effective_image_model, settings_for_image_model
 
 EXTERNAL_IMAGE_GENERATION_SOURCE = "external_image_generation"
+EXTERNAL_IMAGE_EDIT_SOURCE = "external_image_edit"
 EXTERNAL_IMAGE_GENERATION_TASK_TYPE = "external_image_generate"
 EXTERNAL_IMAGE_BUSINESS_TYPE = "external_image"
 
@@ -173,6 +174,71 @@ class ExternalImageGenerationService:
         )
         return task
 
+    async def create_edit_job(
+        self,
+        session: AsyncSession,
+        *,
+        source_storage_key: str,
+        prompt: str,
+        count: int = 1,
+        size: str | None = None,
+        model_id: str | None = None,
+        external_request_id: str | None = None,
+    ) -> GenerationTask:
+        cleaned_prompt = _clean_text(prompt)
+        if not cleaned_prompt:
+            raise AppError("prompt is required")
+
+        cleaned_external_request_id = _clean_text(external_request_id)
+        existing = await self._find_existing_task(session, cleaned_external_request_id)
+        if existing is not None:
+            existing.reused_existing = True
+            return existing
+
+        cleaned_source_storage_key = _required_text(
+            source_storage_key,
+            "source_storage_key",
+        )
+        image_data_url = self.image_storage.data_url_for_storage_key(
+            cleaned_source_storage_key
+        )
+        if not image_data_url:
+            raise AppError("source image is unavailable")
+
+        resolved_count = _revision_count(count, {}, {})
+        resolved_size = _clean_text(size) or "1:1"
+        cleaned_model_id = _clean_text(model_id)
+        business_id = cleaned_external_request_id or str(uuid4())
+        task = await self.task_service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type=EXTERNAL_IMAGE_GENERATION_TASK_TYPE,
+            business_type=EXTERNAL_IMAGE_BUSINESS_TYPE,
+            business_id=business_id,
+            campaign_id=None,
+            payload={
+                "mode": "from_image",
+                "external_request_id": cleaned_external_request_id,
+                "source_storage_key": cleaned_source_storage_key,
+                "reference_image_data_url": image_data_url,
+                "prompt": cleaned_prompt,
+                "count": resolved_count,
+                "size": resolved_size,
+                "model_id": cleaned_model_id,
+            },
+            max_attempts=get_settings().external_image_generation_max_attempts,
+            metadata={
+                "source": EXTERNAL_IMAGE_EDIT_SOURCE,
+                "external_request_id": cleaned_external_request_id,
+                "mode": "from_image",
+                "source_storage_key": cleaned_source_storage_key,
+                "count": resolved_count,
+                "size": resolved_size,
+                "model_id": cleaned_model_id,
+            },
+        )
+        return task
+
     async def get_job(
         self,
         session: AsyncSession,
@@ -190,6 +256,8 @@ class ExternalImageGenerationService:
     ) -> dict:
         payload_json = task.payload_json or {}
         is_revision = bool(payload_json.get("is_revision"))
+        payload_mode = _clean_mode(payload_json.get("mode"))
+        is_from_image = payload_mode == "from_image"
         if is_revision:
             prompt = _required_text(payload_json.get("revised_prompt"), "prompt")
             count = _revision_count(payload_json.get("count"), {}, {})
@@ -212,6 +280,32 @@ class ExternalImageGenerationService:
                 payload_json.get("revision_feedback"),
                 "feedback",
             )
+            task.payload_json = {
+                **payload_json,
+                "reference_image_data_url": reference_image_data_url,
+            }
+        elif is_from_image:
+            prompt = _required_text(payload_json.get("prompt"), "prompt")
+            count = _revision_count(payload_json.get("count"), {}, {})
+            size = _clean_text(payload_json.get("size")) or "1:1"
+            model_id = _clean_text(payload_json.get("model_id"))
+            external_request_id = _clean_text(payload_json.get("external_request_id"))
+            source_job_id = None
+            source_image_index = None
+            source_storage_key = _required_text(
+                payload_json.get("source_storage_key"),
+                "source_storage_key",
+            )
+            reference_image_data_url = _clean_text(
+                payload_json.get("reference_image_data_url")
+            )
+            if not reference_image_data_url:
+                reference_image_data_url = self.image_storage.data_url_for_storage_key(
+                    source_storage_key
+                )
+            if not reference_image_data_url:
+                raise AppError("source image is unavailable")
+            revision_instruction = prompt
             task.payload_json = {
                 **payload_json,
                 "reference_image_data_url": reference_image_data_url,
@@ -239,7 +333,11 @@ class ExternalImageGenerationService:
                 title=(
                     "External image revision"
                     if is_revision
-                    else "External image generation"
+                    else (
+                        "External uploaded image edit"
+                        if is_from_image
+                        else "External image generation"
+                    )
                 ),
                 short_text="",
                 visual_direction=prompt,
@@ -274,6 +372,16 @@ class ExternalImageGenerationService:
                         "mode": mode,
                     }
                 )
+            elif is_from_image:
+                provider_mode = _clean_mode(image_metadata.get("mode"))
+                result_mode = "from_image"
+                image_metadata.update(
+                    {
+                        "mode": "from_image",
+                        "provider_mode": provider_mode,
+                        "source_storage_key": source_storage_key,
+                    }
+                )
             images.append(
                 {
                     "index": index,
@@ -284,7 +392,11 @@ class ExternalImageGenerationService:
                     "model": image_model,
                     "metadata": {
                         **image_metadata,
-                        "source": EXTERNAL_IMAGE_GENERATION_SOURCE,
+                        "source": (
+                            EXTERNAL_IMAGE_EDIT_SOURCE
+                            if is_from_image
+                            else EXTERNAL_IMAGE_GENERATION_SOURCE
+                        ),
                         "external_request_id": external_request_id,
                     },
                 }
@@ -296,6 +408,12 @@ class ExternalImageGenerationService:
                 "source_job_id": source_job_id,
                 "source_image_index": source_image_index,
                 "mode": result_mode or "generate",
+            }
+        elif is_from_image:
+            task.metadata_json = {
+                **dict(task.metadata_json or {}),
+                "mode": "from_image",
+                "source_storage_key": source_storage_key,
             }
 
         result = {
@@ -309,6 +427,9 @@ class ExternalImageGenerationService:
         if is_revision:
             result["source_job_id"] = source_job_id
             result["mode"] = result_mode or "generate"
+        elif is_from_image:
+            result["mode"] = "from_image"
+            result["source_storage_key"] = source_storage_key
         return result
 
     async def _find_existing_task(
@@ -353,7 +474,11 @@ class ExternalImageGenerationService:
             source_job_id=_clean_text(
                 result.get("source_job_id") or payload.get("source_job_id")
             ),
-            mode=_clean_mode(result.get("mode") or (task.metadata_json or {}).get("mode")),
+            mode=_clean_mode(
+                result.get("mode")
+                or payload.get("mode")
+                or (task.metadata_json or {}).get("mode")
+            ),
         )
 
 
@@ -428,4 +553,4 @@ def _initial_revision_mode(model_id: str | None) -> str:
 
 def _clean_mode(value: object) -> str | None:
     text = _clean_text(value)
-    return text if text in {"edit", "generate"} else None
+    return text if text in {"edit", "generate", "from_image"} else None
