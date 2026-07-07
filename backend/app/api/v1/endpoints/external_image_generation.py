@@ -16,6 +16,7 @@ from backend.app.schemas.external_image_generation import (
     ExternalImageGenerationCreate,
     ExternalImageGenerationEnvelope,
     ExternalImageGenerationJobRead,
+    ExternalImageRevisionCreate,
 )
 from backend.app.services.external_image_generation_service import (
     ExternalImageGenerationService,
@@ -85,6 +86,51 @@ async def create_image_generation_job(
         )
 
 
+@router.post(
+    "/jobs/{source_job_id}/revisions",
+    response_model=ExternalImageGenerationEnvelope,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_image_revision_job(
+    source_job_id: str,
+    payload: ExternalImageRevisionCreate,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    try:
+        task = await _service().create_revision_job(session, source_job_id, payload)
+        schedule_generation_task(task, background_tasks)
+        task_payload = task.payload_json or {}
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=_creation_envelope(
+                job_id=task.id,
+                count=int(task_payload.get("count") or 1),
+                size=str(task_payload.get("size") or "1:1"),
+                source_job_id=str(task_payload.get("source_job_id") or source_job_id),
+                mode=_clean_mode((task.metadata_json or {}).get("mode")),
+            ).model_dump(),
+        )
+    except NotFoundError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_404_NOT_FOUND,
+            code=IMAGE_GENERATION_CODE_VALIDATION_ERROR,
+        )
+    except ProviderError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code=IMAGE_GENERATION_CODE_PROVIDER_ERROR,
+        )
+    except AppError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_400_BAD_REQUEST,
+            code=IMAGE_GENERATION_CODE_VALIDATION_ERROR,
+        )
+
+
 @router.get("/jobs/{job_id}", response_model=ExternalImageGenerationEnvelope)
 async def get_image_generation_job(job_id: str, session: DbSession):
     try:
@@ -118,16 +164,23 @@ def _creation_envelope(
     job_id: str,
     count: int,
     size: str,
+    source_job_id: str | None = None,
+    mode: str | None = None,
 ) -> ExternalImageGenerationEnvelope:
+    data = {
+        "job_id": job_id,
+        "status": "processing",
+        "count": count,
+        "size": size,
+    }
+    if source_job_id:
+        data["source_job_id"] = source_job_id
+    if mode:
+        data["mode"] = mode
     return ExternalImageGenerationEnvelope(
         code=IMAGE_GENERATION_CODE_PROCESSING,
         message="processing",
-        data={
-            "job_id": job_id,
-            "status": "processing",
-            "count": count,
-            "size": size,
-        },
+        data=data,
     )
 
 
@@ -141,6 +194,10 @@ def _job_envelope(job: ExternalImageGenerationJobRead) -> ExternalImageGeneratio
     }
     if job.model_id:
         data["model_id"] = job.model_id
+    if job.source_job_id:
+        data["source_job_id"] = job.source_job_id
+    if job.mode:
+        data["mode"] = job.mode
     if job.status == "succeeded":
         return ExternalImageGenerationEnvelope(
             code=IMAGE_GENERATION_CODE_SUCCESS,
@@ -170,3 +227,8 @@ def _error_response(exc: Exception, status_code: int, *, code: int) -> JSONRespo
         status_code=status_code,
         content={"code": code, "message": message, "data": {}},
     )
+
+
+def _clean_mode(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text if text in {"edit", "generate"} else None

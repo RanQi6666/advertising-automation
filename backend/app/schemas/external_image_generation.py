@@ -18,6 +18,17 @@ class ExternalImageGenerationCreate(BaseModel):
     model_id: str | None = Field(default=None, max_length=128)
 
 
+class ExternalImageRevisionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_request_id: str | None = Field(default=None, max_length=128)
+    feedback: str = Field(min_length=1, max_length=2000)
+    source_image_index: int = Field(default=1, ge=1)
+    count: int | None = Field(default=None, ge=1, le=5)
+    size: str | None = None
+    model_id: str | None = Field(default=None, max_length=128)
+
+
 class ExternalGeneratedImageRead(BaseModel):
     index: int
     url: str
@@ -32,6 +43,8 @@ class ExternalImageGenerationJobRead(BaseModel):
     count: int
     size: str
     model_id: str | None = None
+    source_job_id: str | None = None
+    mode: Literal["edit", "generate"] | None = None
 
 
 class ExternalImageGenerationEnvelope(BaseModel):

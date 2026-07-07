@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from backend.app.schemas.external_image_generation import (
     ExternalGeneratedImageRead,
     ExternalImageGenerationCreate,
     ExternalImageGenerationJobRead,
+    ExternalImageRevisionCreate,
 )
 from backend.app.services.generation_task_service import (
     IMAGE_QUEUE_NAME,
@@ -70,6 +72,107 @@ class ExternalImageGenerationService:
         )
         return task
 
+    async def create_revision_job(
+        self,
+        session: AsyncSession,
+        source_job_id: str,
+        payload: ExternalImageRevisionCreate,
+    ) -> GenerationTask:
+        feedback = _clean_text(payload.feedback)
+        if not feedback:
+            raise AppError("feedback is required")
+
+        external_request_id = _clean_text(payload.external_request_id)
+        existing = await self._find_existing_task(session, external_request_id)
+        if existing is not None:
+            existing.reused_existing = True
+            return existing
+
+        source_task = await session.get(GenerationTask, source_job_id)
+        if (
+            source_task is None
+            or source_task.task_type != EXTERNAL_IMAGE_GENERATION_TASK_TYPE
+        ):
+            raise NotFoundError("source image generation job not found")
+        if source_task.status != "succeeded":
+            raise AppError("source image generation job is not succeeded")
+
+        source_payload = source_task.payload_json or {}
+        source_result = source_task.result_json or {}
+        source_image = _source_image_for_index(
+            source_result,
+            payload.source_image_index,
+        )
+        source_storage_key = _clean_text(source_image.get("storage_key"))
+        if not source_storage_key:
+            raise AppError("source image storage_key is required")
+        reference_image_data_url = self.image_storage.data_url_for_storage_key(
+            source_storage_key
+        )
+        if not reference_image_data_url:
+            raise AppError("source image is unavailable")
+
+        source_prompt = (
+            _clean_text(source_image.get("prompt"))
+            or _clean_text(source_result.get("prompt"))
+            or _clean_text(source_payload.get("prompt"))
+        )
+        if not source_prompt:
+            raise AppError("source image prompt is required")
+
+        count = _revision_count(payload.count, source_result, source_payload)
+        size = (
+            _clean_text(payload.size)
+            or _clean_text(source_image.get("size"))
+            or _clean_text(source_result.get("size"))
+            or _clean_text(source_payload.get("size"))
+            or "1:1"
+        )
+        model_id = (
+            _clean_text(payload.model_id)
+            or _clean_text(source_result.get("model_id"))
+            or _clean_text(source_payload.get("model_id"))
+            or _clean_text(source_image.get("model"))
+        )
+        revised_prompt = f"{source_prompt}\n\n修改要求：{feedback}"
+        mode = _initial_revision_mode(model_id)
+        business_id = external_request_id or str(uuid4())
+        task = await self.task_service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type=EXTERNAL_IMAGE_GENERATION_TASK_TYPE,
+            business_type=EXTERNAL_IMAGE_BUSINESS_TYPE,
+            business_id=business_id,
+            campaign_id=None,
+            payload={
+                "is_revision": True,
+                "external_request_id": external_request_id,
+                "source_job_id": source_task.id,
+                "source_image_index": payload.source_image_index,
+                "source_storage_key": source_storage_key,
+                "reference_image_data_url": reference_image_data_url,
+                "revision_feedback": feedback,
+                "prompt": source_prompt,
+                "revised_prompt": revised_prompt,
+                "count": count,
+                "size": size,
+                "model_id": model_id,
+            },
+            max_attempts=get_settings().external_image_generation_max_attempts,
+            metadata={
+                "source": EXTERNAL_IMAGE_GENERATION_SOURCE,
+                "external_request_id": external_request_id,
+                "is_revision": True,
+                "source_job_id": source_task.id,
+                "source_image_index": payload.source_image_index,
+                "count": count,
+                "size": size,
+                "model_id": model_id,
+                "mode": mode,
+            },
+        )
+        return task
+
     async def get_job(
         self,
         session: AsyncSession,
@@ -85,36 +188,92 @@ class ExternalImageGenerationService:
         session: AsyncSession,
         task: GenerationTask,
     ) -> dict:
-        payload = ExternalImageGenerationCreate.model_validate(task.payload_json or {})
-        if not payload.prompt.strip():
-            raise AppError("prompt is required")
+        payload_json = task.payload_json or {}
+        is_revision = bool(payload_json.get("is_revision"))
+        if is_revision:
+            prompt = _required_text(payload_json.get("revised_prompt"), "prompt")
+            count = _revision_count(payload_json.get("count"), {}, {})
+            size = _clean_text(payload_json.get("size")) or "1:1"
+            model_id = _clean_text(payload_json.get("model_id"))
+            external_request_id = _clean_text(payload_json.get("external_request_id"))
+            source_job_id = _clean_text(payload_json.get("source_job_id"))
+            source_image_index = _positive_int(payload_json.get("source_image_index"), 1)
+            source_storage_key = _clean_text(payload_json.get("source_storage_key"))
+            reference_image_data_url = _clean_text(
+                payload_json.get("reference_image_data_url")
+            )
+            if not reference_image_data_url:
+                reference_image_data_url = self.image_storage.data_url_for_storage_key(
+                    source_storage_key
+                )
+            if not reference_image_data_url:
+                raise AppError("source image is unavailable")
+            revision_instruction = _required_text(
+                payload_json.get("revision_feedback"),
+                "feedback",
+            )
+            task.payload_json = {
+                **payload_json,
+                "reference_image_data_url": reference_image_data_url,
+            }
+        else:
+            payload = ExternalImageGenerationCreate.model_validate(payload_json)
+            if not payload.prompt.strip():
+                raise AppError("prompt is required")
+            prompt = payload.prompt
+            count = payload.count
+            size = payload.size
+            model_id = payload.model_id
+            external_request_id = payload.external_request_id
+            source_job_id = None
+            source_image_index = None
+            reference_image_data_url = None
+            revision_instruction = None
 
-        settings = settings_for_image_model(get_settings(), payload.model_id)
+        settings = settings_for_image_model(get_settings(), model_id)
         provider = get_image_provider(settings)
         image_model = effective_image_model(settings)
         briefs = [
             ImageBrief(
                 image_index=index,
-                title="External image generation",
+                title=(
+                    "External image revision"
+                    if is_revision
+                    else "External image generation"
+                ),
                 short_text="",
-                visual_direction=payload.prompt,
-                size=payload.size,
-                raw_prompt=payload.prompt,
+                visual_direction=prompt,
+                size=size,
+                raw_prompt=prompt,
+                reference_image_data_url=reference_image_data_url,
+                revision_instruction=revision_instruction,
             )
-            for index in range(1, payload.count + 1)
+            for index in range(1, count + 1)
         ]
         generated_images = await provider.generate_images(briefs)
-        if len(generated_images) < payload.count:
+        if len(generated_images) < count:
             raise ProviderError("Image provider returned fewer images than requested.")
 
         images: list[dict] = []
-        for index, image in enumerate(generated_images[: payload.count], start=1):
+        result_mode: str | None = None
+        for index, image in enumerate(generated_images[:count], start=1):
             public_url, storage_key = await self.image_storage.transfer_external_image(
                 source_url=image.url,
                 job_id=task.id,
                 image_index=index,
                 source_storage_key=image.storage_key,
             )
+            image_metadata = dict(image.metadata)
+            if is_revision:
+                mode = _clean_mode(image_metadata.get("mode")) or "generate"
+                result_mode = result_mode or mode
+                image_metadata.update(
+                    {
+                        "source_job_id": source_job_id,
+                        "source_image_index": source_image_index,
+                        "mode": mode,
+                    }
+                )
             images.append(
                 {
                     "index": index,
@@ -124,21 +283,33 @@ class ExternalImageGenerationService:
                     "size": image.size,
                     "model": image_model,
                     "metadata": {
-                        **dict(image.metadata),
+                        **image_metadata,
                         "source": EXTERNAL_IMAGE_GENERATION_SOURCE,
-                        "external_request_id": payload.external_request_id,
+                        "external_request_id": external_request_id,
                     },
                 }
             )
 
-        return {
+        if is_revision:
+            task.metadata_json = {
+                **dict(task.metadata_json or {}),
+                "source_job_id": source_job_id,
+                "source_image_index": source_image_index,
+                "mode": result_mode or "generate",
+            }
+
+        result = {
             "images": images,
             "generated_count": len(images),
-            "count": payload.count,
-            "size": payload.size,
-            "model_id": payload.model_id,
+            "count": count,
+            "size": size,
+            "model_id": model_id,
             "image_model": image_model,
         }
+        if is_revision:
+            result["source_job_id"] = source_job_id
+            result["mode"] = result_mode or "generate"
+        return result
 
     async def _find_existing_task(
         self,
@@ -179,6 +350,10 @@ class ExternalImageGenerationService:
             count=int(result.get("count") or payload.get("count") or 1),
             size=str(result.get("size") or payload.get("size") or "1:1"),
             model_id=_clean_text(result.get("model_id") or payload.get("model_id")),
+            source_job_id=_clean_text(
+                result.get("source_job_id") or payload.get("source_job_id")
+            ),
+            mode=_clean_mode(result.get("mode") or (task.metadata_json or {}).get("mode")),
         )
 
 
@@ -195,3 +370,62 @@ def _clean_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _source_image_for_index(result: dict[str, Any], source_image_index: int) -> dict[str, Any]:
+    images = result.get("images")
+    if not isinstance(images, list):
+        raise AppError("source image generation job has no images")
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        try:
+            image_index = int(image.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if image_index == source_image_index:
+            return image
+    raise AppError("source image index not found")
+
+
+def _revision_count(
+    explicit_count: object,
+    source_result: dict[str, Any],
+    source_payload: dict[str, Any],
+) -> int:
+    raw_count = (
+        explicit_count
+        if explicit_count is not None
+        else source_result.get("count") or source_payload.get("count") or 1
+    )
+    count = _positive_int(raw_count, 1)
+    if count > 5:
+        raise AppError("count must be less than or equal to 5")
+    return count
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _required_text(value: object, field_name: str) -> str:
+    text = _clean_text(value)
+    if not text:
+        raise AppError(f"{field_name} is required")
+    return text
+
+
+def _initial_revision_mode(model_id: str | None) -> str:
+    settings = settings_for_image_model(get_settings(), model_id)
+    if settings.image_provider == "gateway" and settings.model_gateway_image_edit_enabled:
+        return "edit"
+    return "generate"
+
+
+def _clean_mode(value: object) -> str | None:
+    text = _clean_text(value)
+    return text if text in {"edit", "generate"} else None

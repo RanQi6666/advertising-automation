@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -5,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.services.generation_task_service as task_module
 from backend.app.core.config import get_settings
-from backend.app.db.base import Base
+from backend.app.db.base import Base, utcnow
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -14,7 +16,10 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.session import get_session
 from backend.app.main import create_app
-from backend.app.schemas.external_image_generation import ExternalImageGenerationCreate
+from backend.app.schemas.external_image_generation import (
+    ExternalImageGenerationCreate,
+    ExternalImageRevisionCreate,
+)
 from backend.app.services.external_image_generation_service import (
     ExternalImageGenerationService,
 )
@@ -163,6 +168,152 @@ async def test_external_image_generation_max_attempts_uses_settings(
         )
 
     assert task.max_attempts == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_image_revision_service_creates_job_from_source_image(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        filename="external-image-revision-service.db",
+    )
+    storage_root = tmp_path / "storage"
+    source_bytes = b"source image bytes"
+
+    async with session_factory() as session:
+        service = ExternalImageGenerationService()
+        source_task = await service.create_job(
+            session,
+            ExternalImageGenerationCreate.model_validate(
+                _image_payload(
+                    external_request_id="source-image-job",
+                    prompt="Original prompt",
+                    size="4:5",
+                    model_id="source-image-model",
+                )
+            ),
+        )
+        source_relative_path = (
+            storage_root
+            / "images"
+            / "external_image_generation"
+            / source_task.id
+            / "1.png"
+        )
+        source_relative_path.parent.mkdir(parents=True, exist_ok=True)
+        source_relative_path.write_bytes(source_bytes)
+        source_storage_key = (
+            f"local://images/external_image_generation/{source_task.id}/1.png"
+        )
+        source_task.status = "succeeded"
+        source_task.finished_at = utcnow()
+        source_task.result_json = {
+            "images": [
+                {
+                    "index": 1,
+                    "url": "https://ai.example.test/storage/source.png",
+                    "storage_key": source_storage_key,
+                    "prompt": "Original prompt",
+                    "size": "4:5",
+                    "model": "source-image-model",
+                }
+            ],
+            "count": 1,
+            "size": "4:5",
+            "model_id": "source-image-model",
+        }
+        await session.commit()
+        await session.refresh(source_task)
+
+        revision_task = await service.create_revision_job(
+            session,
+            source_task.id,
+            ExternalImageRevisionCreate.model_validate(
+                {
+                    "external_request_id": "revision-image-job",
+                    "feedback": "把背景改成红色",
+                }
+            ),
+        )
+        result = await service.execute_task(session, revision_task)
+
+    revised_prompt = "Original prompt\n\n修改要求：把背景改成红色"
+    expected_data_url = (
+        "data:image/png;base64," + base64.b64encode(source_bytes).decode("ascii")
+    )
+    assert revision_task.queue_name == "image_queue"
+    assert revision_task.task_type == "external_image_generate"
+    assert revision_task.business_type == "external_image"
+    assert revision_task.payload_json["is_revision"] is True
+    assert revision_task.payload_json["source_job_id"] == source_task.id
+    assert revision_task.payload_json["source_image_index"] == 1
+    assert revision_task.payload_json["source_storage_key"] == source_storage_key
+    assert revision_task.payload_json["reference_image_data_url"] == expected_data_url
+    assert revision_task.payload_json["prompt"] == "Original prompt"
+    assert revision_task.payload_json["revised_prompt"] == revised_prompt
+    assert revision_task.payload_json["size"] == "4:5"
+    assert revision_task.payload_json["model_id"] == "source-image-model"
+    assert revision_task.metadata_json["source_job_id"] == source_task.id
+    assert revision_task.metadata_json["mode"] == "generate"
+    assert result["images"][0]["prompt"] == revised_prompt
+    assert result["images"][0]["metadata"]["source_job_id"] == source_task.id
+    assert result["images"][0]["metadata"]["mode"] == "generate"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_image_revision_endpoint_returns_new_job_and_polling_reuses_job_api(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        source_response = client.post(
+            "/api/v1/integrations/image-generation/images",
+            headers=_authorized_headers(),
+            json=_image_payload(
+                external_request_id="source-for-revision",
+                prompt="Original prompt",
+            ),
+        )
+        source_job_id = source_response.json()["data"]["job_id"]
+
+        revision_response = client.post(
+            f"/api/v1/integrations/image-generation/jobs/{source_job_id}/revisions",
+            headers=_authorized_headers(),
+            json={
+                "external_request_id": "revision-via-api",
+                "feedback": "把背景改成红色",
+            },
+        )
+        revision_data = revision_response.json()["data"]
+
+        poll_response = client.get(
+            f"/api/v1/integrations/image-generation/jobs/{revision_data['job_id']}",
+            headers=_authorized_headers(),
+        )
+        polled = poll_response.json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert source_response.status_code == 202
+    assert revision_response.status_code == 202
+    assert revision_data["job_id"] != source_job_id
+    assert revision_data["status"] == "processing"
+    assert revision_data["source_job_id"] == source_job_id
+    assert revision_data["count"] == 1
+    assert revision_data["size"] == "1:1"
+    assert poll_response.status_code == 200
+    assert polled["job_id"] == revision_data["job_id"]
+    assert polled["status"] == "succeeded"
+    assert polled["source_job_id"] == source_job_id
+    assert polled["mode"] == "generate"
+    assert polled["images"][0]["prompt"] == "Original prompt\n\n修改要求：把背景改成红色"
+    assert await _count_rows(engine, GenerationTask) == 2
     await engine.dispose()
 
 

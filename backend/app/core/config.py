@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     model_gateway_image_model: str | None = None
     model_gateway_image_size: str = "1024x1024"
     model_gateway_image_response_format: str | None = None
+    model_gateway_image_edit_enabled: bool = False
+    model_gateway_image_edit_path: str = "/images/edits"
+    model_gateway_image_edit_model: str | None = None
     model_gateway_image_extra_body: dict[str, Any] = Field(default_factory=dict)
     model_gateway_text_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)

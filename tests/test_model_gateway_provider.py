@@ -335,6 +335,115 @@ async def test_gateway_image_provider_supports_url_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_image_provider_posts_reference_image_to_edit_endpoint(tmp_path) -> None:
+    source_bytes = b"source image bytes"
+    source_data_url = (
+        "data:image/png;base64," + base64.b64encode(source_bytes).decode("ascii")
+    )
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["content_type"] = request.headers.get("content-type")
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "b64_json": base64.b64encode(b"edited image bytes").decode("ascii"),
+                        "revised_prompt": "edited prompt",
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:3000/v1",
+    ) as client:
+        provider = GatewayImageProvider(
+            api_key="gateway-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="gateway-image-model",
+            provider_size="1024x1024",
+            storage_root=str(tmp_path),
+            edit_enabled=True,
+            edit_path="/images/edits",
+            edit_model="gateway-image-edit-model",
+            http_client=client,
+        )
+
+        images = await provider.generate_images(
+            [
+                ImageBrief(
+                    image_index=1,
+                    title="Revision",
+                    short_text="",
+                    visual_direction="Original prompt",
+                    size="1:1",
+                    raw_prompt="Original prompt\n\n修改要求：把背景改成红色",
+                    reference_image_data_url=source_data_url,
+                    revision_instruction="把背景改成红色",
+                )
+            ]
+        )
+
+    body = captured["body"]
+    assert captured["path"] == "/v1/images/edits"
+    assert captured["authorization"] == "Bearer gateway-key"
+    assert captured["content_type"].startswith("multipart/form-data;")
+    assert b'name="image"; filename="reference.png"' in body
+    assert source_bytes in body
+    assert b'name="prompt"' in body
+    assert "把背景改成红色".encode() in body
+    assert b'name="model"' in body
+    assert b"gateway-image-edit-model" in body
+    assert b'name="size"' in body
+    assert b"1024x1024" in body
+    assert images[0].url is None
+    assert images[0].storage_key
+    assert (tmp_path / images[0].storage_key.removeprefix("local://")).read_bytes() == (
+        b"edited image bytes"
+    )
+    assert images[0].metadata["mode"] == "edit"
+    assert images[0].metadata["edit_path"] == "/images/edits"
+
+
+@pytest.mark.asyncio
+async def test_gateway_image_provider_falls_back_to_generations_without_reference() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"data": [{"url": "https://images.example.test/generated.png"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:3000/v1",
+    ) as client:
+        provider = GatewayImageProvider(
+            api_key="gateway-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="gateway-image-model",
+            provider_size="1024x1024",
+            edit_enabled=True,
+            http_client=client,
+        )
+
+        images = await provider.generate_images([_brief(raw_prompt="plain prompt")])
+
+    assert captured["path"] == "/v1/images/generations"
+    assert captured["payload"]["prompt"] == "plain prompt"
+    assert images[0].metadata["mode"] == "generate"
+
+
+@pytest.mark.asyncio
 async def test_gateway_image_provider_sends_configured_request_timeout() -> None:
     captured: dict = {}
 

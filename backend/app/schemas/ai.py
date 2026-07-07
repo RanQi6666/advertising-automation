@@ -27,6 +27,9 @@ class ImageBrief(BaseModel):
     visual_direction: str
     size: str = "1:1"
     raw_prompt: str | None = None
+    reference_image_data_url: str | None = None
+    reference_image_url: str | None = None
+    revision_instruction: str | None = None
 
 
 class VideoStoryboardScene(BaseModel):
