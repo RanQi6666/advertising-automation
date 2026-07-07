@@ -10,7 +10,7 @@ from backend.app.core.errors import AppError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
-from backend.app.db.models.enums import VideoStatus
+from backend.app.db.models.enums import CreativeStatus, VideoStatus
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.integrations.video import get_video_provider
@@ -139,6 +139,7 @@ class VideoService:
             campaign_id=payload.campaign_id,
             asset_ids=payload.creative_asset_ids,
         )
+        _validate_video_keyframe_source_assets(assets)
         inferred_draft_id = payload.draft_id or assets[0].draft_id
         if draft is None and inferred_draft_id:
             draft = await get_required(session, CopyDraft, inferred_draft_id)
@@ -1553,6 +1554,59 @@ async def _stream_text_with_heartbeat(
         aclose = getattr(chunks, "aclose", None)
         if aclose:
             await aclose()
+
+
+def _validate_video_keyframe_source_assets(assets: list[CreativeAsset]) -> None:
+    keyframe_assets = [asset for asset in assets if _is_video_keyframe_asset(asset)]
+    if not keyframe_assets:
+        return
+
+    if len(keyframe_assets) != len(assets):
+        raise AppError(
+            "Selected video keyframe sources must use one complete approved keyframe scheme."
+        )
+
+    groups = {_positive_metadata_int(asset, "keyframe_group") for asset in keyframe_assets}
+    groups.discard(0)
+    if len(groups) != 1:
+        raise AppError(
+            "Selected video keyframe sources must use one complete approved keyframe scheme."
+        )
+
+    if any(asset.status != CreativeStatus.APPROVED.value for asset in keyframe_assets):
+        raise AppError(
+            "Selected video keyframe scheme has regenerated images that still need approval. "
+            "Use one complete approved keyframe scheme before video generation."
+        )
+
+    group_size = max(
+        1,
+        _positive_metadata_int(keyframe_assets[0], "keyframe_group_size") or 2,
+    )
+    positions = {
+        _positive_metadata_int(asset, "keyframe_position") for asset in keyframe_assets
+    }
+    required_positions = set(range(1, group_size + 1))
+    if not required_positions.issubset(positions):
+        raise AppError(
+            "Selected video keyframe scheme is incomplete. "
+            "Use one complete approved keyframe scheme before video generation."
+        )
+
+
+def _is_video_keyframe_asset(asset: CreativeAsset) -> bool:
+    metadata = asset.metadata_json if isinstance(asset.metadata_json, dict) else {}
+    return metadata.get("generation_mode") == "video_keyframe_variants"
+
+
+def _positive_metadata_int(asset: CreativeAsset, key: str) -> int:
+    metadata = asset.metadata_json if isinstance(asset.metadata_json, dict) else {}
+    value = metadata.get(key)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _heartbeat_event(stage: str) -> dict:

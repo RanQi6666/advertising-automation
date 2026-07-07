@@ -9,6 +9,7 @@ import {
   resolveWorkbenchBaseSelection,
   shouldClearCampaignWorkflowBeforeRefresh,
   videoCreativeAssetIdsForSelection,
+  videoCreativeSelectionForVideo,
   videoCreativeReferenceOptions,
   workflowRequiresVideo,
 } from "../src/lib/workflowArtifacts.ts";
@@ -267,6 +268,37 @@ test("expands partial keyframe selection into the full approved video scheme", (
   );
 
   assert.deepEqual(selected, ["group-1-first", "group-1-last"]);
+});
+
+test("blocks video selection when a regenerated keyframe scheme is not re-approved", () => {
+  const oldFirst = keyframeCreative("group-1-first-v1", 1, 1, 1, "approved");
+  const oldLast = keyframeCreative("group-1-last-v1", 1, 2, 1, "approved");
+  const regeneratedLast = keyframeCreative("group-1-last-v2", 1, 2, 2, "generated");
+
+  const selected = videoCreativeSelectionForVideo(
+    [oldFirst, oldLast, regeneratedLast],
+    ["group-1-first-v1"],
+    2,
+  );
+
+  assert.deepEqual(selected.assetIds, []);
+  assert.equal(selected.issue, "keyframe_scheme_unapproved");
+  assert.equal(selected.keyframeGroup, 1);
+});
+
+test("uses the regenerated keyframe pair after the new image is approved", () => {
+  const oldFirst = keyframeCreative("group-1-first-v1", 1, 1, 1, "approved");
+  const oldLast = keyframeCreative("group-1-last-v1", 1, 2, 1, "approved");
+  const regeneratedLast = keyframeCreative("group-1-last-v2", 1, 2, 2, "approved");
+
+  const selected = videoCreativeSelectionForVideo(
+    [oldFirst, oldLast, regeneratedLast],
+    ["group-1-first-v1"],
+    2,
+  );
+
+  assert.deepEqual(selected.assetIds, ["group-1-first-v1", "group-1-last-v2"]);
+  assert.equal(selected.issue, null);
 });
 
 test("ad preview options include approved normal images and exclude keyframe assets", () => {

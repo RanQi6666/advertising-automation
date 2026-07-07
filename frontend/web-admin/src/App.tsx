@@ -87,10 +87,11 @@ import {
   filterWorkflowArtifactsForTopic,
   resolveWorkbenchBaseSelection,
   shouldClearCampaignWorkflowBeforeRefresh,
-  videoCreativeAssetIdsForSelection,
+  videoCreativeSelectionForVideo,
   videoCreativeReferenceOptions,
   workflowRequiresVideo,
   type CreativeReviewKeyframeGroup,
+  type VideoCreativeSelectionForVideo,
 } from "./lib/workflowArtifacts";
 import { displayAssetUrl } from "./lib/assetUrls";
 import type {
@@ -547,6 +548,15 @@ function App() {
   const approvedCreatives = useMemo(
     () => currentTopicCreatives.filter((item) => item.status === "approved"),
     [currentTopicCreatives],
+  );
+  const videoCreativeSelection = useMemo(
+    () =>
+      videoCreativeSelectionForVideo(
+        currentTopicCreatives,
+        selectedCreativeIds,
+        VIDEO_MAX_REFERENCE_IMAGES,
+      ),
+    [currentTopicCreatives, selectedCreativeIds],
   );
   const approvedVideos = useMemo(
     () => topicVideos.filter((item) => item.status === "approved"),
@@ -2243,6 +2253,9 @@ function App() {
     for (const asset of group.assets) {
       await handleReview("creative_asset", asset.id, decision);
     }
+    if (decision === "approved") {
+      setSelectedCreativeIds(group.assets.map((asset) => asset.id));
+    }
   }
 
   function applyOptimisticReview(
@@ -3303,6 +3316,11 @@ function App() {
 
   async function handleCreateVideo() {
     if (!selectedCampaign) return;
+    const selectionWarning = videoCreativeSelectionMessage(videoCreativeSelection);
+    if (selectionWarning) {
+      setError(selectionWarning, "video");
+      return;
+    }
     const sourceIds = selectedCreativeIdsForVideo();
     if (!sourceIds.length) {
       setError("请先选择审核通过的图片。", "video");
@@ -3411,11 +3429,7 @@ function App() {
   }
 
   function selectedCreativeIdsForVideo(): string[] {
-    return videoCreativeAssetIdsForSelection(
-      approvedCreatives,
-      selectedCreativeIds,
-      VIDEO_MAX_REFERENCE_IMAGES,
-    );
+    return videoCreativeSelection.assetIds;
   }
 
   function applyStoryboard(generated: VideoStoryboardResponse) {
@@ -3797,6 +3811,7 @@ function App() {
             videoPollWarnings={videoPollWarnings}
             approvedCreatives={approvedCreatives}
             selectedCreativeIds={selectedCreativeIdsForVideo()}
+            videoSourceWarning={videoCreativeSelectionMessage(videoCreativeSelection)}
             setSelectedCreativeIds={setSelectedCreativeIds}
             selectedVideoId={selectedVideoId}
             setSelectedVideoId={setSelectedVideoId}
@@ -5825,6 +5840,7 @@ function VideosView({
   videoPollWarnings,
   approvedCreatives,
   selectedCreativeIds,
+  videoSourceWarning,
   setSelectedCreativeIds,
   selectedVideoId,
   setSelectedVideoId,
@@ -5844,6 +5860,7 @@ function VideosView({
   videoPollWarnings: Record<string, VideoPollWarning>;
   approvedCreatives: CreativeAsset[];
   selectedCreativeIds: string[];
+  videoSourceWarning: string | null;
   setSelectedCreativeIds: (ids: string[]) => void;
   selectedVideoId: string | null;
   setSelectedVideoId: (id: string) => void;
@@ -6124,13 +6141,17 @@ function VideosView({
             </div>
             <div className="video-action-bar">
               <span className="video-script-handoff">
-                {storyboardText.trim() ? "已沿用图片页视频创意脚本" : "请先在图片页生成或粘贴视频创意脚本"}
+                {videoSourceWarning ||
+                  (storyboardText.trim()
+                    ? "已沿用图片页视频创意脚本"
+                    : "请先在图片页生成或粘贴视频创意脚本")}
               </span>
               <button
                 className="primary-button"
                 type="button"
                 onClick={onCreateVideo}
                 disabled={
+                  Boolean(videoSourceWarning) ||
                   !storyboardText.trim() ||
                   !selectedCreativeIds.length ||
                   loading === "video" ||
@@ -9160,6 +9181,20 @@ function reviewStatusFromDecision(entityType: ReviewEntityType, decision: Review
     return "proposed";
   }
   return decision;
+}
+
+function videoCreativeSelectionMessage(selection: VideoCreativeSelectionForVideo): string | null {
+  if (selection.issue === "keyframe_scheme_incomplete") {
+    return selection.keyframeGroup
+      ? `方案 ${selection.keyframeGroup} 还缺少首帧或尾帧，请补齐并通过方案后再生成视频。`
+      : "当前关键帧方案还不完整，请补齐并通过方案后再生成视频。";
+  }
+  if (selection.issue === "keyframe_scheme_unapproved") {
+    return selection.keyframeGroup
+      ? `方案 ${selection.keyframeGroup} 有重生图片尚未通过审核，请先通过方案后再生成视频。`
+      : "当前关键帧方案有重生图片尚未通过审核，请先通过方案后再生成视频。";
+  }
+  return null;
 }
 
 function isVideoGeneratingStatus(status: string): boolean {

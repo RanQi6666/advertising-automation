@@ -44,6 +44,16 @@ export type VideoCreativeReferenceOption = {
   approved: boolean;
 };
 
+export type VideoCreativeSelectionIssue =
+  | "keyframe_scheme_incomplete"
+  | "keyframe_scheme_unapproved";
+
+export type VideoCreativeSelectionForVideo = {
+  assetIds: string[];
+  issue: VideoCreativeSelectionIssue | null;
+  keyframeGroup?: number;
+};
+
 export type WorkbenchBaseSelection = {
   selectedJobId: string | null;
   selectedCampaignId: string | null;
@@ -219,6 +229,52 @@ export function videoCreativeAssetIdsForSelection(
     .filter((asset) => asset.status === "approved")
     .slice(0, maxReferenceImages)
     .map((asset) => asset.id);
+}
+
+export function videoCreativeSelectionForVideo(
+  creatives: CreativeAsset[],
+  selectedCreativeIds: string[],
+  maxReferenceImages: number,
+): VideoCreativeSelectionForVideo {
+  const state = buildCreativeReviewState(creatives, []);
+  const selectedIds = new Set(selectedCreativeIds);
+  const selectedKeyframeGroup = state.keyframeGroups.find((group) =>
+    group.assets.some((asset) => selectedIds.has(asset.id)),
+  );
+
+  if (selectedKeyframeGroup) {
+    if (!selectedKeyframeGroup.complete) {
+      return {
+        assetIds: [],
+        issue: "keyframe_scheme_incomplete",
+        keyframeGroup: selectedKeyframeGroup.group,
+      };
+    }
+    if (!selectedKeyframeGroup.approved) {
+      return {
+        assetIds: [],
+        issue: "keyframe_scheme_unapproved",
+        keyframeGroup: selectedKeyframeGroup.group,
+      };
+    }
+    return {
+      assetIds: selectedKeyframeGroup.assets
+        .slice(0, maxReferenceImages)
+        .map((asset) => asset.id),
+      issue: null,
+      keyframeGroup: selectedKeyframeGroup.group,
+    };
+  }
+
+  const approvedCreatives = state.currentCreatives.filter((asset) => asset.status === "approved");
+  return {
+    assetIds: videoCreativeAssetIdsForSelection(
+      approvedCreatives,
+      selectedCreativeIds,
+      maxReferenceImages,
+    ),
+    issue: null,
+  };
 }
 
 export function adPreviewCreativeOptions(

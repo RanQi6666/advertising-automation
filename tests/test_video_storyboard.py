@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.errors import AppError
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
@@ -302,6 +303,57 @@ def test_video_generate_request_accepts_storyboard() -> None:
 
     assert payload.storyboard[0]["scene_index"] == 1
     assert payload.storyboard[0]["visual"] == "Open with the app benefit."
+
+
+@pytest.mark.asyncio
+async def test_video_service_rejects_incomplete_keyframe_source_scheme() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        campaign = Campaign(id="campaign-keyframe-video-1", name="Campaign", metadata_json={})
+        draft = CopyDraft(
+            id="draft-keyframe-video-1",
+            campaign_id=campaign.id,
+            topic_id="topic-1",
+            body="Ad copy",
+            headline="Headline",
+            metadata_json={},
+        )
+        first_frame = CreativeAsset(
+            id="asset-keyframe-first",
+            campaign_id=campaign.id,
+            draft_id=draft.id,
+            prompt="First frame",
+            url="https://cdn.example.com/first.png",
+            size="9:16",
+            status="approved",
+            metadata_json={
+                "generation_mode": "video_keyframe_variants",
+                "keyframe_group": 1,
+                "keyframe_position": 1,
+                "keyframe_group_size": 2,
+            },
+        )
+        session.add_all([campaign, draft, first_frame])
+        await session.commit()
+
+        with pytest.raises(AppError, match="complete approved keyframe"):
+            await VideoService().create_video_job(
+                session,
+                VideoGenerateRequest(
+                    campaign_id=campaign.id,
+                    creative_asset_ids=[first_frame.id],
+                    draft_id=draft.id,
+                    prompt="Create video",
+                    duration_seconds=12,
+                    aspect_ratio="9:16",
+                ),
+            )
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
