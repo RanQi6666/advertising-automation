@@ -11,6 +11,35 @@ from backend.app.core.errors import ProviderError
 from backend.app.integrations.image.volcengine_provider import _prompt_from_brief
 from backend.app.schemas.ai import GeneratedImage, ImageBrief
 
+_SHARED_GATEWAY_IMAGE_CLIENTS: dict[str, httpx.AsyncClient] = {}
+_GATEWAY_IMAGE_CLIENT_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+)
+
+
+def _normalize_gateway_image_base_url(base_url: str) -> str:
+    return base_url.rstrip("/")
+
+
+def _shared_gateway_image_client(base_url: str) -> httpx.AsyncClient:
+    normalized_base_url = _normalize_gateway_image_base_url(base_url)
+    client = _SHARED_GATEWAY_IMAGE_CLIENTS.get(normalized_base_url)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            limits=_GATEWAY_IMAGE_CLIENT_LIMITS,
+            timeout=None,
+        )
+        _SHARED_GATEWAY_IMAGE_CLIENTS[normalized_base_url] = client
+    return client
+
+
+async def aclose_shared_gateway_image_clients() -> None:
+    clients = list(_SHARED_GATEWAY_IMAGE_CLIENTS.values())
+    _SHARED_GATEWAY_IMAGE_CLIENTS.clear()
+    for client in clients:
+        await client.aclose()
+
 
 class GatewayImageProvider:
     def __init__(
@@ -26,9 +55,9 @@ class GatewayImageProvider:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _normalize_gateway_image_base_url(base_url)
         self.timeout_seconds = timeout_seconds
-        self._http_client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
+        self._http_client = http_client or _shared_gateway_image_client(self.base_url)
         self.model = model
         self.provider_size = provider_size
         self.response_format = response_format
@@ -95,6 +124,7 @@ class GatewayImageProvider:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
+                timeout=self.timeout_seconds,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

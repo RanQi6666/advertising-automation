@@ -13,6 +13,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.core.logging import configure_logging
 from backend.app.db.init_db import create_all_tables
+from backend.app.integrations.gateway_clients import aclose_shared_gateway_clients
 from backend.app.services.ad_generation_service import (
     recover_ad_generation_jobs_on_startup,
     run_ad_generation_job_recovery_loop,
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             recovery_loop.cancel()
             with suppress(asyncio.CancelledError):
                 await recovery_loop
+        await aclose_shared_gateway_clients()
 
 
 def create_app() -> FastAPI:

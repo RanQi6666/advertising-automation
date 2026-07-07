@@ -10,6 +10,7 @@ from backend.app.integrations.llm import get_llm_provider
 from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.copywriting import CopyGenerateRequest, CopyReviseRequest
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
+from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 
@@ -48,11 +49,12 @@ class CopywritingService:
         )
         llm, llm_settings = self._llm_for_model(payload.model_id)
         model_name = effective_text_model(llm_settings)
-        candidate = await llm.generate_copy(
-            campaign=campaign,  # type: ignore[arg-type]
-            topic=topic,  # type: ignore[arg-type]
-            constraints=payload.constraints,
-        )
+        async with llm_text_rate_limiter():
+            candidate = await llm.generate_copy(
+                campaign=campaign,  # type: ignore[arg-type]
+                topic=topic,  # type: ignore[arg-type]
+                constraints=payload.constraints,
+            )
         draft = CopyDraft(
             campaign_id=topic.campaign_id,
             topic_id=topic.id,
@@ -90,13 +92,14 @@ class CopywritingService:
         )
         llm, llm_settings = self._llm_for_model(payload.model_id)
         model_name = effective_text_model(llm_settings)
-        candidate = await llm.revise_copy(
-            campaign=campaign,  # type: ignore[arg-type]
-            topic=topic,  # type: ignore[arg-type]
-            draft=draft,  # type: ignore[arg-type]
-            feedback=payload.feedback,
-            constraints=payload.constraints,
-        )
+        async with llm_text_rate_limiter():
+            candidate = await llm.revise_copy(
+                campaign=campaign,  # type: ignore[arg-type]
+                topic=topic,  # type: ignore[arg-type]
+                draft=draft,  # type: ignore[arg-type]
+                feedback=payload.feedback,
+                constraints=payload.constraints,
+            )
         draft.status = DraftStatus.NEEDS_REVISION.value
         revised = CopyDraft(
             campaign_id=draft.campaign_id,

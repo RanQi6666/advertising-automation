@@ -94,6 +94,14 @@ async def llm_text_rate_limiter(
     poll_interval_seconds: float | None = None,
 ) -> AsyncIterator[None]:
     settings = get_settings()
+    # Local dev/test frequently runs mock or fake providers without Redis.
+    if (
+        _redis_client_factory_for_tests is None
+        and (settings.llm_provider == "mock" or settings.environment == "local")
+    ):
+        yield
+        return
+
     client = _make_redis_client(settings)
     member = str(uuid4())
     acquired = False

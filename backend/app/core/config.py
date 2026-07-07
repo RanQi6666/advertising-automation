@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     model_gateway_base_url: str | None = None
     model_gateway_text_model: str | None = None
     model_gateway_text_timeout_seconds: float = Field(default=180.0, ge=1, le=600)
+    model_gateway_text_fast_timeout_seconds: float = Field(default=45.0, ge=1, le=600)
     model_gateway_image_timeout_seconds: float = Field(default=300.0, ge=1, le=900)
     generation_task_execution_backend: Literal["background_tasks", "celery"] = (
         "background_tasks"

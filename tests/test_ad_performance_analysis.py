@@ -11,6 +11,7 @@ from backend.app.db.session import get_session
 from backend.app.integrations.llm.openai_provider import _ad_performance_user_content
 from backend.app.main import create_app
 from backend.app.schemas.ad_performance import AdPerformanceAnalysisCreate
+from backend.app.services import ad_performance_analysis_service as ad_perf_module
 from backend.app.services.ad_performance_analysis_service import AdPerformanceAnalysisService
 
 
@@ -139,6 +140,23 @@ def _new10_payload() -> dict:
             "date_stop": "2026-06-21",
         },
     }
+
+
+class RecordingLimiter:
+    def __init__(self) -> None:
+        self.entered = 0
+        self.exited = 0
+        self.active = 0
+
+    async def __aenter__(self):
+        self.entered += 1
+        self.active += 1
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        self.exited += 1
+        self.active -= 1
 
 
 @pytest.mark.asyncio
@@ -275,6 +293,53 @@ async def test_ad_performance_analysis_sends_media_fields_to_llm(
     assert creative_context["video_keyframes"] == [
         {"second": 0, "image_url": "https://cdn.example.com/new12-0.jpg"}
     ]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ad_performance_analysis_enters_limiter_around_wait_for_and_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limiter = RecordingLimiter()
+    active_states: list[int] = []
+
+    class LimitedProvider:
+        async def analyze_ad_performance(self, context: dict[str, Any]) -> dict[str, Any]:
+            del context
+            active_states.append(limiter.active)
+            return {"summary": "limited analysis"}
+
+        async def stream_ad_performance_analysis(self, context: dict[str, Any]):
+            del context
+            active_states.append(limiter.active)
+            yield {"type": "delta", "text": '{"summary":"'}
+            active_states.append(limiter.active)
+            yield {
+                "type": "done",
+                "analysis": {"summary": "limited streamed analysis"},
+            }
+
+    monkeypatch.setattr(ad_perf_module, "llm_text_rate_limiter", lambda: limiter, raising=False)
+    monkeypatch.setattr(ad_perf_module, "get_llm_provider", lambda settings=None: LimitedProvider())
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    service = AdPerformanceAnalysisService()
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        analysis = await service.create_analysis(
+            session,
+            AdPerformanceAnalysisCreate.model_validate(_new12_payload()),
+        )
+        events = [event async for event in service.stream_ai_analysis(session, analysis.id)]
+
+    assert limiter.entered == 2
+    assert limiter.exited == 2
+    assert active_states == [1, 1, 1]
+    assert [event["type"] for event in events] == ["start", "delta", "done"]
 
     await engine.dispose()
 

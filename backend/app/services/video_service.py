@@ -32,6 +32,7 @@ from backend.app.services.creative_safety_prompts import (
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.landing_visual_reference import merge_landing_visual_reference
+from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 from backend.app.services.video_storage_service import VideoStorageService
@@ -89,15 +90,16 @@ class VideoService:
         draft = await self._load_draft(session, payload.draft_id, assets)
         context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         llm, llm_settings = self._llm_for_model(payload.model_id)
-        storyboard = await llm.generate_video_storyboard(
-            campaign=campaign,  # type: ignore[arg-type]
-            draft=draft,  # type: ignore[arg-type]
-            assets=assets,  # type: ignore[arg-type]
-            duration_seconds=payload.duration_seconds,
-            aspect_ratio=payload.aspect_ratio,
-            context=context,
-            instructions=payload.instructions,
-        )
+        async with llm_text_rate_limiter():
+            storyboard = await llm.generate_video_storyboard(
+                campaign=campaign,  # type: ignore[arg-type]
+                draft=draft,  # type: ignore[arg-type]
+                assets=assets,  # type: ignore[arg-type]
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+                context=context,
+                instructions=payload.instructions,
+            )
         storyboard_items = [scene.model_dump() for scene in storyboard.scenes]
         creative_strategy = _strategy_from_context(context)
         prompt = _storyboard_to_prompt(
@@ -198,21 +200,22 @@ class VideoService:
         full_text = ""
         try:
             llm, _llm_settings = self._llm_for_model(payload.model_id)
-            async for event in _stream_text_with_heartbeat(
-                llm.stream_video_storyboard_text(
-                    campaign=campaign,  # type: ignore[arg-type]
-                    draft=draft,  # type: ignore[arg-type]
-                    assets=assets,  # type: ignore[arg-type]
-                    duration_seconds=payload.duration_seconds,
-                    aspect_ratio=payload.aspect_ratio,
-                    context=context,
-                    instructions=payload.instructions,
-                ),
-                stage="video_storyboard_generation",
-            ):
-                if event["type"] == "delta":
-                    full_text += event["text"]
-                yield event
+            async with llm_text_rate_limiter():
+                async for event in _stream_text_with_heartbeat(
+                    llm.stream_video_storyboard_text(
+                        campaign=campaign,  # type: ignore[arg-type]
+                        draft=draft,  # type: ignore[arg-type]
+                        assets=assets,  # type: ignore[arg-type]
+                        duration_seconds=payload.duration_seconds,
+                        aspect_ratio=payload.aspect_ratio,
+                        context=context,
+                        instructions=payload.instructions,
+                    ),
+                    stage="video_storyboard_generation",
+                ):
+                    if event["type"] == "delta":
+                        full_text += event["text"]
+                    yield event
         except Exception as exc:
             yield {"type": "error", "message": f"视频脚本生成中断：{exc}"}
             return
@@ -245,17 +248,18 @@ class VideoService:
         draft = await self._load_draft(session, payload.draft_id, assets)
         context = await self._video_context(session, campaign, draft, assets, payload.metadata_json)
         llm, llm_settings = self._llm_for_model(payload.model_id)
-        storyboard = await llm.revise_video_storyboard(
-            campaign=campaign,  # type: ignore[arg-type]
-            draft=draft,  # type: ignore[arg-type]
-            assets=assets,  # type: ignore[arg-type]
-            duration_seconds=payload.duration_seconds,
-            aspect_ratio=payload.aspect_ratio,
-            context=context,
-            current_storyboard=payload.storyboard,
-            current_storyboard_text=payload.storyboard_text,
-            feedback=feedback,
-        )
+        async with llm_text_rate_limiter():
+            storyboard = await llm.revise_video_storyboard(
+                campaign=campaign,  # type: ignore[arg-type]
+                draft=draft,  # type: ignore[arg-type]
+                assets=assets,  # type: ignore[arg-type]
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+                context=context,
+                current_storyboard=payload.storyboard,
+                current_storyboard_text=payload.storyboard_text,
+                feedback=feedback,
+            )
         storyboard_items = [scene.model_dump() for scene in storyboard.scenes]
         creative_strategy = _strategy_from_context(context)
         prompt = _storyboard_to_prompt(
@@ -310,23 +314,24 @@ class VideoService:
         full_text = ""
         try:
             llm, _llm_settings = self._llm_for_model(payload.model_id)
-            async for event in _stream_text_with_heartbeat(
-                llm.stream_video_storyboard_revision_text(
-                    campaign=campaign,  # type: ignore[arg-type]
-                    draft=draft,  # type: ignore[arg-type]
-                    assets=assets,  # type: ignore[arg-type]
-                    duration_seconds=payload.duration_seconds,
-                    aspect_ratio=payload.aspect_ratio,
-                    context=context,
-                    current_storyboard=payload.storyboard,
-                    current_storyboard_text=payload.storyboard_text,
-                    feedback=feedback,
-                ),
-                stage="video_storyboard_revision",
-            ):
-                if event["type"] == "delta":
-                    full_text += event["text"]
-                yield event
+            async with llm_text_rate_limiter():
+                async for event in _stream_text_with_heartbeat(
+                    llm.stream_video_storyboard_revision_text(
+                        campaign=campaign,  # type: ignore[arg-type]
+                        draft=draft,  # type: ignore[arg-type]
+                        assets=assets,  # type: ignore[arg-type]
+                        duration_seconds=payload.duration_seconds,
+                        aspect_ratio=payload.aspect_ratio,
+                        context=context,
+                        current_storyboard=payload.storyboard,
+                        current_storyboard_text=payload.storyboard_text,
+                        feedback=feedback,
+                    ),
+                    stage="video_storyboard_revision",
+                ):
+                    if event["type"] == "delta":
+                        full_text += event["text"]
+                    yield event
         except Exception as exc:
             yield {"type": "error", "message": f"视频脚本改写中断：{exc}"}
             return

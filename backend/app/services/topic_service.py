@@ -23,6 +23,7 @@ from backend.app.services.landing_page_service import (
     LandingPageService,
     snapshot_to_context,
 )
+from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
 
@@ -53,11 +54,12 @@ class TopicService:
         llm_settings = settings_for_text_model(self.settings, payload.model_id)
         llm = get_llm_provider(llm_settings)
         model_name = effective_text_model(llm_settings)
-        candidates = await llm.generate_topics(
-            campaign=campaign,  # type: ignore[arg-type]
-            limit=payload.limit,
-            signals=effective_signals,
-        )
+        async with llm_text_rate_limiter():
+            candidates = await llm.generate_topics(
+                campaign=campaign,  # type: ignore[arg-type]
+                limit=payload.limit,
+                signals=effective_signals,
+            )
         topics: list[ContentTopic] = []
         angle_plan = _topic_angle_plan(effective_signals)
         for index, candidate in enumerate(candidates):
@@ -108,40 +110,41 @@ class TopicService:
         generated_count = 0
         angle_plan = _topic_angle_plan(effective_signals)
         try:
-            topic_stream = llm.stream_topics(
-                campaign=campaign,  # type: ignore[arg-type]
-                limit=limit,
-                signals=effective_signals,
-            )
-            async for item in _stream_topics_with_heartbeat(topic_stream):
-                if isinstance(item, dict):
-                    yield item
-                    continue
-                candidate = item
-                if generated_count >= limit:
-                    break
-                generated_count += 1
-                topic = self._topic_from_candidate(
-                    campaign_id=payload.campaign_id,
-                    candidate=candidate,
+            async with llm_text_rate_limiter():
+                topic_stream = llm.stream_topics(
+                    campaign=campaign,  # type: ignore[arg-type]
+                    limit=limit,
                     signals=effective_signals,
-                    streamed=True,
-                    provider=llm_settings.llm_provider,
-                    model=model_name,
-                    angle_plan_item=_angle_plan_item_for_candidate(
-                        angle_plan,
-                        generated_count - 1,
-                        candidate,
-                    ),
                 )
-                session.add(topic)
-                await session.commit()
-                await session.refresh(topic)
-                yield {
-                    "type": "topic",
-                    "index": generated_count,
-                    "topic": TopicRead.model_validate(topic).model_dump(mode="json"),
-                }
+                async for item in _stream_topics_with_heartbeat(topic_stream):
+                    if isinstance(item, dict):
+                        yield item
+                        continue
+                    candidate = item
+                    if generated_count >= limit:
+                        break
+                    generated_count += 1
+                    topic = self._topic_from_candidate(
+                        campaign_id=payload.campaign_id,
+                        candidate=candidate,
+                        signals=effective_signals,
+                        streamed=True,
+                        provider=llm_settings.llm_provider,
+                        model=model_name,
+                        angle_plan_item=_angle_plan_item_for_candidate(
+                            angle_plan,
+                            generated_count - 1,
+                            candidate,
+                        ),
+                    )
+                    session.add(topic)
+                    await session.commit()
+                    await session.refresh(topic)
+                    yield {
+                        "type": "topic",
+                        "index": generated_count,
+                        "topic": TopicRead.model_validate(topic).model_dump(mode="json"),
+                    }
         except Exception as exc:
             error_detail = str(exc) or exc.__class__.__name__
             for index in range(generated_count + 1, limit + 1):

@@ -28,6 +28,7 @@ from backend.app.services.collaboration import (
     require_write_access,
 )
 from backend.app.services.custom_event_types import custom_event_type
+from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.utils import get_required
 
 LOW_SAMPLE_IMPRESSIONS = 100
@@ -225,45 +226,51 @@ class AdPerformanceAnalysisService:
 
         try:
             provider = get_llm_provider(get_settings())
-            async for event in provider.stream_ad_performance_analysis(context):
-                event_type = event.get("type")
-                if event_type == "delta":
-                    text = event.get("text")
-                    if text:
-                        yield {"type": "delta", "analysis_id": analysis.id, "text": text}
-                elif event_type == "done":
-                    ai_analysis = AdPerformanceAIAnalysis.model_validate(
-                        event.get("analysis") or {}
-                    ).model_dump(mode="json")
-                    updated_result = {
-                        **base_result,
-                        "analysis_mode": "llm_only",
-                        "ai_analysis": ai_analysis,
-                        "summary": ai_analysis.get("summary") or base_result.get("summary"),
-                        "llm_error": None,
-                    }
-                    updated_result["optimization_work_order"] = (
-                        _optimization_work_order_from_result(
-                            metrics=metrics,
-                            campaign=campaign,
-                            adset=adset,
-                            creative=creative,
-                            request_payload=request_payload,
-                            analysis_result=updated_result,
+            async with llm_text_rate_limiter():
+                async for event in provider.stream_ad_performance_analysis(context):
+                    event_type = event.get("type")
+                    if event_type == "delta":
+                        text = event.get("text")
+                        if text:
+                            yield {
+                                "type": "delta",
+                                "analysis_id": analysis.id,
+                                "text": text,
+                            }
+                    elif event_type == "done":
+                        ai_analysis = AdPerformanceAIAnalysis.model_validate(
+                            event.get("analysis") or {}
+                        ).model_dump(mode="json")
+                        updated_result = {
+                            **base_result,
+                            "analysis_mode": "llm_only",
+                            "ai_analysis": ai_analysis,
+                            "summary": ai_analysis.get("summary")
+                            or base_result.get("summary"),
+                            "llm_error": None,
+                        }
+                        updated_result["optimization_work_order"] = (
+                            _optimization_work_order_from_result(
+                                metrics=metrics,
+                                campaign=campaign,
+                                adset=adset,
+                                creative=creative,
+                                request_payload=request_payload,
+                                analysis_result=updated_result,
+                            )
                         )
-                    )
-                    analysis.metrics = metrics
-                    analysis.analysis_result = updated_result
-                    analysis.error_message = None
-                    session.add(analysis)
-                    await session.commit()
-                    await session.refresh(analysis)
-                    yield {
-                        "type": "done",
-                        "analysis_id": analysis.id,
-                        "ai_analysis": ai_analysis,
-                    }
-                    return
+                        analysis.metrics = metrics
+                        analysis.analysis_result = updated_result
+                        analysis.error_message = None
+                        session.add(analysis)
+                        await session.commit()
+                        await session.refresh(analysis)
+                        yield {
+                            "type": "done",
+                            "analysis_id": analysis.id,
+                            "ai_analysis": ai_analysis,
+                        }
+                        return
             raise RuntimeError("LLM stream ended without a final analysis.")
         except Exception as exc:  # noqa: BLE001 - stream errors are sent to the browser.
             error = _trim_text(str(exc), 500) or exc.__class__.__name__
@@ -1598,20 +1605,21 @@ async def _append_llm_analysis(
     settings = get_settings()
     try:
         provider = get_llm_provider(settings)
-        ai_data = await asyncio.wait_for(
-            provider.analyze_ad_performance(
-                _llm_analysis_context(
-                    metrics=metrics,
-                    campaign=campaign,
-                    adset=adset,
-                    creative=creative,
-                    insight=insight,
-                    analysis_context=result,
-                    request_payload=request_payload,
-                )
-            ),
-            timeout=settings.ad_performance_llm_timeout_seconds,
-        )
+        async with llm_text_rate_limiter():
+            ai_data = await asyncio.wait_for(
+                provider.analyze_ad_performance(
+                    _llm_analysis_context(
+                        metrics=metrics,
+                        campaign=campaign,
+                        adset=adset,
+                        creative=creative,
+                        insight=insight,
+                        analysis_context=result,
+                        request_payload=request_payload,
+                    )
+                ),
+                timeout=settings.ad_performance_llm_timeout_seconds,
+            )
         ai_analysis = AdPerformanceAIAnalysis.model_validate(ai_data).model_dump(mode="json")
     except Exception as exc:  # noqa: BLE001 - provider failures should not block ingestion.
         error = _trim_text(str(exc), 500) or exc.__class__.__name__

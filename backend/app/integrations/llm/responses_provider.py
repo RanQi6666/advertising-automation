@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
@@ -11,6 +12,9 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.integrations.llm.openai_provider import (
     OpenAILLMProvider,
+    _ad_performance_analysis_from_data,
+    _ad_performance_analysis_system_prompt,
+    _ad_performance_user_content,
     _asset_context,
     _compact_storyboard_for_revision,
     _draft_context,
@@ -20,6 +24,42 @@ from backend.app.integrations.llm.openai_provider import (
 )
 from backend.app.schemas.ai import TopicCandidate
 
+_SHARED_GATEWAY_TEXT_CLIENTS: dict[str, httpx.AsyncClient] = {}
+_GATEWAY_CLIENT_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+
+
+def _normalize_gateway_base_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/"
+
+
+def _shared_gateway_text_client(base_url: str) -> httpx.AsyncClient:
+    normalized_base_url = _normalize_gateway_base_url(base_url)
+    client = _SHARED_GATEWAY_TEXT_CLIENTS.get(normalized_base_url)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            base_url=normalized_base_url,
+            limits=_GATEWAY_CLIENT_LIMITS,
+            timeout=None,
+        )
+        _SHARED_GATEWAY_TEXT_CLIENTS[normalized_base_url] = client
+    return client
+
+
+async def aclose_shared_gateway_text_clients() -> None:
+    clients = list(_SHARED_GATEWAY_TEXT_CLIENTS.values())
+    _SHARED_GATEWAY_TEXT_CLIENTS.clear()
+    for client in clients:
+        await client.aclose()
+
+
+def _gateway_text_timeout(timeout_seconds: float) -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=5.0,
+        read=float(timeout_seconds),
+        write=10.0,
+        pool=5.0,
+    )
+
 
 class GatewayResponsesLLMProvider(OpenAILLMProvider):
     def __init__(
@@ -28,28 +68,44 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
         model: str,
         base_url: str,
         timeout_seconds: float = 180.0,
+        fast_timeout_seconds: float | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
-        self.base_url = base_url.rstrip("/") + "/"
+        self.base_url = _normalize_gateway_base_url(base_url)
         self.timeout_seconds = timeout_seconds
+        self.fast_timeout_seconds = (
+            fast_timeout_seconds
+            if fast_timeout_seconds is not None
+            else get_settings().model_gateway_text_fast_timeout_seconds
+        )
         self.supports_video_input = False
         self.video_input_fps = 1.0
-        self._http_client = http_client or httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=timeout_seconds,
-        )
+        self._http_client = http_client or _shared_gateway_text_client(self.base_url)
 
-    async def _json_completion(self, system: str, user: Any) -> dict[str, Any]:
-        content = await self._text_completion(system, user)
+    async def _json_completion(
+        self,
+        system: str,
+        user: Any,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        content = await self._text_completion(system, user, timeout_seconds=timeout_seconds)
         content = _strip_json_markdown(content)
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
             raise ProviderError("LLM returned invalid JSON.") from exc
 
-    async def _text_completion(self, system: str, user: Any) -> str:
+    async def _text_completion(
+        self,
+        system: str,
+        user: Any,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        request_timeout_seconds = (
+            timeout_seconds if timeout_seconds is not None else self.fast_timeout_seconds
+        )
         response = await self._http_client.post(
             "responses",
             json={
@@ -63,6 +119,7 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
+            timeout=_gateway_text_timeout(request_timeout_seconds),
         )
         try:
             response.raise_for_status()
@@ -72,6 +129,18 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
                 f"Gateway responses API returned HTTP {exc.response.status_code}: {body}"
             ) from exc
         return _extract_response_text(response.json())
+
+    async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
+        data = await self._json_completion(
+            system=_ad_performance_analysis_system_prompt(),
+            user=_ad_performance_user_content(
+                context,
+                supports_video_input=self.supports_video_input,
+                video_fps=self.video_input_fps,
+            ),
+            timeout_seconds=self.timeout_seconds,
+        )
+        return _ad_performance_analysis_from_data(data)
 
     async def stream_ad_performance_analysis(
         self,

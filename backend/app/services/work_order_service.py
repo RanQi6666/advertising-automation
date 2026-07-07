@@ -18,6 +18,7 @@ from backend.app.services.custom_event_types import (
     custom_event_label,
     custom_event_type,
 )
+from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.work_order_parser import parse_work_order_text
 
 DELIVERY_FIELD_KEYS = (
@@ -87,7 +88,8 @@ class WorkOrderService:
         if cached:
             return cached
 
-        result = await provider.extract_delivery_fields(raw_content)
+        async with llm_text_rate_limiter():
+            result = await provider.extract_delivery_fields(raw_content)
         extraction = _normalize_delivery_extraction(result)
         _set_cached_delivery_extraction(cache_key, extraction.model_dump(mode="json"))
         return extraction
