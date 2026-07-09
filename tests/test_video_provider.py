@@ -122,23 +122,92 @@ def test_provider_status_maps_to_internal_video_status() -> None:
     assert _provider_status_to_video_status("expired") == VideoStatus.FAILED.value
 
 
-def test_volcengine_query_response_unwraps_items_payload() -> None:
+def test_volcengine_query_response_matches_requested_item_from_items_payload() -> None:
+    response = {
+        "total": 2,
+        "items": [
+            {
+                "id": "cgt-other",
+                "status": "succeeded",
+                "content": {"video_url": "https://example.com/wrong.mp4"},
+            },
+            {
+                "id": "cgt-target",
+                "status": "succeeded",
+                "content": {"video_url": "https://example.com/video.mp4"},
+            },
+        ],
+    }
+
+    task = _unwrap_task_response(response, "cgt-target")
+
+    assert task["id"] == "cgt-target"
+    assert task["status"] == "succeeded"
+    assert task["content"]["video_url"] == "https://example.com/video.mp4"
+
+
+def test_volcengine_query_response_rejects_items_payload_without_requested_item() -> None:
     response = {
         "total": 1,
         "items": [
             {
-                "id": "cgt-1",
+                "id": "cgt-other",
                 "status": "succeeded",
-                "content": {"video_url": "https://example.com/video.mp4"},
+                "content": {"video_url": "https://example.com/wrong.mp4"},
             }
         ],
     }
 
-    task = _unwrap_task_response(response)
+    with pytest.raises(ProviderError, match="cgt-target"):
+        _unwrap_task_response(response, "cgt-target")
 
-    assert task["id"] == "cgt-1"
-    assert task["status"] == "succeeded"
-    assert task["content"]["video_url"].endswith(".mp4")
+
+@pytest.mark.asyncio
+async def test_volcengine_get_generation_status_uses_task_id_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VolcengineVideoProvider(
+        api_key="test-key",
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        model="ep-20260611001554-nwgqk",
+        resolution="720p",
+        image_mode="first_last_frame",
+        min_duration_seconds=4,
+        max_duration_seconds=12,
+        max_reference_images=2,
+        generate_audio=False,
+        watermark=False,
+        return_last_frame=False,
+        execution_expires_after=172800,
+        priority=0,
+    )
+    calls: list[tuple[str, str, dict]] = []
+
+    provider_job_id = "cgt-target/with space"
+
+    async def fake_request(method: str, url: str, **kwargs: object) -> dict:
+        calls.append((method, url, kwargs))
+        return {
+            "id": provider_job_id,
+            "status": "succeeded",
+            "content": {"video_url": "https://example.com/correct.mp4"},
+        }
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    status = await provider.get_generation_status(provider_job_id)
+
+    assert calls == [
+        (
+            "GET",
+            "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/"
+            "cgt-target%2Fwith%20space",
+            {},
+        )
+    ]
+    assert status.provider_job_id == provider_job_id
+    assert status.provider_status == "succeeded"
+    assert status.video_url == "https://example.com/correct.mp4"
 
 
 @pytest.mark.asyncio
