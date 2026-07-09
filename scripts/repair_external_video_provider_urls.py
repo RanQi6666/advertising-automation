@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
+from backend.app.core.errors import ProviderError  # noqa: E402
 from backend.app.db.models.enums import VideoStatus  # noqa: E402
 from backend.app.db.models.video_asset import VideoAsset  # noqa: E402
 from backend.app.db.session import AsyncSessionLocal, engine  # noqa: E402
@@ -42,6 +43,9 @@ async def main() -> None:
                 if args.all_sources
                 or _metadata(video).get("source") == EXTERNAL_VIDEO_GENERATION_SOURCE
             ]
+            video_refs = [
+                (video.id, str(video.provider_job_id or "").strip()) for video in videos
+            ]
             scope = (
                 "all provider-backed videos"
                 if args.all_sources
@@ -52,14 +56,45 @@ async def main() -> None:
                 f"scope={scope} "
                 f"records={len(videos)}"
             )
-            for video in videos:
-                await _repair_video(
-                    session=session,
-                    service=service,
-                    video=video,
-                    dry_run=dry_run,
-                    force=args.force,
-                )
+        succeeded_count = 0
+        skipped_count = 0
+        failed_video_ids: list[str] = []
+        for video_id, provider_job_id in video_refs:
+            if not provider_job_id:
+                skipped_count += 1
+                print(f"skipped video_id={video_id} reason=missing_provider_job_id")
+                continue
+            async with AsyncSessionLocal() as session:
+                try:
+                    video = await session.get(VideoAsset, video_id)
+                    if video is None:
+                        raise RuntimeError("video record not found")
+                    await _repair_video(
+                        session=session,
+                        service=service,
+                        video=video,
+                        dry_run=dry_run,
+                        force=args.force,
+                    )
+                    succeeded_count += 1
+                except ProviderError as exc:
+                    await session.rollback()
+                    failed_video_ids.append(video_id)
+                    print(
+                        f"failed video_id={video_id} provider_job_id={provider_job_id} "
+                        f"error={exc}"
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    failed_video_ids.append(video_id)
+                    print(
+                        f"failed video_id={video_id} provider_job_id={provider_job_id} "
+                        f"error={exc.__class__.__name__}: {exc}"
+                    )
+        print(
+            f"summary succeeded={succeeded_count} skipped={skipped_count} "
+            f"failed={len(failed_video_ids)} failed_video_ids={failed_video_ids}"
+        )
     finally:
         await engine.dispose()
 
