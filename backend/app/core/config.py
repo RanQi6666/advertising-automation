@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     volcengine_image_watermark: bool = False
     volcengine_video_api_key: str | None = None
     volcengine_video_model: str = "doubao-seedance-1-5-pro"
-    volcengine_video_resolution: str = "720p"
+    volcengine_video_resolution: str = "480p"
     volcengine_video_image_mode: Literal["first_last_frame", "reference_images"] = (
         "first_last_frame"
     )
