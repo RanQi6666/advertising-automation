@@ -18,6 +18,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
+from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.generation_task import GenerationTask
@@ -48,6 +49,7 @@ TEXT_QUEUE_NAME = "text_queue"
 IMAGE_QUEUE_NAME = "image_queue"
 VIDEO_QUEUE_NAME = "video_queue"
 CALLBACK_QUEUE_NAME = "callback_queue"
+AD_ANALYSIS_QUEUE_NAME = "ad_analysis_queue"
 TEXT_TASK_TYPES = {
     "topic_generate",
     "copy_generate",
@@ -62,6 +64,7 @@ TEXT_TASK_TYPES = {
 IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
 VIDEO_TASK_TYPES = {"video_generate", "video_transfer", "external_video_start"}
 CALLBACK_TASK_TYPES = {"ad_generation_callback"}
+AD_ANALYSIS_TASK_TYPES = {"ad_performance_analysis"}
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 IDEMPOTENCY_KEY_METADATA_FIELD = "idempotency_key"
 AUTO_RETRY_METADATA_FIELD = "auto_retry"
@@ -85,6 +88,8 @@ _video_queue_semaphore: asyncio.Semaphore | None = None
 _video_queue_limit: int | None = None
 _callback_queue_semaphore: asyncio.Semaphore | None = None
 _callback_queue_limit: int | None = None
+_ad_analysis_queue_semaphore: asyncio.Semaphore | None = None
+_ad_analysis_queue_limit: int | None = None
 _model_provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _model_provider_limits: dict[str, int] = {}
 _idempotency_locks_guard = Lock()
@@ -128,6 +133,7 @@ class _GenerationTaskBusinessReferences:
     draft_ids: set[str] = field(default_factory=set)
     video_ids: set[str] = field(default_factory=set)
     job_ids: set[str] = field(default_factory=set)
+    ad_analysis_ids: set[str] = field(default_factory=set)
 
 
 class GenerationTaskService:
@@ -357,17 +363,20 @@ class GenerationTaskService:
         draft_ids: set[str] = set()
         video_ids: set[str] = set()
         job_ids: set[str] = set()
+        ad_analysis_ids: set[str] = set()
         for references in references_by_task.values():
             campaign_ids.update(references.campaign_ids)
             topic_ids.update(references.topic_ids)
             draft_ids.update(references.draft_ids)
             video_ids.update(references.video_ids)
             job_ids.update(references.job_ids)
+            ad_analysis_ids.update(references.ad_analysis_ids)
 
         topics = await _records_by_id(session, ContentTopic, topic_ids)
         drafts = await _records_by_id(session, CopyDraft, draft_ids)
         videos = await _records_by_id(session, VideoAsset, video_ids)
         jobs = await _records_by_id(session, AdGenerationJob, job_ids)
+        ad_analyses = await _ad_analyses_by_reference(session, ad_analysis_ids)
         for topic in topics.values():
             campaign_ids.add(topic.campaign_id)
         for draft in drafts.values():
@@ -391,6 +400,7 @@ class GenerationTaskService:
                 drafts=drafts,
                 videos=videos,
                 jobs=jobs,
+                ad_analyses=ad_analyses,
             )
         ]
         if not orphan_task_ids:
@@ -832,6 +842,11 @@ class GenerationTaskService:
             async with _callback_queue_capacity():
                 await self._process_task_body(task_id)
             return
+        if queue_name == AD_ANALYSIS_QUEUE_NAME:
+            async with _ad_analysis_queue_capacity():
+                async with _model_provider_capacity(AD_ANALYSIS_QUEUE_NAME):
+                    await self._process_task_body(task_id)
+            return
         await self._process_task_body(task_id)
 
     async def _task_queue_name(self, task_id: str) -> str | None:
@@ -958,6 +973,8 @@ class GenerationTaskService:
             return await self._run_video_task(session, task)
         if task.queue_name == CALLBACK_QUEUE_NAME and task.task_type in CALLBACK_TASK_TYPES:
             return await self._run_callback_task(session, task)
+        if task.queue_name == AD_ANALYSIS_QUEUE_NAME and task.task_type in AD_ANALYSIS_TASK_TYPES:
+            return await self._run_ad_analysis_task(session, task)
         raise AppError(f"Unsupported generation task: {task.queue_name}/{task.task_type}")
 
     async def _run_text_task(self, session: AsyncSession, task: GenerationTask) -> dict[str, Any]:
@@ -1145,6 +1162,17 @@ class GenerationTaskService:
             raise AppError(str(callback_result.get("error") or "Callback delivery failed."))
         return result
 
+    async def _run_ad_analysis_task(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+    ) -> dict[str, Any]:
+        from backend.app.services.external_ad_performance_analysis_service import (
+            ExternalAdPerformanceAnalysisService,
+        )
+
+        return await ExternalAdPerformanceAnalysisService().execute_task(session, task)
+
     async def _mark_running(self, session: AsyncSession, task: GenerationTask) -> None:
         task.status = "running"
         task.attempt_count += 1
@@ -1274,6 +1302,15 @@ def _callback_queue_capacity() -> asyncio.Semaphore:
     return _callback_queue_semaphore
 
 
+def _ad_analysis_queue_capacity() -> asyncio.Semaphore:
+    global _ad_analysis_queue_limit, _ad_analysis_queue_semaphore
+    limit = get_settings().ad_analysis_queue_concurrency
+    if _ad_analysis_queue_semaphore is None or _ad_analysis_queue_limit != limit:
+        _ad_analysis_queue_semaphore = asyncio.Semaphore(limit)
+        _ad_analysis_queue_limit = limit
+    return _ad_analysis_queue_semaphore
+
+
 @asynccontextmanager
 async def _model_provider_capacity(queue_name: str) -> AsyncIterator[None]:
     semaphore = _model_provider_semaphore(queue_name)
@@ -1300,6 +1337,8 @@ def _model_provider_limit(queue_name: str) -> int:
         return settings.model_provider_video_concurrency
     if queue_name == TEXT_QUEUE_NAME:
         return settings.model_provider_text_concurrency
+    if queue_name == AD_ANALYSIS_QUEUE_NAME:
+        return settings.model_provider_ad_analysis_concurrency
     return 1
 
 
@@ -1315,6 +1354,7 @@ def _queue_concurrency_settings() -> dict[str, int]:
         IMAGE_QUEUE_NAME: settings.image_queue_concurrency,
         VIDEO_QUEUE_NAME: settings.video_queue_concurrency,
         CALLBACK_QUEUE_NAME: settings.callback_queue_concurrency,
+        AD_ANALYSIS_QUEUE_NAME: settings.ad_analysis_queue_concurrency,
     }
 
 
@@ -1323,6 +1363,7 @@ def _provider_concurrency_settings() -> dict[str, int]:
         TEXT_QUEUE_NAME: _model_provider_limit(TEXT_QUEUE_NAME),
         IMAGE_QUEUE_NAME: _model_provider_limit(IMAGE_QUEUE_NAME),
         VIDEO_QUEUE_NAME: _model_provider_limit(VIDEO_QUEUE_NAME),
+        AD_ANALYSIS_QUEUE_NAME: _model_provider_limit(AD_ANALYSIS_QUEUE_NAME),
     }
 
 
@@ -1382,6 +1423,7 @@ def _should_cache_terminal_task_status(task: GenerationTask) -> bool:
         "external_topic_selection",
         "external_copy_generation",
         "external_video_storyboard",
+        "ad_performance_analysis",
     }
 
 
@@ -1501,6 +1543,29 @@ async def _records_by_id(
     return {row.id: row for row in rows}
 
 
+async def _ad_analyses_by_reference(
+    session: AsyncSession,
+    ids: set[str],
+) -> dict[str, AdPerformanceAnalysis]:
+    clean_ids = {item for item in ids if item}
+    if not clean_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(AdPerformanceAnalysis).where(
+                (AdPerformanceAnalysis.id.in_(clean_ids))
+                | (AdPerformanceAnalysis.analysis_id.in_(clean_ids))
+            )
+        )
+    ).scalars().all()
+    result: dict[str, AdPerformanceAnalysis] = {}
+    for row in rows:
+        result[row.id] = row
+        if row.analysis_id:
+            result[str(row.analysis_id)] = row
+    return result
+
+
 def _generation_task_business_references(
     task: GenerationTask,
 ) -> _GenerationTaskBusinessReferences:
@@ -1540,6 +1605,13 @@ def _generation_task_business_references(
         metadata.get("job_id"),
         metadata.get("ad_generation_job_id"),
     )
+    _add_text_refs(
+        references.ad_analysis_ids,
+        payload.get("analysis_record_id"),
+        payload.get("analysis_id"),
+        metadata.get("analysis_record_id"),
+        metadata.get("analysis_id"),
+    )
 
     if task.business_type == "campaign":
         _add_text_refs(references.campaign_ids, task.business_id)
@@ -1551,6 +1623,8 @@ def _generation_task_business_references(
         _add_text_refs(references.video_ids, task.business_id)
     elif task.business_type == "ad_generation_job":
         _add_text_refs(references.job_ids, task.business_id)
+    elif task.business_type == "ad_performance_analysis":
+        _add_text_refs(references.ad_analysis_ids, task.business_id)
 
     return references
 
@@ -1564,6 +1638,7 @@ def _generation_task_has_live_business_reference(
     drafts: dict[str, CopyDraft],
     videos: dict[str, VideoAsset],
     jobs: dict[str, AdGenerationJob],
+    ad_analyses: dict[str, AdPerformanceAnalysis],
 ) -> bool:
     if any(campaign_id in campaigns for campaign_id in references.campaign_ids):
         return True
@@ -1584,6 +1659,8 @@ def _generation_task_has_live_business_reference(
         return True
     if any(job_id in jobs for job_id in references.job_ids):
         return True
+    if any(analysis_id in ad_analyses for analysis_id in references.ad_analysis_ids):
+        return True
 
     known_business_types = {
         "campaign",
@@ -1591,6 +1668,7 @@ def _generation_task_has_live_business_reference(
         "copy_draft",
         "video_asset",
         "ad_generation_job",
+        "ad_performance_analysis",
     }
     if task.business_type not in known_business_types:
         return True
@@ -1607,6 +1685,7 @@ def _generation_task_has_known_references(
             references.draft_ids,
             references.video_ids,
             references.job_ids,
+            references.ad_analysis_ids,
         )
     )
 

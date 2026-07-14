@@ -1,0 +1,233 @@
+{
+  "external_request_id": "fb-analysis-20260713-video-000001",
+  "source_type": "external",
+  "external_user_id": "5",
+  "date_preset": "last_7d",
+  "date_start": "2026-06-15",
+  "date_stop": "2026-06-21",
+  "account_currency": "USD",
+  "business_goal": "purchase",
+  "campaign": {
+    "id": "23",
+    "name": "IN Smart TV Sales",
+    "fb_id": "120247498350000238",
+    "status": "ACTIVE",
+    "objective": "OUTCOME_SALES"
+  },
+  "adset": {
+    "id": "19",
+    "name": "IN - Purchase - 25-45",
+    "fb_id": "120247498370850238",
+    "status": "ACTIVE",
+    "daily_budget": "5000",
+    "billing_event": "IMPRESSIONS",
+    "optimization_goal": "OFFSITE_CONVERSIONS",
+    "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+    "pixel_id": "1234567890",
+    "custom_event_type": "purchase",
+    "promoted_object": {
+      "pixel_id": "1234567890",
+      "custom_event_type": "purchase"
+    },
+    "countries": "IN",
+    "age_min": 25,
+    "age_max": 45,
+    "gender": "male",
+    "audience_description": "India, male, age 25-45, interested in home entertainment and sports watching"
+  },
+  "creative": {
+    "id": "20",
+    "name": "IN Smart TV - video - 001",
+    "fb_id": "4332789600296095",
+    "facebook_ad_id": "120247505013060239",
+    "ad_published": true,
+    "ad_status": "ACTIVE",
+    "page_id": "1152925037905592",
+    "headline": "स्मार्ट टीवी | आसान किस्तों में उपलब्ध",
+    "message": "स्पोर्ट्स और फिल्में बड़ी स्क्रीन पर साफ देखें। आसान किस्तों में स्मार्ट टीवी उपलब्ध है, साथ में फ्री होम इंस्टॉलेशन भी।",
+    "description": "क्रिस्टल क्लियर स्क्रीन और स्मूद मोशन के साथ। अभी पूरी डिटेल देखें।",
+    "link": "https://www.mensparadise.store/TV.html",
+    "btn_type": "LEARN_MORE",
+    "asset_id": "c79cab99-5baf-4366-a855-b6bfa2f968f1",
+    "asset_name": "smart-tv-video-001.mp4",
+    "asset_type": "video",
+    "creative_type": "video",
+    "video_url": "https://newpixel.messrocts.com/uploads/ads/2026/07/smart-tv-video-001.mp4",
+    "duration_seconds": 12,
+    "storyboard": [
+      {
+        "scene_index": 1,
+        "start_second": 0,
+        "end_second": 4,
+        "visual": "Family watching a cricket match on a smart TV in a warm living room.",
+        "subtitle": "लाइव क्रिकेट मैच बिल्कुल स्पष्ट"
+      },
+      {
+        "scene_index": 2,
+        "start_second": 4,
+        "end_second": 8,
+        "visual": "Close-up of smooth motion and high refresh-rate sports footage.",
+        "subtitle": "हर मूवमेंट साफ और स्मूद"
+      },
+      {
+        "scene_index": 3,
+        "start_second": 8,
+        "end_second": 12,
+        "visual": "CTA card with installment and free installation message.",
+        "subtitle": "आसान किस्तों में अभी जानें"
+      }
+    ]
+  },
+  "insight": {
+    "campaign_id": "120247498350000238",
+    "campaign_name": "IN Smart TV Sales",
+    "adset_id": "120247498370850238",
+    "adset_name": "IN - Purchase - 25-45",
+    "ad_id": "120247505013060239",
+    "ad_name": "IN Smart TV - video - 001",
+    "spend": "100.00",
+    "currency": "USD",
+    "impressions": "82000",
+    "reach": "56000",
+    "frequency": "1.46",
+    "clicks": "1200",
+    "inline_link_clicks": "860",
+    "ctr": "1.46",
+    "inline_link_click_ctr": "1.05",
+    "cpc": "0.0833",
+    "cpm": "1.2195",
+    "actions": [
+      {
+        "action_type": "link_click",
+        "value": "860"
+      },
+      {
+        "action_type": "landing_page_view",
+        "value": "560"
+      },
+      {
+        "action_type": "complete_registration",
+        "value": "120"
+      },
+      {
+        "action_type": "purchase",
+        "value": "15"
+      },
+      {
+        "action_type": "first_recharge",
+        "value": "8"
+      },
+      {
+        "action_type": "add_to_cart",
+        "value": "38"
+      },
+      {
+        "action_type": "lead",
+        "value": "0"
+      }
+    ],
+    "action_values": [
+      {
+        "action_type": "purchase",
+        "value": "450.00"
+      },
+      {
+        "action_type": "first_recharge",
+        "value": "240.00"
+      }
+    ],
+    "cost_per_action_type": [
+      {
+        "action_type": "landing_page_view",
+        "value": "0.1786"
+      },
+      {
+        "action_type": "purchase",
+        "value": "6.6667"
+      },
+      {
+        "action_type": "first_recharge",
+        "value": "12.5000"
+      }
+    ],
+    "date_start": "2026-06-15",
+    "date_stop": "2026-06-21",
+    "video_play_actions": [
+      {
+        "action_type": "video_view",
+        "value": "720"
+      }
+    ],
+    "video_p25_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "430"
+      }
+    ],
+    "video_p50_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "250"
+      }
+    ],
+    "video_p75_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "140"
+      }
+    ],
+    "video_p95_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "90"
+      }
+    ],
+    "video_p100_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "62"
+      }
+    ]
+  },
+  "siblings": [
+    {
+      "creative": {
+        "id": "20",
+        "name": "IN Smart TV - video - sibling-a",
+        "facebook_ad_id": "120247505013060240",
+        "creative_type": "video",
+        "video_url": "https://newpixel.messrocts.com/uploads/ads/2026/07/smart-tv-video-sibling-a.mp4",
+        "message": "क्रिकेट मैच और फिल्मों का मजा बड़ी स्क्रीन पर लें।",
+        "link": "https://www.mensparadise.store/TV.html"
+      },
+      "insight": {
+        "spend": "80.00",
+        "impressions": "61000",
+        "inline_link_clicks": "680",
+        "actions": [
+          {
+            "action_type": "landing_page_view",
+            "value": "510"
+          },
+          {
+            "action_type": "purchase",
+            "value": "20"
+          }
+        ],
+        "action_values": [
+          {
+            "action_type": "purchase",
+            "value": "600.00"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata_json": {
+    "source": "external_ad_system",
+    "product_name": "Smart TV",
+    "industry": "consumer_electronics",
+    "note": "Complete async Facebook video ad analysis sample. Caller sends video_url only; AI system extracts thumbnail/keyframes internally.",
+    "generated_for": "video_url_ai_analysis_test"
+  }
+}

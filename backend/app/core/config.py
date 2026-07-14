@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
+    ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
     generation_task_target_concurrent_users: int = Field(default=30, ge=1, le=1000)
     generation_runtime_monitor_timeout_seconds: float = Field(default=1.0, ge=0.1, le=10)
     generation_runtime_monitor_cache_seconds: float = Field(default=2.0, ge=0, le=30)
@@ -65,6 +66,7 @@ class Settings(BaseSettings):
     model_provider_text_concurrency: int = Field(default=6, ge=1, le=64)
     model_provider_image_concurrency: int = Field(default=6, ge=1, le=32)
     model_provider_video_concurrency: int = Field(default=1, ge=1, le=16)
+    model_provider_ad_analysis_concurrency: int = Field(default=2, ge=1, le=16)
     llm_text_rpm_limit: int = Field(default=60, ge=1, le=100000)
     llm_text_max_inflight: int = Field(default=16, ge=1, le=1000)
     job_status_cache_ttl_seconds: int = Field(default=600, ge=10, le=86400)
@@ -113,12 +115,39 @@ class Settings(BaseSettings):
     image_download_max_bytes: int = 25 * 1024 * 1024
     video_download_timeout_seconds: float = 120.0
     video_download_max_bytes: int = 500 * 1024 * 1024
+    ad_analysis_media_root: str = "data/ad-analysis-media"
+    ad_analysis_media_processing_enabled: bool = True
+    ad_analysis_allowed_media_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["newpixel.messrocts.com"]
+    )
+    ad_analysis_allow_private_media_hosts: bool = False
+    ad_analysis_media_download_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
+    ad_analysis_ffprobe_timeout_seconds: float = Field(default=10.0, ge=0.01, le=120)
+    ad_analysis_ffmpeg_frame_timeout_seconds: float = Field(default=15.0, ge=0.01, le=120)
+    ad_analysis_image_download_max_bytes: int = Field(
+        default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024
+    )
+    ad_analysis_video_max_duration_seconds: int = Field(default=20, ge=1, le=120)
+    ad_analysis_video_download_max_bytes: int = Field(
+        default=100 * 1024 * 1024, ge=1, le=500 * 1024 * 1024
+    )
+    ad_analysis_public_research_enabled: bool = True
+    public_research_enabled: bool = True
+    ad_analysis_public_research_timeout_seconds: float = Field(default=6.0, ge=1, le=30)
+    ad_analysis_public_research_max_results: int = Field(default=3, ge=1, le=10)
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("ad_analysis_allowed_media_hosts", mode="before")
+    @classmethod
+    def parse_ad_analysis_allowed_media_hosts(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [host.strip().lower() for host in value.split(",") if host.strip()]
         return value
 
     @field_validator("model_gateway_text_models", "model_gateway_image_models", mode="before")

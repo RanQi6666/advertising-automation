@@ -1,5 +1,8 @@
+import base64
 import json
 from collections.abc import AsyncIterator
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -726,7 +729,13 @@ def _ad_performance_analysis_system_prompt() -> str:
         "diagnosis. Do not overjudge creative quality when spend, impressions, or "
         "click volume is too small. Be practical for an operator: explain what is "
         "probably wrong, why, and what exact action to test next. Use Simplified "
-        "Chinese. Respect data_completeness: if image/video URLs or keyframes are "
+        "Chinese. Core objective: combine caller-submitted verified Facebook delivery metrics "
+        "with system-collected public similar-ad creative/proxy signals, then provide "
+        "executable optimization advice. Treat submitted Meta/Facebook delivery metrics "
+        "as verified performance facts. Treat public research context only as unverified "
+        "creative/proxy signal unless the caller supplied the metric. Never claim public "
+        "sources verify CTR, CPC, CPA, purchases, revenue, or ROAS. Respect "
+        "data_completeness: if image/video URLs or keyframes are "
         "missing, say the visual diagnosis is limited instead of pretending you "
         "saw the asset. The root object must contain: summary, root_causes, "
         "recommended_actions, next_tests, creative_feedback, audience_feedback, "
@@ -757,7 +766,7 @@ def _ad_performance_user_content(
     supports_video_input: bool = False,
     video_fps: float = 1.0,
 ) -> str | list[dict[str, Any]]:
-    text = json.dumps(context, ensure_ascii=False)
+    text = json.dumps(_ad_performance_public_context(context), ensure_ascii=False)
     video_url = _ad_performance_video_url(context) if supports_video_input else None
     if video_url:
         return [
@@ -772,6 +781,28 @@ def _ad_performance_user_content(
                 ),
             },
             {"type": "video_url", "video_url": {"url": video_url, "fps": video_fps}},
+        ]
+    local_images = _ad_performance_local_visual_data_urls(context)
+    if local_images:
+        creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+        creative_type = str(creative.get("creative_type") or "creative").lower()
+        return [
+            {
+                "type": "text",
+                "text": (
+                    text
+                    + f"\n\nThe attached image{'s are' if len(local_images) > 1 else ' is'} "
+                    f"the internally processed {creative_type} creative visual"
+                    f"{' keyframes' if len(local_images) > 1 else ''}. Inspect only the "
+                    "attached visuals for visual_analysis and do not claim details that are "
+                    "not visible. For video keyframes, compare the frames in chronological "
+                    "order for hook, product/context match, pacing, and likely drop-off risks."
+                ),
+            },
+            *[
+                {"type": "image_url", "image_url": {"url": data_url}}
+                for data_url in local_images
+            ],
         ]
     image_url = _ad_performance_image_url(context)
     if not image_url:
@@ -788,6 +819,51 @@ def _ad_performance_user_content(
         },
         {"type": "image_url", "image_url": {"url": image_url}},
     ]
+
+
+def _ad_performance_public_context(context: dict[str, Any]) -> dict[str, Any]:
+    clean = deepcopy(context)
+    media_summary = clean.get("media_summary")
+    if isinstance(media_summary, dict):
+        media_summary.pop("local_artifacts", None)
+    return clean
+
+
+def _ad_performance_local_visual_data_urls(context: dict[str, Any]) -> list[str]:
+    media_summary = context.get("media_summary")
+    if not isinstance(media_summary, dict):
+        return []
+    local_artifacts = media_summary.get("local_artifacts")
+    if not isinstance(local_artifacts, dict):
+        return []
+    creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+    creative_type = str(creative.get("creative_type") or "").lower()
+    candidates: list[Any]
+    if "video" in creative_type:
+        paths = local_artifacts.get("keyframe_paths")
+        candidates = paths if isinstance(paths, list) else []
+    else:
+        candidates = [local_artifacts.get("thumbnail_path")]
+
+    data_urls: list[str] = []
+    for candidate in candidates[:3]:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        try:
+            path = Path(candidate)
+            payload = path.read_bytes()
+        except OSError:
+            continue
+        if not payload:
+            continue
+        mime_type = {
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(path.suffix.lower(), "image/jpeg")
+        encoded = base64.b64encode(payload).decode("ascii")
+        data_urls.append(f"data:{mime_type};base64,{encoded}")
+    return data_urls
 
 
 def _ad_performance_video_url(context: dict[str, Any]) -> str | None:
