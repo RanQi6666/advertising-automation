@@ -85,29 +85,62 @@ class OpenAILLMProvider:
         )
 
     async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
+        operator_result = _uses_facebook_operator_result(context)
         data = await self._json_completion(
-            system=_ad_performance_analysis_system_prompt(),
-            user=_ad_performance_user_content(
-                context,
-                supports_video_input=self.supports_video_input,
-                video_fps=self.video_input_fps,
+            system=(
+                _ad_performance_analysis_system_prompt()
+                if operator_result
+                else _legacy_ad_performance_analysis_system_prompt()
+            ),
+            user=(
+                _ad_performance_user_content(
+                    context,
+                    supports_video_input=self.supports_video_input,
+                    video_fps=self.video_input_fps,
+                )
+                if operator_result
+                else _legacy_ad_performance_user_content(
+                    context,
+                    supports_video_input=self.supports_video_input,
+                    video_fps=self.video_input_fps,
+                )
             ),
         )
-        return _ad_performance_analysis_from_data(data)
+        return (
+            _ad_performance_analysis_from_data(data)
+            if operator_result
+            else _legacy_ad_performance_analysis_from_data(data)
+        )
 
     async def stream_ad_performance_analysis(
         self, context: dict
     ) -> AsyncIterator[dict[str, Any]]:
+        operator_result = _uses_facebook_operator_result(context)
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": _ad_performance_analysis_system_prompt()},
+                {
+                    "role": "system",
+                    "content": (
+                        _ad_performance_analysis_system_prompt()
+                        if operator_result
+                        else _legacy_ad_performance_analysis_system_prompt()
+                    ),
+                },
                 {
                     "role": "user",
-                    "content": _ad_performance_user_content(
-                        context,
-                        supports_video_input=self.supports_video_input,
-                        video_fps=self.video_input_fps,
+                    "content": (
+                        _ad_performance_user_content(
+                            context,
+                            supports_video_input=self.supports_video_input,
+                            video_fps=self.video_input_fps,
+                        )
+                        if operator_result
+                        else _legacy_ad_performance_user_content(
+                            context,
+                            supports_video_input=self.supports_video_input,
+                            video_fps=self.video_input_fps,
+                        )
                     ),
                 },
             ],
@@ -131,7 +164,11 @@ class OpenAILLMProvider:
             raise ProviderError("LLM returned invalid JSON.") from exc
         yield {
             "type": "done",
-            "analysis": _ad_performance_analysis_from_data(data),
+            "analysis": (
+                _ad_performance_analysis_from_data(data)
+                if operator_result
+                else _legacy_ad_performance_analysis_from_data(data)
+            ),
             "text": content,
         }
 
@@ -632,7 +669,88 @@ class OpenAILLMProvider:
                 yield delta
 
 
+def _uses_facebook_operator_result(context: dict[str, Any]) -> bool:
+    contract = context.get("result_contract")
+    if not isinstance(contract, dict):
+        return False
+    return contract.get("schema_version") == "facebook_ad_analysis_v1" and isinstance(
+        contract.get("operator_sections"), list
+    )
+
+
 def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    overall_decision = _dict_from_value(data.get("overall_decision"))
+    copywriting = _dict_from_value(data.get("copywriting_analysis"))
+    media = _dict_from_value(data.get("media_analysis"))
+    market = _dict_from_value(data.get("market_intelligence"))
+    normalized = {
+        "summary": _short_required_text(data.get("summary"), "分析建议已生成。"),
+        "overall_decision": {
+            "action": _enum_value(
+                overall_decision.get("action"),
+                {"scale", "optimize", "monitor", "pause"},
+                "monitor",
+            ),
+            "priority": _operator_priority(overall_decision.get("priority")),
+            "main_problem": _short_required_text(
+                overall_decision.get("main_problem"),
+                "需要结合规则指标确认主要问题。",
+            ),
+        },
+        "targeting_analysis": _operator_targeting_items(
+            data.get("targeting_analysis")
+        ),
+        "adjustment_plans": _operator_adjustment_plans(data.get("adjustment_plans")),
+        "copywriting_analysis": {
+            "summary": _short_required_text(
+                copywriting.get("summary"),
+                "当前没有明确的文案补充结论。",
+            ),
+            "problems": _limited_text_list(copywriting.get("problems"), 3, 600),
+            "suggestions": _limited_text_list(copywriting.get("suggestions"), 3, 600),
+            "recommended_primary_text": _truncate(
+                _coerce_optional_text(copywriting.get("recommended_primary_text")), 1200
+            ),
+            "recommended_headline": _truncate(
+                _coerce_optional_text(copywriting.get("recommended_headline")), 1200
+            ),
+            "recommended_description": _truncate(
+                _coerce_optional_text(copywriting.get("recommended_description")), 1200
+            ),
+        },
+        "media_analysis": {
+            "media_type": _enum_value(
+                media.get("media_type"), {"image", "video"}, "image"
+            ),
+            "summary": _short_required_text(
+                media.get("summary"),
+                "当前没有可靠的画面补充结论。",
+            ),
+            "improvements": _operator_media_improvements(media.get("improvements")),
+        },
+        "market_intelligence": {
+            "status": _enum_value(
+                market.get("status"),
+                {"completed", "partial", "unavailable"},
+                "unavailable",
+            ),
+            "summary": _short_required_text(
+                market.get("summary"),
+                "本次没有足够可靠的公开相似广告参考。",
+            ),
+            "references": _operator_market_references(market.get("references")),
+            "limitation": _required_text(
+                market.get("limitation"),
+                "公开来源只能用于参考创意模式，不能验证真实投放成效。",
+                600,
+            ),
+        },
+        "data_gaps": _limited_text_list(data.get("data_gaps"), 3, 600),
+    }
+    return normalized
+
+
+def _legacy_ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "summary": _coerce_text(data.get("summary"))[:1200],
         "root_causes": _limited_text_list(data.get("root_causes"), 6, 360),
@@ -656,6 +774,141 @@ def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
     if not normalized["summary"]:
         normalized["summary"] = "大模型已完成分析，但没有返回明确摘要，请优先查看下方原因和建议。"
     return normalized
+
+
+def _operator_targeting_items(value: Any) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        result.append(
+            {
+                "dimension": _enum_value(
+                    raw.get("dimension"),
+                    {"country", "audience", "age", "gender", "device", "placement"},
+                    "audience",
+                ),
+                "current": _required_text(raw.get("current"), "未提供", 600),
+                "decision": _enum_value(
+                    raw.get("decision"), {"adjust", "test", "monitor"}, "test"
+                ),
+                "problem": _required_text(raw.get("problem"), "需要进一步验证", 600),
+                "suggestion": _required_text(
+                    raw.get("suggestion"), "采用小预算对照测试", 600
+                ),
+                "reason": _required_text(
+                    raw.get("reason"), "缺少该维度的成效拆分数据", 600
+                ),
+            }
+        )
+        if len(result) >= 3:
+            break
+    return result
+
+
+def _operator_adjustment_plans(value: Any) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        result.append(
+            {
+                "priority": _operator_priority(raw.get("priority")),
+                "category": _enum_value(
+                    raw.get("category"),
+                    {
+                        "landing_page",
+                        "tracking",
+                        "copywriting",
+                        "media",
+                        "targeting",
+                        "budget",
+                        "campaign_setup",
+                    },
+                    "campaign_setup",
+                ),
+                "title": _short_required_text(raw.get("title"), "核对投放设置"),
+                "action": _required_text(raw.get("action"), "核对当前投放设置。", 600),
+                "reason": _required_text(raw.get("reason"), "需要进一步验证。", 600),
+                "expected_effect": _required_text(
+                    raw.get("expected_effect"), "提高后续判断可靠性。", 600
+                ),
+                "what_to_watch": _required_text(
+                    raw.get("what_to_watch"), "观察核心业务结果和单次结果成本。", 600
+                ),
+            }
+        )
+        if len(result) >= 5:
+            break
+    return result
+
+
+def _operator_media_improvements(value: Any) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        result.append(
+            {
+                "location": _required_text(raw.get("location"), "素材画面", 600),
+                "problem": _required_text(raw.get("problem"), "画面表达可进一步优化。", 600),
+                "action": _required_text(raw.get("action"), "使用对照版本验证调整。", 600),
+            }
+        )
+        if len(result) >= 3:
+            break
+    return result
+
+
+def _operator_market_references(value: Any) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        source_url = _coerce_optional_text(raw.get("source_url"))
+        if not source_url:
+            continue
+        result.append(
+            {
+                "advertiser_name": _required_text(
+                    raw.get("advertiser_name"), "公开来源广告主", 600
+                ),
+                "source_url": _truncate(source_url, 2000) or source_url,
+                "observed_pattern": _required_text(
+                    raw.get("observed_pattern"), "公开页面包含可参考的创意表达。", 600
+                ),
+                "applicable_idea": _required_text(
+                    raw.get("applicable_idea"), "仅参考创意结构并通过对照测试验证。", 600
+                ),
+            }
+        )
+        if len(result) >= 3:
+            break
+    return result
+
+
+def _dict_from_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _enum_value(value: Any, allowed: set[str], default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in allowed else default
+
+
+def _operator_priority(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "critical":
+        return "high"
+    return normalized if normalized in {"high", "medium", "low"} else "medium"
+
+
+def _short_required_text(value: Any, default: str) -> str:
+    return _required_text(value, default, 100)
+
+
+def _required_text(value: Any, default: str, max_chars: int) -> str:
+    return _truncate(_coerce_optional_text(value), max_chars) or default
 
 
 def _creative_payload_json(payload: dict[str, Any]) -> str:
@@ -724,40 +977,48 @@ def _keyframe_brand_aaa_video_storyboard_rules() -> str:
 def _ad_performance_analysis_system_prompt() -> str:
     return (
         "You are a senior performance marketing analyst for Meta/Facebook ads. "
-        "Return valid JSON only. Analyze the ad independently first; comparisons "
-        "with sibling ads are supplemental and must not replace the independent "
-        "diagnosis. Do not overjudge creative quality when spend, impressions, or "
-        "click volume is too small. Be practical for an operator: explain what is "
-        "probably wrong, why, and what exact action to test next. Use Simplified "
-        "Chinese. Core objective: combine caller-submitted verified Facebook delivery metrics "
+        "Return valid JSON only. Be concise and practical for an operator: identify "
+        "the problem, the evidence boundary, and the exact action to test next. "
+        "Core objective: combine caller-submitted verified Facebook delivery metrics "
         "with system-collected public similar-ad creative/proxy signals, then provide "
         "executable optimization advice. Treat submitted Meta/Facebook delivery metrics "
-        "as verified performance facts. Treat public research context only as unverified "
-        "creative/proxy signal unless the caller supplied the metric. Never claim public "
-        "sources verify CTR, CPC, CPA, purchases, revenue, or ROAS. Respect "
-        "data_completeness: if image/video URLs or keyframes are "
-        "missing, say the visual diagnosis is limited instead of pretending you "
-        "saw the asset. The root object must contain: summary, root_causes, "
-        "recommended_actions, next_tests, creative_feedback, audience_feedback, "
-        "landing_page_feedback, budget_delivery_feedback, risk_notes, "
-        "optimization_work_order, and confidence_note. optimization_work_order must be "
-        "the same diagnosis expressed as an operator work order, not a separate rule "
-        "result. Its shape is: schema_version, operator_summary, priority, "
-        "overall_action, next_step, modules_to_change, modules_to_keep, "
-        "modules_to_watch, campaign, adset, creative, warnings. campaign/adset/creative "
-        "are arrays of field advice objects with: field, label, current_value, action, "
-        "priority, suggested_value, suggested_direction, generation_prompt, reason, "
-        "source, can_apply_to_generation, missing. action must be one of keep, "
-        "regenerate, rewrite, check, watch, reduce, increase, pause, create_draft, "
-        "missing. priority must be low, medium, or high. source must be ai. For fields "
-        "that should feed generation, set can_apply_to_generation true and provide a "
-        "practical generation_prompt. If a required field is missing from input, set "
-        "action to missing and missing to true. If an image or video is attached, "
-        "inspect the actual visual content and include "
-        "visual_analysis with summary, observed_elements, strengths, weaknesses, "
-        "recommendations, risk_notes, source_image_url/source_video_url, and "
-        "confidence_note. If no visual media is attached, set visual_analysis to null. "
-        "Every list field must be an array of short strings."
+        "as verified performance facts. Public research cannot verify actual performance. "
+        "Never claim public sources verify CTR, CPC, CPA, purchases, revenue, or ROAS. "
+        "Do not claim country, age, gender, device, or placement performance without "
+        "caller-submitted breakdown data. In that case, recommend a controlled test rather "
+        "than asserting a winning segment. If media processing failed, do not invent visual "
+        "observations. Use Simplified Chinese for operator-facing analysis, except recommended "
+        "ad copy must preserve the source ad language. The root object must contain exactly: "
+        "summary, overall_decision, targeting_analysis, adjustment_plans, "
+        "copywriting_analysis, media_analysis, market_intelligence, data_gaps. summary must "
+        "be at most 100 characters. overall_decision contains action, priority, and "
+        "main_problem, but deterministic rules remain authoritative for the final action, "
+        "priority, and bottleneck. targeting_analysis must contain only meaningful issues "
+        "and at most three items. Each item contains dimension, current, decision, problem, "
+        "suggestion, and reason. adjustment_plans must contain one to five concrete operator "
+        "actions. Each plan contains priority, category, title, action, reason, "
+        "expected_effect, and what_to_watch. copywriting_analysis contains summary, up to "
+        "three problems, up to three suggestions, recommended_primary_text, "
+        "recommended_headline, and recommended_description. media_analysis contains "
+        "media_type, summary, and up to three improvements with location, problem, and "
+        "action. market_intelligence contains status, summary, up to three references, and "
+        "limitation. data_gaps contains at most three short items. Do not output old fields "
+        "such as executive_summary, recommended_actions, optimization_work_order, or "
+        "visual_analysis."
+    )
+
+
+def _legacy_ad_performance_analysis_system_prompt() -> str:
+    return (
+        "You are a senior performance marketing analyst for Meta/Facebook ads. "
+        "Return valid JSON only. Analyze the ad independently first; comparisons with "
+        "sibling ads are supplemental. Use Simplified Chinese and return the existing "
+        "internal structure with summary, root_causes, recommended_actions, next_tests, "
+        "creative_feedback, audience_feedback, landing_page_feedback, "
+        "budget_delivery_feedback, risk_notes, optimization_work_order, confidence_note, "
+        "and optional visual_analysis. optimization_work_order must use the existing "
+        "ad_performance_optimization_work_order_v1 structure. If no visual media is "
+        "attached, set visual_analysis to null."
     )
 
 
@@ -775,7 +1036,7 @@ def _ad_performance_user_content(
                 "text": (
                     text
                     + "\n\nThe attached video is the actual ad creative from creative.video_url. "
-                    "Inspect the video directly for visual_analysis, especially the first "
+                    "Inspect the video directly for media_analysis, especially the first "
                     "seconds, hook, product/context match, pacing, and drop-off risks. Do not "
                     "claim visual details that are not visible in the video."
                 ),
@@ -794,7 +1055,7 @@ def _ad_performance_user_content(
                     + f"\n\nThe attached image{'s are' if len(local_images) > 1 else ' is'} "
                     f"the internally processed {creative_type} creative visual"
                     f"{' keyframes' if len(local_images) > 1 else ''}. Inspect only the "
-                    "attached visuals for visual_analysis and do not claim details that are "
+                    "attached visuals for media_analysis and do not claim details that are "
                     "not visible. For video keyframes, compare the frames in chronological "
                     "order for hook, product/context match, pacing, and likely drop-off risks."
                 ),
@@ -813,12 +1074,30 @@ def _ad_performance_user_content(
             "text": (
                 text
                 + "\n\nThe attached image is the actual ad creative from creative.image_url. "
-                "Inspect the image directly for visual_analysis. Do not claim visual details "
+                "Inspect the image directly for media_analysis. Do not claim visual details "
                 "that are not visible in the image."
             ),
         },
         {"type": "image_url", "image_url": {"url": image_url}},
     ]
+
+
+def _legacy_ad_performance_user_content(
+    context: dict[str, Any],
+    supports_video_input: bool = False,
+    video_fps: float = 1.0,
+) -> str | list[dict[str, Any]]:
+    content = _ad_performance_user_content(
+        context,
+        supports_video_input=supports_video_input,
+        video_fps=video_fps,
+    )
+    if isinstance(content, str):
+        return content
+    legacy = deepcopy(content)
+    if legacy and isinstance(legacy[0], dict) and isinstance(legacy[0].get("text"), str):
+        legacy[0]["text"] = legacy[0]["text"].replace("media_analysis", "visual_analysis")
+    return legacy
 
 
 def _ad_performance_public_context(context: dict[str, Any]) -> dict[str, Any]:

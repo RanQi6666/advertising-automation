@@ -1,121 +1,96 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-
-class FlexibleSection(BaseModel):
-    """A bounded-but-forward-compatible nested section.
-
-    The top-level result contract is strict, while several analysis subtrees need to
-    preserve provider/model annotations without forcing a migration for every new
-    insight field.
-    """
-
-    model_config = ConfigDict(extra="allow")
+ShortText = Annotated[str, Field(min_length=1, max_length=100)]
+OperatorText = Annotated[str, Field(min_length=1, max_length=600)]
+OptionalAdCopy = Annotated[str | None, Field(max_length=1200)]
 
 
-class EvidenceItem(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    source: str = Field(min_length=1)
-    claim: str = Field(min_length=1)
-    metric: str | None = None
-    value: Any | None = None
-    formula: str | None = None
+class StrictPublicModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class RecommendedAction(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    action_id: str = Field(min_length=1)
-    priority: int = Field(ge=1, le=10)
-    category: str = Field(min_length=1)
-    action: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
-    evidence: list[EvidenceItem] = Field(min_length=1)
-    success_metric: str = Field(min_length=1)
-    target_direction: Literal["increase", "decrease", "maintain", "verify"]
+class OverallDecision(StrictPublicModel):
+    action: Literal["scale", "optimize", "monitor", "pause"]
+    priority: Literal["high", "medium", "low"]
+    main_problem: ShortText
 
 
-class PerformanceEvidence(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    type: str = Field(min_length=1)
-    verified: bool = False
-    confidence: Literal["low", "medium", "high", "unknown"] = "unknown"
-    signals: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def public_proxy_signals_are_never_verified(self) -> PerformanceEvidence:
-        if self.type == "public_proxy_signals":
-            self.verified = False
-            if not self.limitations:
-                self.limitations = [
-                    "Public sources can show creative/proxy signals, but cannot verify "
-                    "Meta delivery metrics."
-                ]
-        return self
+class TargetingAnalysisItem(StrictPublicModel):
+    dimension: Literal["country", "audience", "age", "gender", "device", "placement"]
+    current: OperatorText
+    decision: Literal["adjust", "test", "monitor"]
+    problem: OperatorText
+    suggestion: OperatorText
+    reason: OperatorText
 
 
-class ReferenceAd(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    reference_id: str = Field(min_length=1)
-    source_type: str = Field(min_length=1)
-    source_url: str = Field(min_length=1)
-    advertiser_name: str | None = None
-    collected_at: str = Field(min_length=1)
-    similarity_score: float = Field(ge=0, le=1)
-    performance_evidence: PerformanceEvidence
-    creative_patterns: dict[str, Any] = Field(default_factory=dict)
-    applicable_learnings: list[Any] = Field(default_factory=list)
-
-
-class MarketIntelligence(FlexibleSection):
-    status: str = Field(default="skipped")
-    selected_reference_ads: list[ReferenceAd] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
+class AdjustmentPlan(StrictPublicModel):
+    priority: Literal["high", "medium", "low"]
+    category: Literal[
+        "landing_page",
+        "tracking",
+        "copywriting",
+        "media",
+        "targeting",
+        "budget",
+        "campaign_setup",
+    ]
+    title: ShortText
+    action: OperatorText
+    reason: OperatorText
+    expected_effect: OperatorText
+    what_to_watch: OperatorText
 
 
-class ExecutiveSummary(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    verdict: Literal["scale", "optimize", "monitor", "pause"]
-    priority: Literal["low", "medium", "high", "critical"]
-    primary_bottleneck: str
-    confidence: Literal["low", "medium", "high"]
-    scale_eligibility: Literal["ready", "review", "not_ready"]
-    pause_recommended: bool
-    key_findings: list[str] = Field(default_factory=list)
+class CopywritingAnalysis(StrictPublicModel):
+    summary: ShortText
+    problems: list[OperatorText] = Field(default_factory=list, max_length=3)
+    suggestions: list[OperatorText] = Field(default_factory=list, max_length=3)
+    recommended_primary_text: OptionalAdCopy = None
+    recommended_headline: OptionalAdCopy = None
+    recommended_description: OptionalAdCopy = None
 
 
-class FacebookAdAnalysisResult(BaseModel):
-    """Strict public result returned by the async Facebook ad analysis API."""
+class MediaImprovement(StrictPublicModel):
+    location: OperatorText
+    problem: OperatorText
+    action: OperatorText
 
-    model_config = ConfigDict(extra="forbid")
+
+class MediaAnalysis(StrictPublicModel):
+    media_type: Literal["image", "video"]
+    summary: ShortText
+    improvements: list[MediaImprovement] = Field(default_factory=list, max_length=3)
+
+
+class MarketReference(StrictPublicModel):
+    advertiser_name: OperatorText
+    source_url: Annotated[str, Field(min_length=1, max_length=2000)]
+    observed_pattern: OperatorText
+    applicable_idea: OperatorText
+
+
+class MarketIntelligence(StrictPublicModel):
+    status: Literal["completed", "partial", "unavailable"]
+    summary: ShortText
+    references: list[MarketReference] = Field(default_factory=list, max_length=3)
+    limitation: OperatorText
+
+
+class FacebookAdAnalysisResult(StrictPublicModel):
+    """Concise operator result returned by the async Facebook analysis API."""
 
     schema_version: Literal["facebook_ad_analysis_v1"]
     platform: Literal["facebook"]
-    executive_summary: ExecutiveSummary
-    objective_alignment: dict[str, Any]
-    performance_funnel: dict[str, Any]
-    diagnoses: list[dict[str, Any]]
-    creative_analysis: dict[str, Any]
-    audience_and_delivery_analysis: dict[str, Any]
+    summary: ShortText
+    overall_decision: OverallDecision
+    targeting_analysis: list[TargetingAnalysisItem] = Field(default_factory=list, max_length=3)
+    adjustment_plans: list[AdjustmentPlan] = Field(min_length=1, max_length=5)
+    copywriting_analysis: CopywritingAnalysis
+    media_analysis: MediaAnalysis
     market_intelligence: MarketIntelligence
-    benchmark_comparison: dict[str, Any]
-    recommended_actions: list[RecommendedAction]
-    experiment_plan: dict[str, Any]
-    data_quality: dict[str, Any]
-    analysis_metadata: dict[str, Any]
-
-    @field_validator("recommended_actions")
-    @classmethod
-    def require_recommended_actions(cls, value: list[RecommendedAction]) -> list[RecommendedAction]:
-        if not value:
-            raise ValueError("recommended_actions must contain at least one action")
-        return value
+    data_gaps: list[OperatorText] = Field(default_factory=list, max_length=3)

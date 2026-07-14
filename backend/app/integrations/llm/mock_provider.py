@@ -158,6 +158,9 @@ class MockLLMProvider:
         }
 
     async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
+        if _uses_facebook_operator_result(context):
+            return _mock_facebook_operator_result(context)
+
         metrics = context.get("metrics") if isinstance(context.get("metrics"), dict) else {}
         rule_analysis = (
             context.get("rule_analysis") if isinstance(context.get("rule_analysis"), dict) else {}
@@ -271,6 +274,7 @@ class MockLLMProvider:
         for chunk in _chunk_text(text, size=36):
             yield {"type": "delta", "text": chunk}
         yield {"type": "done", "analysis": analysis, "text": text}
+
 
     async def generate_topics(
         self,
@@ -738,6 +742,80 @@ class MockLLMProvider:
         )
         for chunk in _chunk_text(_storyboard_script_text(storyboard)):
             yield chunk
+
+
+def _uses_facebook_operator_result(context: dict[str, Any]) -> bool:
+    contract = context.get("result_contract")
+    return isinstance(contract, dict) and (
+        contract.get("schema_version") == "facebook_ad_analysis_v1"
+    )
+
+
+def _mock_facebook_operator_result(context: dict[str, Any]) -> dict[str, Any]:
+    """Return the external compact contract without claiming unobserved facts."""
+
+    creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
+    creative_type = str(creative.get("creative_type") or "image").strip().lower()
+    media_type = "video" if "video" in creative_type else "image"
+    rule_analysis = (
+        context.get("rule_analysis") if isinstance(context.get("rule_analysis"), dict) else {}
+    )
+    executive = (
+        rule_analysis.get("executive_summary")
+        if isinstance(rule_analysis.get("executive_summary"), dict)
+        else {}
+    )
+    action = str(executive.get("verdict") or "monitor").strip().lower()
+    if action not in {"scale", "optimize", "monitor", "pause"}:
+        action = "monitor"
+    priority = str(executive.get("priority") or "medium").strip().lower()
+    if priority == "critical":
+        priority = "high"
+    if priority not in {"high", "medium", "low"}:
+        priority = "medium"
+
+    return {
+        "summary": "Mock 环境已生成基础排查建议；请在真实模型环境结合完整投放数据复核。",
+        "overall_decision": {
+            "action": action,
+            "priority": priority,
+            "main_problem": "Mock 环境仅验证分析链路，需结合真实投放数据确认主要问题。",
+        },
+        "targeting_analysis": [],
+        "adjustment_plans": [
+            {
+                "priority": "medium",
+                "category": "tracking",
+                "title": "核对关键转化事件",
+                "action": "确认 Facebook Pixel、CAPI 与业务转化事件持续回传，并按广告层级核对。",
+                "reason": "Mock 环境不具备真实投放诊断和受众拆分成效。",
+                "expected_effect": "让后续优化可以基于真实业务结果判断。",
+                "what_to_watch": "purchase、lead 等目标事件数量及单次结果成本。",
+            }
+        ],
+        "copywriting_analysis": {
+            "summary": "Mock 环境不对广告文案作真实质量判断。",
+            "problems": [],
+            "suggestions": ["在真实模型环境中结合原始文案和投放结果生成对照版本。"],
+            "recommended_primary_text": None,
+            "recommended_headline": None,
+            "recommended_description": None,
+        },
+        "media_analysis": {
+            "media_type": media_type,
+            "summary": "Mock 环境不进行真实画面识别。",
+            "improvements": [],
+        },
+        "market_intelligence": {
+            "status": "unavailable",
+            "summary": "Mock 环境不执行公开相似广告研究。",
+            "references": [],
+            "limitation": "公开来源只能用于参考创意模式，不能验证真实投放成效。",
+        },
+        "data_gaps": [
+            "Mock 环境不提供真实素材识别、受众拆分或公开相似广告研究结论。"
+        ],
+    }
 
 
 def _mock_ad_performance_optimization_work_order(

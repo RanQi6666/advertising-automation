@@ -390,11 +390,21 @@ class ExternalAdPerformanceAnalysisService:
                     "public_research": research_summary,
                     "result_contract": {
                         "schema_version": RULE_RESULT_SCHEMA_VERSION,
-                        "rule_owned_fields": [
-                            "executive_summary",
-                            "objective_alignment",
-                            "performance_funnel",
-                            "diagnoses",
+                        "operator_sections": [
+                            "summary",
+                            "overall_decision",
+                            "targeting_analysis",
+                            "adjustment_plans",
+                            "copywriting_analysis",
+                            "media_analysis",
+                            "market_intelligence",
+                            "data_gaps",
+                        ],
+                        "rule_owned_facts": [
+                            "metrics",
+                            "primary_bottleneck",
+                            "overall_action",
+                            "overall_priority",
                             "data_quality",
                         ],
                     },
