@@ -12,6 +12,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.db.base import Base, utcnow
 from backend.app.db.models.ad_generation_job import AdGenerationJob
+from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -30,6 +31,7 @@ from backend.app.services import generation_task_dispatcher as dispatcher
 from backend.app.services import generation_task_service as task_module
 from backend.app.services.collaboration import OperatorContext
 from backend.app.services.generation_task_service import (
+    AD_ANALYSIS_QUEUE_NAME,
     CALLBACK_QUEUE_NAME,
     IMAGE_QUEUE_NAME,
     TEXT_QUEUE_NAME,
@@ -522,7 +524,7 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert listing.summary["retryable_failed_count"] == 1
     assert listing.summary["active_count"] == 2
     assert listing.summary["target_concurrent_users"] == 30
-    assert listing.summary["total_active_capacity"] == 17
+    assert listing.summary["total_active_capacity"] == 19
     assert listing.summary["failure_codes"] == [
         {"code": "provider_timeout", "count": 1},
         {"code": "unknown_provider_error", "count": 1},
@@ -532,6 +534,7 @@ async def test_generation_task_service_lists_tasks_with_filters_and_summary() ->
     assert listing.summary["queue_health"][IMAGE_QUEUE_NAME]["failed"] == 1
     assert listing.summary["queue_health"][VIDEO_QUEUE_NAME]["running"] == 1
     assert listing.summary["queue_health"][VIDEO_QUEUE_NAME]["risk_level"] == "low"
+    assert listing.summary["queue_health"][AD_ANALYSIS_QUEUE_NAME]["concurrency"] == 2
     assert queued_task.status == "queued"
 
     await engine.dispose()
@@ -862,6 +865,63 @@ async def test_generation_task_list_prunes_orphaned_business_tasks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_task_list_keeps_live_ad_analysis_tasks_and_prunes_orphans() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        analysis = AdPerformanceAnalysis(
+            id="analysis-record-task-monitor",
+            analysis_id="ana_task_monitor_live",
+            external_request_id="external-task-monitor-live",
+            payload_hash="a" * 64,
+            request_payload={"creative": {"creative_type": "image"}},
+            normalized_payload={"creative": {"creative_type": "image"}},
+            status="queued",
+            stage="queued",
+            progress=0,
+            analysis_scope="facebook_ad_performance",
+            analysis_result={},
+        )
+        session.add(analysis)
+        await session.commit()
+
+        service = GenerationTaskService()
+        live_task = await service.create_task(
+            session,
+            queue_name="ad_analysis_queue",
+            task_type="ad_performance_analysis",
+            business_type="ad_performance_analysis",
+            business_id=analysis.analysis_id,
+            payload={
+                "analysis_record_id": analysis.id,
+                "analysis_id": analysis.analysis_id,
+            },
+        )
+        orphan_task = await service.create_task(
+            session,
+            queue_name="ad_analysis_queue",
+            task_type="ad_performance_analysis",
+            business_type="ad_performance_analysis",
+            business_id="ana_task_monitor_deleted",
+            payload={"analysis_id": "ana_task_monitor_deleted"},
+        )
+
+        listing = await service.list_tasks(session)
+        remaining_rows = list((await session.execute(select(GenerationTask))).scalars().all())
+
+    assert {task.id for task in listing.items} == {live_task.id}
+    assert listing.total == 1
+    assert listing.summary["total"] == 1
+    assert {task.id for task in remaining_rows} == {live_task.id}
+    assert orphan_task.id not in {task.id for task in remaining_rows}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_generation_task_endpoints_require_operator_and_block_cross_operator_access(
     monkeypatch,
     tmp_path,
@@ -1022,6 +1082,7 @@ async def test_generation_task_summary_reports_queue_pressure_and_duration_metri
     monkeypatch.setenv("IMAGE_QUEUE_CONCURRENCY", "1")
     monkeypatch.setenv("VIDEO_QUEUE_CONCURRENCY", "1")
     monkeypatch.setenv("CALLBACK_QUEUE_CONCURRENCY", "1")
+    monkeypatch.setenv("AD_ANALYSIS_QUEUE_CONCURRENCY", "2")
     monkeypatch.setenv("GENERATION_TASK_TARGET_CONCURRENT_USERS", "30")
     get_settings.cache_clear()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -1107,9 +1168,10 @@ async def test_generation_task_summary_reports_queue_pressure_and_duration_metri
     text_health = summary["queue_health"][TEXT_QUEUE_NAME]
     image_health = summary["queue_health"][IMAGE_QUEUE_NAME]
     video_health = summary["queue_health"][VIDEO_QUEUE_NAME]
+    ad_analysis_health = summary["queue_health"][AD_ANALYSIS_QUEUE_NAME]
 
     assert summary["target_concurrent_users"] == 30
-    assert summary["total_active_capacity"] == 5
+    assert summary["total_active_capacity"] == 7
     assert text_health["active"] == 3
     assert text_health["concurrency"] == 2
     assert text_health["backlog"] == 1
@@ -1123,6 +1185,8 @@ async def test_generation_task_summary_reports_queue_pressure_and_duration_metri
     assert image_health["max_run_ms"] >= image_health["avg_run_ms"]
     assert video_health["avg_wait_ms"] == 60_000
     assert video_health["avg_run_ms"] == 120_000
+    assert ad_analysis_health["active"] == 0
+    assert ad_analysis_health["concurrency"] == 2
     assert summary["failure_codes"] == [{"code": "provider_timeout", "count": 1}]
     assert summary["slowest_queues"][0]["queue_name"] == TEXT_QUEUE_NAME
 
