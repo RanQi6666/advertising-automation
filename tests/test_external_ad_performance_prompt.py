@@ -218,7 +218,7 @@ def test_video_keyframes_are_attached_as_local_visual_inputs_when_video_is_unsup
 
     assert isinstance(content, list)
     images = [item for item in content if item.get("type") == "image_url"]
-    assert len(images) == 3
+    assert len(images) == 4
     assert all(item["image_url"]["url"].startswith("data:image/jpeg;base64,") for item in images)
     assert base64.b64decode(images[0]["image_url"]["url"].split(",", 1)[1]) == (
         b"\xff\xd8\xff\x00"
@@ -253,6 +253,39 @@ def test_image_thumbnail_is_preferred_over_remote_image_url(tmp_path):
     assert "https://newpixel.messrocts.com/uploads/ad.jpg" not in [
         item["image_url"]["url"] for item in images
     ]
+
+
+def test_carousel_thumbnails_are_attached_in_card_order(tmp_path):
+    thumbnail_paths = []
+    for index in range(4):
+        thumbnail = tmp_path / f"card-{index}.jpg"
+        thumbnail.write_bytes(b"\xff\xd8\xff" + bytes([index]))
+        thumbnail_paths.append(str(thumbnail))
+
+    content = _ad_performance_user_content(
+        {
+            "creative": {
+                "creative_type": "carousel",
+                "image_urls": [
+                    "https://newpixel.messrocts.com/uploads/card-1.jpg",
+                    "https://newpixel.messrocts.com/uploads/card-2.jpg",
+                ],
+            },
+            "media_summary": {
+                "status": "available",
+                "local_artifacts": {"carousel_thumbnail_paths": thumbnail_paths},
+            },
+        }
+    )
+
+    assert isinstance(content, list)
+    images = [item for item in content if item.get("type") == "image_url"]
+    assert len(images) == 4
+    assert base64.b64decode(images[0]["image_url"]["url"].split(",", 1)[1]) == (
+        b"\xff\xd8\xff\x00"
+    )
+    assert "carousel cards" in content[0]["text"]
+    assert "do not infer the contents of missing cards" in content[0]["text"]
 
 
 def test_missing_local_visual_artifacts_are_skipped_safely():

@@ -247,15 +247,20 @@ def _query_profile(payload: dict[str, Any], media_summary: dict[str, Any]) -> di
         adset.get("optimization_goal"),
         adset.get("countries"),
         creative.get("name"),
-        creative.get("headline") or creative.get("title"),
-        creative.get("message") or creative.get("primary_text"),
+        creative.get("headline"),
+        creative.get("message"),
         metadata.get("product_name") or metadata.get("brand_name"),
     ]
     terms = _dedupe_terms(candidates)
     creative_type = str(creative.get("creative_type") or "unknown").lower()
     source_url = (
-        creative.get("image_url") if creative_type == "image" else creative.get("video_url")
+        creative.get("image_url")
+        if creative_type == "image"
+        else creative.get("video_url")
     )
+    if creative_type == "carousel":
+        image_urls = creative.get("image_urls")
+        source_url = image_urls[0] if isinstance(image_urls, list) and image_urls else None
     return {
         "platform": "facebook",
         "creative_type": creative_type,

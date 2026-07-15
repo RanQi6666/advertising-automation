@@ -62,7 +62,7 @@ class MediaImprovement(StrictPublicModel):
 
 
 class MediaAnalysis(StrictPublicModel):
-    media_type: Literal["image", "video"]
+    media_type: Literal["image", "video", "carousel"]
     summary: ShortText
     improvements: list[MediaImprovement] = Field(default_factory=list, max_length=3)
 

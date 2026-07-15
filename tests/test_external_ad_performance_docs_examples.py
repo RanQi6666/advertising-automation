@@ -10,11 +10,14 @@ _SAMPLE_FILENAMES = [
     "外部系统投放数据分析请求示例.json",
     "投放分析_图片广告测试包.json",
     "投放分析_视频广告测试包.json",
+    "投放分析_轮播广告测试包.json",
 ]
 
 _INTEGRATION_DOC_PATH = Path("docs") / "外部系统投放数据分析对接说明.md"
 _SUCCEEDED_RESPONSE_START = "<!-- SUCCEEDED_GET_RESPONSE_START -->"
 _SUCCEEDED_RESPONSE_END = "<!-- SUCCEEDED_GET_RESPONSE_END -->"
+_SIBLING_EXAMPLE_START = "<!-- SIBLING_EXAMPLE_START -->"
+_SIBLING_EXAMPLE_END = "<!-- SIBLING_EXAMPLE_END -->"
 _EXPECTED_RESULT_KEYS = {
     "schema_version",
     "platform",
@@ -26,6 +29,57 @@ _EXPECTED_RESULT_KEYS = {
     "media_analysis",
     "market_intelligence",
     "data_gaps",
+}
+_STANDARD_ADSET_FIELDS = {
+    "id",
+    "name",
+    "status",
+    "daily_budget",
+    "bid_strategy",
+    "billing_event",
+    "optimization_goal",
+    "pixel_id",
+    "custom_event_type",
+    "promoted_object",
+    "countries",
+    "age_min",
+    "age_max",
+    "genders",
+    "audience",
+    "device_platforms",
+    "placements",
+    "scale_threshold",
+    "stop_threshold",
+    "switch_time",
+}
+_STANDARD_CREATIVE_FIELDS = {
+    "id",
+    "name",
+    "creative_type",
+    "image_url",
+    "video_url",
+    "image_urls",
+    "message",
+    "headline",
+    "description",
+    "btn_type",
+    "link",
+    "ad_status",
+    "page_id",
+    "asset_id",
+    "asset_name",
+    "asset_type",
+    "storyboard",
+}
+_RETIRED_META_AND_INSIGHT_LINK_FIELDS = {
+    "fb_id",
+    "facebook_ad_id",
+    "campaign_id",
+    "campaign_name",
+    "adset_id",
+    "adset_name",
+    "ad_id",
+    "ad_name",
 }
 
 
@@ -47,21 +101,53 @@ def test_external_ad_performance_sample_payloads_match_async_contract():
         payload = json.loads(path.read_text(encoding="utf-8"))
 
         assert payload.get("external_request_id"), f"{filename} must include external_request_id"
+        assert set(payload.get("adset") or {}).issubset(_STANDARD_ADSET_FIELDS), (
+            f"{filename} sample payload should use only documented standard adset fields"
+        )
         creative = payload.get("creative") or {}
-        assert "thumbnail_url" not in creative, f"{filename} must not require caller thumbnail_url"
+        assert set(creative).issubset(_STANDARD_CREATIVE_FIELDS), (
+            f"{filename} sample payload should use only documented standard creative fields"
+        )
+        if "genders" in payload.get("adset", {}):
+            assert payload["adset"]["genders"] in {"ALL", "MALE", "FEMALE"}
+        assert "thumbnail_url" not in creative, (
+            f"{filename} sample payload should use documented standard creative fields"
+        )
         assert "video_keyframes" not in creative, (
-            f"{filename} must not require caller video_keyframes"
+            f"{filename} sample payload should use documented standard creative fields"
         )
 
         model = ExternalAdPerformanceAnalysisCreate.model_validate(payload)
         if creative.get("creative_type") == "image":
-            assert model.creative.get("image_url", "").startswith(
-                "https://newpixel.messrocts.com/uploads/"
-            )
+            assert model.creative.get("image_url", "").startswith(("http://", "https://"))
         if creative.get("creative_type") == "video":
-            assert model.creative.get("video_url", "").startswith(
-                "https://newpixel.messrocts.com/uploads/"
+            assert model.creative.get("video_url", "").startswith(("http://", "https://"))
+        if creative.get("creative_type") == "carousel":
+            assert len(model.creative.get("image_urls", [])) >= 2
+            assert all(
+                url.startswith(("http://", "https://"))
+                for url in model.creative["image_urls"]
             )
+        assert "duration_seconds" not in creative, (
+            f"{filename} sample payload should use documented standard creative fields"
+        )
+        insight = payload.get("insight") or {}
+        assert not (set(insight) & _RETIRED_META_AND_INSIGHT_LINK_FIELDS), (
+            f"{filename} sample payload should not duplicate ad-object identities in insight"
+        )
+        if "status" in insight:
+            assert insight["status"] in {"ACTIVE", "PAUSED"}, (
+                f"{filename} insight.status must use a supported value when provided"
+            )
+        assert "action_values" not in insight, (
+            f"{filename} sample payload should use documented standard insight fields"
+        )
+        for sibling in payload.get("siblings") or []:
+            sibling_insight = sibling.get("insight") if isinstance(sibling, dict) else None
+            if isinstance(sibling_insight, dict):
+                assert "action_values" not in sibling_insight, (
+                    f"{filename} sibling sample should use documented standard insight fields"
+                )
 
 
 def test_documented_succeeded_get_response_matches_operator_result_contract():
@@ -144,3 +230,33 @@ def test_documented_succeeded_get_response_matches_operator_result_contract():
     assert len(market["references"]) <= 3
     assert len(result["data_gaps"]) <= 3
     FacebookAdAnalysisResult.model_validate(result)
+
+
+def test_documented_sibling_example_uses_minimal_comparison_contract():
+    markdown = _INTEGRATION_DOC_PATH.read_text(encoding="utf-8")
+    example = _extract_marked_json(
+        markdown,
+        _SIBLING_EXAMPLE_START,
+        _SIBLING_EXAMPLE_END,
+    )
+
+    siblings = example["siblings"]
+    assert len(siblings) == 2
+    for sibling in siblings:
+        assert set(sibling) == {"creative", "insight"}
+        assert sibling["creative"].get("name")
+        assert sibling["creative"].get("creative_type") in {"image", "video", "carousel"}
+        insight = sibling["insight"]
+        if "status" in insight:
+            assert insight["status"] in {"ACTIVE", "PAUSED"}
+        assert "cost_per_action_type" not in insight
+        assert "action_values" not in insight
+        assert "image_url" not in sibling["creative"]
+        assert "video_url" not in sibling["creative"]
+
+
+def test_integration_documentation_does_not_publish_retired_meta_or_insight_link_ids():
+    markdown = _INTEGRATION_DOC_PATH.read_text(encoding="utf-8")
+
+    for field_name in _RETIRED_META_AND_INSIGHT_LINK_FIELDS:
+        assert f"`{field_name}`" not in markdown

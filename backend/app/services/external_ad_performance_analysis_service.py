@@ -84,24 +84,18 @@ class ExternalAdPerformanceAnalysisService:
             payload_hash=payload_hash,
             request_payload=request_payload,
             normalized_payload=normalized_payload,
-            external_user_id=payload.external_user_id,
+            external_user_id=None,
             source_type=payload.source_type or "external",
             status="queued",
             stage="queued",
             progress=0,
             analysis_scope=AD_ANALYSIS_SCOPE,
             result_schema_version=RULE_RESULT_SCHEMA_VERSION,
-            campaign_external_id=_text(
-                _dict(payload.campaign).get("id") or _dict(payload.campaign).get("external_id")
-            ),
+            campaign_external_id=_text(_dict(payload.campaign).get("id")),
             campaign_name=_text(_dict(payload.campaign).get("name")),
-            adset_external_id=_text(
-                _dict(payload.adset).get("id") or _dict(payload.adset).get("external_id")
-            ),
+            adset_external_id=_text(_dict(payload.adset).get("id")),
             adset_name=_text(_dict(payload.adset).get("name")),
-            creative_external_id=_text(
-                _dict(payload.creative).get("id") or _dict(payload.creative).get("external_id")
-            ),
+            creative_external_id=_text(_dict(payload.creative).get("id")),
             creative_name=_text(_dict(payload.creative).get("name")),
             date_start=payload.date_start,
             date_stop=payload.date_stop,

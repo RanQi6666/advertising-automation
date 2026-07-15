@@ -98,12 +98,10 @@ def build_facebook_metric_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     insight = _record(payload.get("insight"))
     currency = _currency(payload, insight)
     action_counts = _collect_action_counts(insight)
-    monetary_values = _collect_monetary_action_values(insight)
 
     metrics = _base_metrics(insight, currency)
     metrics.update(_action_metrics(action_counts))
     metrics.update(_video_action_metrics(action_counts))
-    metrics.update(_monetary_action_value_metrics(monetary_values, currency))
     metrics.update(_derived_metrics(metrics))
     metrics.update(_business_efficiency_metrics(metrics, currency))
 
@@ -134,14 +132,8 @@ def _record(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _currency(payload: dict[str, Any], insight: dict[str, Any]) -> str | None:
-    value = payload.get("account_currency")
-    if value is None:
-        value = insight.get("account_currency") or insight.get("currency")
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+def _currency(payload: dict[str, Any], insight: dict[str, Any]) -> str:
+    return "USD"
 
 
 def _base_metrics(insight: dict[str, Any], currency: str | None) -> dict[str, dict[str, Any]]:
@@ -214,54 +206,6 @@ def _action_metrics(action_values: dict[str, Decimal]) -> dict[str, dict[str, An
             missing_reason="first_recharge was not supplied",
         ),
     }
-
-
-def _monetary_action_value_metrics(
-    monetary_values: dict[str, Decimal], currency: str | None
-) -> dict[str, dict[str, Any]]:
-    return {
-        "purchase_value": _monetary_value_metric(
-            monetary_values,
-            "purchase",
-            missing_reason="purchase value was not supplied in action_values",
-            currency=currency,
-        ),
-        "first_recharge_value": _monetary_value_metric(
-            monetary_values,
-            "first_recharge",
-            missing_reason="first_recharge value was not supplied in action_values",
-            currency=currency,
-        ),
-    }
-
-
-def _monetary_value_metric(
-    monetary_values: dict[str, Decimal],
-    metric_name: str,
-    *,
-    missing_reason: str,
-    currency: str | None,
-) -> dict[str, Any]:
-    value = _first_action_value(monetary_values, ACTION_ALIASES[metric_name])
-    if value is None:
-        return MetricDatum(
-            value=None,
-            unit="currency",
-            source="missing",
-            assessment="unavailable",
-            availability="unavailable",
-            reason=missing_reason,
-            currency=currency,
-        ).as_dict()
-    number = _to_float(value)
-    return MetricDatum(
-        value=number,
-        unit="currency",
-        source="meta_action_values",
-        assessment="zero" if number == 0 else "available",
-        availability="available",
-        currency=currency,
-    ).as_dict()
 
 
 def _video_action_metrics(action_values: dict[str, Decimal]) -> dict[str, dict[str, Any]]:
@@ -342,18 +286,6 @@ def _business_efficiency_metrics(
     metrics: dict[str, dict[str, Any]], currency: str | None
 ) -> dict[str, dict[str, Any]]:
     return {
-        "purchase_roas": _ratio_metric(
-            metrics,
-            numerator_name="purchase_value",
-            denominator_name="spend",
-            formula="purchase_value / spend",
-        ),
-        "first_recharge_roas": _ratio_metric(
-            metrics,
-            numerator_name="first_recharge_value",
-            denominator_name="spend",
-            formula="first_recharge_value / spend",
-        ),
         "cost_per_purchase": _cost_per_action_metric(
             metrics,
             action_name="purchase",
@@ -385,35 +317,6 @@ def _business_efficiency_metrics(
             currency=currency,
         ),
     }
-
-
-def _ratio_metric(
-    metrics: dict[str, dict[str, Any]],
-    *,
-    numerator_name: str,
-    denominator_name: str,
-    formula: str,
-) -> dict[str, Any]:
-    numerator = _metric_value(metrics.get(numerator_name))
-    denominator = _metric_value(metrics.get(denominator_name))
-    if numerator is None or denominator is None or denominator == 0:
-        return MetricDatum(
-            value=None,
-            unit="ratio",
-            source="calculated",
-            assessment="unavailable",
-            availability="unavailable",
-            formula=formula,
-            reason=f"{numerator_name} or {denominator_name} is zero or missing",
-        ).as_dict()
-    return MetricDatum(
-        value=_to_float(numerator / denominator),
-        unit="ratio",
-        source="calculated",
-        assessment="available",
-        availability="available",
-        formula=formula,
-    ).as_dict()
 
 
 def _cost_per_action_metric(
@@ -454,12 +357,6 @@ def _collect_action_counts(insight: dict[str, Any]) -> dict[str, Decimal]:
         field_value = _sum_action_rows(insight.get(field_name))
         if field_value is not None:
             values[canonical_name] = field_value
-    return values
-
-
-def _collect_monetary_action_values(insight: dict[str, Any]) -> dict[str, Decimal]:
-    values: dict[str, Decimal] = {}
-    _add_action_rows(values, insight.get("action_values"))
     return values
 
 
@@ -522,9 +419,7 @@ def _objective_alignment(
 ) -> dict[str, Any]:
     objective = str(campaign.get("objective") or "").strip().upper()
     optimization_goal = str(adset.get("optimization_goal") or "").strip().upper()
-    metadata = _record(payload.get("metadata_json"))
-    business_goal_value = payload.get("business_goal") or metadata.get("business_goal")
-    business_goal = str(business_goal_value).strip() if business_goal_value else "unknown"
+    business_goal = _infer_business_goal(adset, _record(payload.get("insight")))
     return {
         "objective": objective or None,
         "optimization_goal": optimization_goal or None,
@@ -534,6 +429,35 @@ def _objective_alignment(
         "business_goal": business_goal or "unknown",
         "currency": currency,
     }
+
+
+def _infer_business_goal(adset: dict[str, Any], insight: dict[str, Any]) -> str:
+    promoted_object = _record(adset.get("promoted_object"))
+    configured_event = (
+        adset.get("custom_event_type")
+        or promoted_object.get("custom_event_type")
+    )
+    configured_goal = _business_goal_from_event(configured_event)
+    if configured_goal:
+        return configured_goal
+
+    action_counts = _collect_action_counts(insight)
+    for goal in ("purchase", "first_recharge", "complete_registration", "lead"):
+        if _first_action_value(action_counts, ACTION_ALIASES[goal]) is not None:
+            return goal
+    return "unknown"
+
+
+def _business_goal_from_event(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    for goal in ("purchase", "first_recharge", "complete_registration", "lead"):
+        if normalized in ACTION_ALIASES[goal] or normalized == goal:
+            return goal
+    return None
 
 
 def _diagnoses(
@@ -617,12 +541,10 @@ def _data_quality(metrics: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], b
         name
         for name in (
             "purchase",
-            "purchase_value",
             "add_to_cart",
             "lead",
             "complete_registration",
             "first_recharge",
-            "first_recharge_value",
         )
         if metrics[name]["source"] == "missing"
     ]
@@ -678,8 +600,6 @@ def _performance_funnel(
         "conversion": {
             "metrics": {
                 "purchase": metrics["purchase"],
-                "purchase_value": metrics["purchase_value"],
-                "purchase_roas": metrics["purchase_roas"],
                 "cost_per_purchase": metrics["cost_per_purchase"],
                 "add_to_cart": metrics["add_to_cart"],
                 "cost_per_add_to_cart": metrics["cost_per_add_to_cart"],
@@ -690,8 +610,6 @@ def _performance_funnel(
                     "cost_per_complete_registration"
                 ],
                 "first_recharge": metrics["first_recharge"],
-                "first_recharge_value": metrics["first_recharge_value"],
-                "first_recharge_roas": metrics["first_recharge_roas"],
                 "cost_per_first_recharge": metrics["cost_per_first_recharge"],
             }
         },
@@ -746,7 +664,9 @@ def _executive_summary(
     if landing_page_rate is not None:
         key_findings.append(f"Landing page view rate is {_to_float(landing_page_rate):.2f}%.")
     if purchase_missing:
-        key_findings.append("Purchase data is unavailable, so profitability cannot be confirmed.")
+        key_findings.append(
+            "Purchase event data is unavailable, so cost per purchase cannot be assessed."
+        )
     if not key_findings:
         key_findings.append(
             "Submitted data is not yet sufficient for a strong deterministic conclusion."

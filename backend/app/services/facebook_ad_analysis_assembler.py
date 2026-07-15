@@ -298,12 +298,8 @@ def _copywriting_analysis(
     creative = _dict(request_payload.get("creative"))
     source_values = [
         creative.get("message"),
-        creative.get("primary_text"),
-        creative.get("body"),
         creative.get("headline"),
-        creative.get("title"),
         creative.get("description"),
-        creative.get("caption"),
     ]
     has_source_copy = any(_text(value) for value in source_values)
     section = _dict(llm_contribution.get("copywriting_analysis"))
@@ -344,14 +340,21 @@ def _media_analysis(
 ) -> dict[str, Any]:
     creative = _dict(request_payload.get("creative"))
     media_type = str(creative.get("creative_type") or "image").strip().lower()
-    if media_type not in {"image", "video"}:
+    if media_type not in {"image", "video", "carousel"}:
         media_type = "video" if creative.get("video_url") else "image"
     status = str(processing.get("status") or "unavailable").strip().lower()
     section = _dict(llm_contribution.get("media_analysis"))
     if not section:
         section = _dict(llm_contribution.get("visual_analysis"))
 
-    if status != "available":
+    if media_type == "video" and processing.get("video_visual_complete") is False:
+        return {
+            "media_type": media_type,
+            "summary": "视频首帧或尾帧处理不完整，本次不对完整视频画面内容作判断。",
+            "improvements": [],
+        }
+
+    if status not in {"available", "partial"}:
         return {
             "media_type": media_type,
             "summary": "素材未能完成可靠的画面处理，本次不对具体画面内容作判断。",
@@ -481,7 +484,10 @@ def _data_gaps(
         for name in ("purchase", "lead", "complete_registration", "first_recharge")
     ):
         gaps.append("缺少购买、注册或线索等业务结果数据，因此暂时无法判断真实转化效果。")
-    if str(media_analysis.get("status") or "unavailable").lower() != "available":
+    media_status = str(media_analysis.get("status") or "unavailable").lower()
+    if media_analysis.get("video_visual_complete") is False:
+        gaps.append("视频首帧或尾帧未完成处理，因此本次无法可靠判断完整视频画面问题。")
+    elif media_status != "available":
         gaps.append("素材下载或处理未完成，因此本次无法可靠判断图片或视频画面问题。")
     if (
         not _list(public_research.get("selected_reference_ads"))
@@ -537,12 +543,12 @@ def _metric_display(value: Any, *, decimals: int = 0) -> str | None:
 
 def _current_targeting_value(adset: dict[str, Any], dimension: str) -> str | None:
     mapping: dict[str, Any] = {
-        "country": adset.get("countries") or adset.get("country"),
-        "audience": adset.get("audience") or adset.get("audience_description"),
+        "country": adset.get("countries"),
+        "audience": adset.get("audience"),
         "age": _age_range(adset),
-        "gender": adset.get("genders") or adset.get("gender"),
-        "device": adset.get("device_platforms") or adset.get("devices"),
-        "placement": adset.get("placements") or adset.get("publisher_platforms"),
+        "gender": adset.get("genders"),
+        "device": adset.get("device_platforms"),
+        "placement": adset.get("placements"),
     }
     value = mapping.get(dimension)
     if isinstance(value, list):

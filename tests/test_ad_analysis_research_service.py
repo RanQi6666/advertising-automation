@@ -147,3 +147,21 @@ async def test_public_research_discards_malformed_facebook_ads_library_urls():
     assert [
         reference["source_url"] for reference in summary["selected_reference_ads"]
     ] == ["https://www.facebook.com/ads/library/?id=valid-reference"]
+
+
+@pytest.mark.asyncio
+async def test_public_research_query_uses_only_standard_creative_copy_fields():
+    payload = _payload()
+    payload["creative"] = {
+        "creative_type": "video",
+        "title": "Legacy title only",
+        "primary_text": "Legacy primary text only",
+        "video_url": "https://newpixel.messrocts.com/uploads/video.mp4",
+    }
+    provider = _FakeSearchProvider()
+
+    await AdAnalysisResearchService(search_provider=provider).research(payload)
+
+    terms = provider.query_profiles[0]["terms"]
+    assert "Legacy title only" not in terms
+    assert "Legacy primary text only" not in terms

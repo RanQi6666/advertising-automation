@@ -720,7 +720,7 @@ def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
         },
         "media_analysis": {
             "media_type": _enum_value(
-                media.get("media_type"), {"image", "video"}, "image"
+                media.get("media_type"), {"image", "video", "carousel"}, "image"
             ),
             "summary": _short_required_text(
                 media.get("summary"),
@@ -1047,6 +1047,13 @@ def _ad_performance_user_content(
     if local_images:
         creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
         creative_type = str(creative.get("creative_type") or "creative").lower()
+        visual_kind = (
+            " carousel cards"
+            if creative_type == "carousel"
+            else " keyframes"
+            if len(local_images) > 1
+            else ""
+        )
         return [
             {
                 "type": "text",
@@ -1054,10 +1061,12 @@ def _ad_performance_user_content(
                     text
                     + f"\n\nThe attached image{'s are' if len(local_images) > 1 else ' is'} "
                     f"the internally processed {creative_type} creative visual"
-                    f"{' keyframes' if len(local_images) > 1 else ''}. Inspect only the "
+                    f"{visual_kind}. Inspect only the "
                     "attached visuals for media_analysis and do not claim details that are "
                     "not visible. For video keyframes, compare the frames in chronological "
-                    "order for hook, product/context match, pacing, and likely drop-off risks."
+                    "order for hook, product/context match, pacing, and likely drop-off risks. "
+                    "For carousel cards, some cards may be unavailable; discuss only the "
+                    "attached cards and do not infer the contents of missing cards."
                 ),
             },
             *[
@@ -1121,11 +1130,14 @@ def _ad_performance_local_visual_data_urls(context: dict[str, Any]) -> list[str]
     if "video" in creative_type:
         paths = local_artifacts.get("keyframe_paths")
         candidates = paths if isinstance(paths, list) else []
+    elif creative_type == "carousel":
+        paths = local_artifacts.get("carousel_thumbnail_paths")
+        candidates = paths if isinstance(paths, list) else []
     else:
         candidates = [local_artifacts.get("thumbnail_path")]
 
     data_urls: list[str] = []
-    for candidate in candidates[:3]:
+    for candidate in candidates[:5]:
         if not isinstance(candidate, str) or not candidate.strip():
             continue
         try:
@@ -1168,8 +1180,11 @@ def _ad_performance_image_url(context: dict[str, Any]) -> str | None:
     creative_type = _coerce_optional_text(
         creative.get("creative_type") or creative.get("asset_type")
     )
-    if creative_type and "image" not in creative_type.lower():
+    if creative_type and creative_type.lower() not in {"image", "carousel"}:
         return None
+    image_urls = creative.get("image_urls")
+    if creative_type and creative_type.lower() == "carousel" and isinstance(image_urls, list):
+        return _first_text(*image_urls)
     return _first_text(
         creative.get("image_url"),
         creative.get("imageUrl"),

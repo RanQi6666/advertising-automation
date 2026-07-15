@@ -6,7 +6,6 @@ from backend.app.services.facebook_ad_metrics import build_facebook_metric_analy
 def _sample_payload() -> dict:
     return {
         "external_request_id": "metrics-1",
-        "account_currency": "USD",
         "campaign": {"objective": "OUTCOME_TRAFFIC", "name": "new1"},
         "adset": {"optimization_goal": "LINK_CLICKS", "countries": "US"},
         "creative": {"creative_type": "image", "message": "My record: 3 minutes. Can you beat it?"},
@@ -25,7 +24,6 @@ def _sample_payload() -> dict:
                 {"action_type": "link_click", "value": "86"},
                 {"action_type": "landing_page_view", "value": "23"},
             ],
-            "cost_per_action_type": [{"action_type": "landing_page_view", "value": "0.010435"}],
         },
         "siblings": [{"insight": {"impressions": "19"}}],
     }
@@ -50,12 +48,39 @@ def test_sample_rules_return_approved_topline_and_landing_page_rate():
     )
 
 
-def test_missing_currency_does_not_default_to_usd():
+def test_currency_is_fixed_to_usd():
     payload = _sample_payload()
-    payload.pop("account_currency")
-    payload["insight"].pop("currency", None)
+    payload["insight"]["currency"] = "INR"
     analysis = build_facebook_metric_analysis(payload)
-    assert analysis["objective_alignment"]["currency"] is None
+    assert analysis["objective_alignment"]["currency"] == "USD"
+
+
+def test_business_goal_is_inferred_from_adset_custom_event_type():
+    payload = _sample_payload()
+    payload["adset"]["custom_event_type"] = "purchase"
+
+    analysis = build_facebook_metric_analysis(payload)
+
+    assert analysis["objective_alignment"]["business_goal"] == "purchase"
+
+
+def test_business_goal_is_inferred_from_normalized_uppercase_custom_event_type():
+    payload = _sample_payload()
+    payload["adset"]["custom_event_type"] = "COMPLETE_REGISTRATION"
+
+    analysis = build_facebook_metric_analysis(payload)
+
+    assert analysis["objective_alignment"]["business_goal"] == "complete_registration"
+
+
+def test_business_goal_does_not_read_legacy_camel_case_event_key():
+    payload = _sample_payload()
+    payload["adset"] = {"customEventType": "purchase"}
+    payload["insight"]["actions"] = []
+
+    analysis = build_facebook_metric_analysis(payload)
+
+    assert analysis["objective_alignment"]["business_goal"] == "unknown"
 
 
 def test_sales_payload_distinguishes_zero_purchase_from_missing_purchase():
@@ -70,9 +95,8 @@ def test_sales_payload_distinguishes_zero_purchase_from_missing_purchase():
     assert purchase["source"] == "meta_actions"
 
 
-def test_action_values_drive_revenue_roas_and_cost_metrics():
+def test_conversion_cost_metrics_do_not_depend_on_action_values_or_roas():
     payload = _sample_payload()
-    payload["account_currency"] = "USD"
     payload["campaign"]["objective"] = "OUTCOME_SALES"
     payload["adset"]["optimization_goal"] = "OFFSITE_CONVERSIONS"
     payload["insight"]["spend"] = "100"
@@ -82,21 +106,25 @@ def test_action_values_drive_revenue_roas_and_cost_metrics():
             {"action_type": "first_recharge", "value": "2"},
         ]
     )
-    payload["insight"]["action_values"] = [
-        {"action_type": "purchase", "value": "250.00"},
-        {"action_type": "first_recharge", "value": "120.00"},
-    ]
-
     analysis = build_facebook_metric_analysis(payload)
     conversion = analysis["performance_funnel"]["conversion"]["metrics"]
 
     assert conversion["purchase"]["value"] == 5
     assert conversion["first_recharge"]["value"] == 2
-    assert conversion["purchase_value"]["value"] == 250
-    assert conversion["purchase_value"]["unit"] == "currency"
-    assert conversion["purchase_value"]["currency"] == "USD"
-    assert conversion["first_recharge_value"]["value"] == 120
-    assert conversion["purchase_roas"]["value"] == pytest.approx(2.5)
-    assert conversion["purchase_roas"]["formula"] == "purchase_value / spend"
+    assert "purchase_value" not in conversion
+    assert "first_recharge_value" not in conversion
+    assert "purchase_roas" not in conversion
+    assert "first_recharge_roas" not in conversion
     assert conversion["cost_per_purchase"]["value"] == pytest.approx(20)
     assert conversion["cost_per_first_recharge"]["value"] == pytest.approx(50)
+    assert "purchase_value" not in analysis["data_quality"]["missing_metrics"]
+    assert "first_recharge_value" not in analysis["data_quality"]["missing_metrics"]
+
+
+def test_missing_purchase_event_does_not_claim_missing_revenue_or_roas():
+    analysis = build_facebook_metric_analysis(_sample_payload())
+
+    assert analysis["executive_summary"]["key_findings"] == [
+        "Landing page view rate is 26.74%.",
+        "Purchase event data is unavailable, so cost per purchase cannot be assessed.",
+    ]

@@ -117,11 +117,12 @@ class Settings(BaseSettings):
     video_download_max_bytes: int = 500 * 1024 * 1024
     ad_analysis_media_root: str = "data/ad-analysis-media"
     ad_analysis_media_processing_enabled: bool = True
-    ad_analysis_allowed_media_hosts: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["newpixel.messrocts.com"]
-    )
     ad_analysis_allow_private_media_hosts: bool = False
     ad_analysis_media_download_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
+    ad_analysis_image_download_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+    ad_analysis_video_download_timeout_seconds: float = Field(default=80.0, ge=1, le=180)
+    ad_analysis_media_download_retry_attempts: int = Field(default=1, ge=0, le=3)
+    ad_analysis_media_download_retry_delay_seconds: float = Field(default=1.0, ge=0, le=30)
     ad_analysis_ffprobe_timeout_seconds: float = Field(default=10.0, ge=0.01, le=120)
     ad_analysis_ffmpeg_frame_timeout_seconds: float = Field(default=15.0, ge=0.01, le=120)
     ad_analysis_image_download_max_bytes: int = Field(
@@ -141,13 +142,6 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
-
-    @field_validator("ad_analysis_allowed_media_hosts", mode="before")
-    @classmethod
-    def parse_ad_analysis_allowed_media_hosts(cls, value: str | list[str]) -> list[str]:
-        if isinstance(value, str):
-            return [host.strip().lower() for host in value.split(",") if host.strip()]
         return value
 
     @field_validator("model_gateway_text_models", "model_gateway_image_models", mode="before")

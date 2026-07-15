@@ -305,6 +305,62 @@ def test_media_processing_failure_never_exposes_paths_or_invented_visual_observa
     assert any("素材" in item for item in result["data_gaps"])
 
 
+def test_partial_video_without_an_ending_frame_does_not_claim_complete_visual_analysis():
+    result = _assemble(
+        payload={
+            **_payload(),
+            "creative": {
+                **_payload()["creative"],
+                "creative_type": "video",
+                "video_url": "https://newpixel.messrocts.com/uploads/ad.mp4",
+            },
+        },
+        media_analysis={
+            "status": "partial",
+            "first_frame_generated": True,
+            "last_frame_generated": False,
+            "video_visual_complete": False,
+        },
+        llm_contribution={
+            "media_analysis": {
+                "summary": "视频开场画面缺少吸引力。",
+                "improvements": [{"location": "开场", "problem": "节奏慢", "action": "前置卖点"}],
+            }
+        },
+    )
+
+    assert result["media_analysis"]["improvements"] == []
+    assert "不完整" in result["media_analysis"]["summary"]
+    assert any("首帧或尾帧" in item for item in result["data_gaps"])
+
+
+def test_carousel_media_analysis_keeps_carousel_type_when_all_cards_are_processed():
+    result = _assemble(
+        payload={
+            **_payload(),
+            "creative": {
+                **_payload()["creative"],
+                "creative_type": "carousel",
+                "image_urls": [
+                    "https://newpixel.messrocts.com/uploads/card-1.jpg",
+                    "https://newpixel.messrocts.com/uploads/card-2.jpg",
+                ],
+            },
+        },
+        media_analysis={"status": "available"},
+        llm_contribution={
+            "media_analysis": {
+                "media_type": "carousel",
+                "summary": "首张卡片的产品利益点可以更直接。",
+                "improvements": [],
+            }
+        },
+    )
+
+    assert result["media_analysis"]["media_type"] == "carousel"
+    FacebookAdAnalysisResult.model_validate(result)
+
+
 def test_market_intelligence_is_public_safe_and_limited_to_three_references():
     references = []
     for index in range(4):
@@ -376,6 +432,48 @@ def test_copy_recommendations_are_null_when_original_copy_is_missing():
     assert copywriting["recommended_primary_text"] is None
     assert copywriting["recommended_headline"] is None
     assert copywriting["recommended_description"] is None
+
+
+def test_analysis_uses_only_standard_targeting_and_copy_fields():
+    payload = _payload()
+    payload["adset"] = {
+        "country": "US",
+        "gender": "male",
+        "audience_description": "legacy gamers",
+        "devices": "desktop",
+        "publisher_platforms": ["facebook_feed"],
+    }
+    payload["creative"] = {
+        "creative_type": "image",
+        "image_url": "https://newpixel.messrocts.com/uploads/ad.jpg",
+        "primary_text": "Legacy primary text",
+        "body": "Legacy body",
+        "title": "Legacy title",
+        "caption": "Legacy caption",
+    }
+
+    result = _assemble(
+        payload=payload,
+        llm_contribution={
+            "targeting_analysis": [
+                {
+                    "dimension": "country",
+                    "problem": "需要拆分国家测试。",
+                    "suggestion": "复制广告组分别测试。",
+                    "reason": "当前没有国家拆分成效。",
+                }
+            ],
+            "copywriting_analysis": {
+                "summary": "不应使用旧文案字段。",
+                "suggestions": ["不应出现"],
+                "recommended_primary_text": "不应出现",
+            },
+        },
+    )
+
+    assert result["targeting_analysis"] == []
+    assert result["copywriting_analysis"]["recommended_primary_text"] is None
+    assert result["copywriting_analysis"]["suggestions"] == []
 
 
 def test_llm_failure_still_returns_valid_result_with_at_least_one_plan():

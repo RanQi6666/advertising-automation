@@ -17,7 +17,6 @@ def _payload(external_request_id="job-1") -> dict:
     return {
         "external_request_id": external_request_id,
         "source_type": "external",
-        "account_currency": "USD",
         "campaign": {"objective": "OUTCOME_TRAFFIC", "name": "new1"},
         "adset": {"optimization_goal": "LINK_CLICKS", "countries": "US"},
         "creative": {
@@ -26,6 +25,7 @@ def _payload(external_request_id="job-1") -> dict:
             "message": "My record: 3 minutes. Can you beat it?",
         },
         "insight": {
+            "status": "ACTIVE",
             "spend": "0.24",
             "impressions": "1079",
             "inline_link_clicks": "86",

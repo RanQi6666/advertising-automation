@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import mimetypes
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from socket import AF_INET, AF_INET6, SOCK_STREAM
@@ -16,6 +15,14 @@ class SafePublicHTTPError(RuntimeError):
     """Raised when a public HTTP fetch violates safety or transfer constraints."""
 
 
+class SafePublicHTTPStatusError(SafePublicHTTPError):
+    """A non-redirect HTTP response whose status is unsuitable for media download."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"media URL returned HTTP {status_code}")
+
+
 @dataclass(frozen=True)
 class DownloadedFile:
     source_url: str
@@ -23,73 +30,115 @@ class DownloadedFile:
     path: Path
     content_type: str | None
     bytes_written: int
+    attempts: int = 1
 
 
-def normalize_allowed_hosts(hosts: Iterable[str]) -> set[str]:
-    return {host.strip().lower() for host in hosts if host and host.strip()}
-
-
-async def download_public_https_file(
+async def download_public_http_file(
     url: str,
     destination: Path,
     *,
-    allowed_hosts: Iterable[str],
     max_bytes: int,
     timeout_seconds: float = 10.0,
     max_redirects: int = 3,
     allow_private_networks: bool = False,
+    retry_attempts: int = 0,
+    retry_delay_seconds: float = 1.0,
 ) -> DownloadedFile:
-    """Safely download a public HTTPS file with host allow-list and SSRF guardrails.
+    """Safely download a public HTTP(S) file with SSRF guardrails.
 
     This is intentionally stricter than a normal HTTP client because callers provide media URLs.
-    It allows only HTTPS, validates every redirect target, resolves DNS before connecting, blocks
-    private/link-local/loopback IPs by default, and streams to disk with a hard byte ceiling.
+    It accepts public HTTP or HTTPS URLs, validates every redirect target, resolves DNS before
+    connecting, blocks private/link-local/loopback IPs by default, and streams to disk with a
+    hard byte ceiling.
     """
 
-    partial_path = destination.with_name(f".{destination.name}.part")
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            return await _download_public_https_file(
-                url,
-                destination,
-                allowed_hosts=allowed_hosts,
-                max_bytes=max_bytes,
-                timeout_seconds=timeout_seconds,
-                max_redirects=max_redirects,
-                allow_private_networks=allow_private_networks,
+    total_attempts = max(int(retry_attempts), 0) + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                downloaded = await _download_public_http_file(
+                    url,
+                    destination,
+                    max_bytes=max_bytes,
+                    timeout_seconds=timeout_seconds,
+                    max_redirects=max_redirects,
+                    allow_private_networks=allow_private_networks,
+                )
+            return DownloadedFile(
+                source_url=downloaded.source_url,
+                final_url=downloaded.final_url,
+                path=downloaded.path,
+                content_type=downloaded.content_type,
+                bytes_written=downloaded.bytes_written,
+                attempts=attempt,
             )
-    except TimeoutError as exc:
-        partial_path.unlink(missing_ok=True)
-        destination.unlink(missing_ok=True)
-        raise SafePublicHTTPError(
-            f"media download timed out after {timeout_seconds:g} seconds"
-        ) from exc
+        except TimeoutError as exc:
+            error: BaseException = SafePublicHTTPError(
+                f"media download timed out after {timeout_seconds:g} seconds"
+            )
+            error.__cause__ = exc
+        except BaseException as exc:
+            error = exc
+
+        _remove_download_artifacts(destination)
+        if attempt >= total_attempts or not is_retryable_media_download_error(error):
+            raise error
+        await asyncio.sleep(max(float(retry_delay_seconds), 0.0))
+
+    raise SafePublicHTTPError("media download did not complete")  # pragma: no cover
 
 
-async def _download_public_https_file(
+def is_retryable_media_download_error(error: BaseException) -> bool:
+    """Return whether an error is likely transient and safe to retry once."""
+
+    for current in _exception_chain(error):
+        if isinstance(current, SafePublicHTTPStatusError):
+            return current.status_code in {408, 429, 500, 502, 503, 504}
+        if isinstance(current, (httpx.TimeoutException, httpx.TransportError, TimeoutError)):
+            return True
+        if isinstance(current, SafePublicHTTPError) and "timed out" in str(current).lower():
+            return True
+    return False
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _remove_download_artifacts(destination: Path) -> None:
+    destination.with_name(f".{destination.name}.part").unlink(missing_ok=True)
+    destination.unlink(missing_ok=True)
+
+
+async def _download_public_http_file(
     url: str,
     destination: Path,
     *,
-    allowed_hosts: Iterable[str],
     max_bytes: int,
     timeout_seconds: float,
     max_redirects: int,
     allow_private_networks: bool,
 ) -> DownloadedFile:
-    allowed = normalize_allowed_hosts(allowed_hosts)
-    if not allowed:
-        raise SafePublicHTTPError("no allowed media hosts configured")
-
     current_url = url.strip()
     final_response: httpx.Response | None = None
-    timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 5.0))
+    # A media download has one caller-defined end-to-end deadline.  Keeping a
+    # much shorter connect/TLS deadline would make a video configured for an
+    # 80-second transfer budget fail after five seconds before the transfer
+    # even begins, which is especially brittle for external HTTPS storage.
+    timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(
         follow_redirects=False, timeout=timeout, trust_env=False
     ) as client:
         for redirect_count in range(max_redirects + 1):
-            await _validate_public_https_url(
+            await _validate_public_http_url(
                 current_url,
-                allowed_hosts=allowed,
                 allow_private_networks=allow_private_networks,
             )
             request = client.build_request("GET", current_url)
@@ -110,7 +159,7 @@ async def _download_public_https_file(
             raise SafePublicHTTPError("media download did not produce a response")
         try:
             if final_response.status_code >= 400:
-                raise SafePublicHTTPError(f"media URL returned HTTP {final_response.status_code}")
+                raise SafePublicHTTPStatusError(final_response.status_code)
             destination.parent.mkdir(parents=True, exist_ok=True)
             partial_path = destination.with_name(f".{destination.name}.part")
             partial_path.unlink(missing_ok=True)
@@ -141,19 +190,17 @@ async def _download_public_https_file(
             await final_response.aclose()
 
 
-async def _validate_public_https_url(
+async def _validate_public_http_url(
     url: str,
     *,
-    allowed_hosts: set[str],
     allow_private_networks: bool,
 ) -> None:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise SafePublicHTTPError("media URL must be a complete HTTPS URL")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise SafePublicHTTPError("media URL must be a complete HTTP or HTTPS URL")
     hostname = parsed.hostname.lower()
-    if hostname not in allowed_hosts:
-        raise SafePublicHTTPError(f"media host is not allowed: {hostname}")
-    await _validate_dns_targets(hostname, parsed.port or 443, allow_private_networks)
+    default_port = 443 if parsed.scheme == "https" else 80
+    await _validate_dns_targets(hostname, parsed.port or default_port, allow_private_networks)
 
 
 async def _validate_dns_targets(hostname: str, port: int, allow_private_networks: bool) -> None:

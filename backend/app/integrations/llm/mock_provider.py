@@ -756,7 +756,12 @@ def _mock_facebook_operator_result(context: dict[str, Any]) -> dict[str, Any]:
 
     creative = context.get("creative") if isinstance(context.get("creative"), dict) else {}
     creative_type = str(creative.get("creative_type") or "image").strip().lower()
-    media_type = "video" if "video" in creative_type else "image"
+    if "video" in creative_type:
+        media_type = "video"
+    elif creative_type == "carousel":
+        media_type = "carousel"
+    else:
+        media_type = "image"
     rule_analysis = (
         context.get("rule_analysis") if isinstance(context.get("rule_analysis"), dict) else {}
     )
