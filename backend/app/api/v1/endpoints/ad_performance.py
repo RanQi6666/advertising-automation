@@ -9,6 +9,7 @@ from fastapi.routing import APIRoute
 from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import CurrentOperator, DbSession, OptionalOperator
+from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError, NotFoundError
 from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.schemas.ad_performance import (
@@ -75,7 +76,6 @@ async def create_external_ad_performance_analysis_job(
     payload: ExternalAdPerformanceAnalysisCreate,
     session: DbSession,
     background_tasks: BackgroundTasks,
-    request: Request,
 ):
     try:
         result = await external_analysis_service.create_analysis_job(session, payload)
@@ -124,7 +124,6 @@ async def create_external_ad_performance_analysis_job(
             message=message,
             data=_analysis_create_data(
                 result.analysis,
-                request=request,
                 idempotent_replay=result.idempotent_replay,
             ),
         ).model_dump(mode="json"),
@@ -286,7 +285,6 @@ def _analysis_read(
 def _analysis_create_data(
     analysis: AdPerformanceAnalysis,
     *,
-    request: Request,
     idempotent_replay: bool,
 ) -> dict:
     return AdAnalysisCreateData(
@@ -295,7 +293,7 @@ def _analysis_create_data(
         status=_external_status(analysis.status),
         stage=str(analysis.stage or analysis.status or "queued"),
         created_at=_iso(analysis.created_at),
-        poll_url=_poll_url(request, str(analysis.analysis_id or analysis.id)),
+        poll_url=_poll_url(str(analysis.analysis_id or analysis.id)),
         idempotent_replay=idempotent_replay,
     ).model_dump(mode="json")
 
@@ -343,8 +341,8 @@ def _external_status(value: str | None) -> str:
     return "queued"
 
 
-def _poll_url(request: Request, analysis_id: str) -> str:
-    base = str(request.base_url).rstrip("/")
+def _poll_url(analysis_id: str) -> str:
+    base = get_settings().public_base_url.rstrip("/")
     return f"{base}/api/v1/integrations/ad-performance/analysis-jobs/{analysis_id}"
 
 

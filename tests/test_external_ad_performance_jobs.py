@@ -43,6 +43,7 @@ def test_async_job_create_idempotency_conflict_and_poll(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "background_tasks")
     monkeypatch.setenv("PUBLIC_RESEARCH_ENABLED", "false")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://ai.ggcss.xyz")
     get_settings.cache_clear()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -63,13 +64,19 @@ def test_async_job_create_idempotency_conflict_and_poll(monkeypatch):
     app.dependency_overrides[get_session] = override_session
     client = TestClient(app)
 
-    created = client.post("/api/v1/integrations/ad-performance/analysis-jobs", json=_payload())
+    created = client.post(
+        "http://internal-proxy/api/v1/integrations/ad-performance/analysis-jobs",
+        json=_payload(),
+    )
     assert created.status_code == 202
     body = created.json()
     assert body["code"] == 1001
     analysis_id = body["data"]["analysis_id"]
     assert body["data"]["status"] in {"queued", "processing", "succeeded"}
-    assert body["data"]["poll_url"].endswith(analysis_id)
+    assert body["data"]["poll_url"] == (
+        "https://ai.ggcss.xyz/api/v1/integrations/ad-performance/analysis-jobs/"
+        f"{analysis_id}"
+    )
 
     replay = client.post("/api/v1/integrations/ad-performance/analysis-jobs", json=_payload())
     assert replay.status_code == 200
