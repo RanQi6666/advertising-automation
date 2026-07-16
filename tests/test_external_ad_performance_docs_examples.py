@@ -81,6 +81,18 @@ _RETIRED_META_AND_INSIGHT_LINK_FIELDS = {
     "ad_id",
     "ad_name",
 }
+_SIBLING_COMPARISON_INSIGHT_FIELDS = {
+    "spend",
+    "impressions",
+    "clicks",
+    "ctr",
+    "cpc",
+    "cpm",
+    "actions",
+    "date_start",
+    "date_stop",
+    "status",
+}
 
 
 def _extract_marked_json(markdown: str, start_marker: str, end_marker: str) -> dict:
@@ -145,9 +157,17 @@ def test_external_ad_performance_sample_payloads_match_async_contract():
         for sibling in payload.get("siblings") or []:
             sibling_insight = sibling.get("insight") if isinstance(sibling, dict) else None
             if isinstance(sibling_insight, dict):
+                assert _SIBLING_COMPARISON_INSIGHT_FIELDS.issubset(sibling_insight), (
+                    f"{filename} sibling sample should include the standard comparison "
+                    "performance snapshot"
+                )
                 assert "action_values" not in sibling_insight, (
                     f"{filename} sibling sample should use documented standard insight fields"
                 )
+                if creative.get("creative_type") == "video":
+                    assert "video_play_actions" in sibling_insight, (
+                        f"{filename} video sibling sample should include video playback data"
+                    )
 
 
 def test_documented_succeeded_get_response_matches_operator_result_contract():
