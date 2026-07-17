@@ -64,3 +64,13 @@ class ExternalAIVideoStoryboardCreate(ExternalAIRequestBase):
     duration_seconds: int = Field(default=12, ge=1, le=300)
     aspect_ratio: str = Field(default="9:16", max_length=32)
     prompt: str | None = None
+
+
+class ExternalAIFrameAnchoredStoryboardCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_request_id: str | None = Field(default=None, max_length=128)
+    first_frame_image_url: str = Field(min_length=1, max_length=2048)
+    last_frame_image_url: str = Field(min_length=1, max_length=2048)
+    duration_seconds: int = Field(default=12, ge=1, le=300)
+    aspect_ratio: str = Field(default="9:16", max_length=32)

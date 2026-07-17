@@ -7,6 +7,8 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    FrameAnalysis,
+    FrameAnchoredStoryboard,
     ImageBrief,
     TopicCandidate,
     VideoStoryboardCandidate,
@@ -79,6 +81,25 @@ class LLMProvider(Protocol):
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         """Create a scene-by-scene video storyboard from copy and image assets."""
+
+    async def analyze_video_frame_pair(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnalysis:
+        """Analyze exact first and last frame images for visual continuity."""
+
+    async def generate_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboard:
+        """Create an anchored storyboard using the same first and last frames."""
 
     def stream_video_storyboard_text(
         self,

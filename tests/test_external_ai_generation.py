@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -14,12 +15,16 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import get_session
+from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
+)
+from backend.app.schemas.external_ai_generation import (
+    ExternalAIFrameAnchoredStoryboardCreate,
 )
 from backend.app.services import external_ai_generation_service as external_ai_service_module
 from backend.app.services.external_ai_generation_service import ExternalAIGenerationService
@@ -271,6 +276,60 @@ def _storyboard_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def _storyboard_v2_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "external_request_id": "external-ai-storyboard-v2-1",
+        "first_frame_image_url": "https://cdn.example.test/first.png",
+        "last_frame_image_url": "https://cdn.example.test/last.png",
+        "duration_seconds": 12,
+        "aspect_ratio": "9:16",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_external_storyboard_v2_rejects_legacy_and_missing_frame_fields() -> None:
+    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+        _storyboard_v2_payload()
+    )
+
+    assert request.first_frame_image_url.endswith("first.png")
+
+    with pytest.raises(ValidationError):
+        ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+            _storyboard_v2_payload(first_frame_image_url="")
+        )
+
+    with pytest.raises(ValidationError):
+        ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+            _storyboard_v2_payload(brief="legacy input")
+        )
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_returns_frame_anchored_storyboard() -> None:
+    provider = MockLLMProvider()
+    analysis = await provider.analyze_video_frame_pair(
+        first_frame_image_url="https://cdn.example.test/first.png",
+        last_frame_image_url="https://cdn.example.test/last.png",
+        duration_seconds=12,
+        aspect_ratio="9:16",
+    )
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        first_frame_image_url="https://cdn.example.test/first.png",
+        last_frame_image_url="https://cdn.example.test/last.png",
+        frame_analysis=analysis,
+        duration_seconds=12,
+        aspect_ratio="9:16",
+    )
+
+    assert storyboard.scenes[0].frame_anchor == "first_frame"
+    assert storyboard.scenes[1].frame_anchor == "transition"
+    assert storyboard.scenes[-1].frame_anchor == "last_frame"
+    assert storyboard.sound_design.music
+    assert storyboard.sound_design.ambience
 
 
 async def _count_rows(engine, model) -> int:

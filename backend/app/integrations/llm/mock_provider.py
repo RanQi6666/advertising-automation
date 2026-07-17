@@ -10,7 +10,14 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    FrameAnalysis,
+    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardScene,
+    FrameLanguageAnalysis,
+    FrameTransitionBrief,
+    FrameVisualFacts,
     ImageBrief,
+    StoryboardSoundDesign,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
@@ -23,6 +30,100 @@ from backend.app.services.creative_safety_prompts import (
 
 class MockLLMProvider:
     """Deterministic provider for local development and tests."""
+
+    async def analyze_video_frame_pair(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnalysis:
+        del duration_seconds, aspect_ratio
+        return FrameAnalysis(
+            first_frame=FrameVisualFacts(
+                visible_subjects=[f"Opening frame from {first_frame_image_url}"],
+                environment="Opening-frame environment",
+                composition="Opening-frame composition",
+                camera_perspective="Opening-frame perspective",
+                visual_style="Observed visual style",
+                color_and_lighting="Observed opening lighting",
+                opening_state="Exact visual state of the supplied first frame.",
+            ),
+            last_frame=FrameVisualFacts(
+                visible_subjects=[f"Ending frame from {last_frame_image_url}"],
+                environment="Ending-frame environment",
+                composition="Ending-frame composition",
+                camera_perspective="Ending-frame perspective",
+                visual_style="Observed visual style",
+                color_and_lighting="Observed ending lighting",
+                ending_state="Exact visual state of the supplied last frame.",
+            ),
+            transition_brief=FrameTransitionBrief(
+                shared_visual_facts=["Both supplied frames belong to one video arc."],
+                continuity_requirements=["Preserve the supplied opening and ending states."],
+                visual_transition="Use camera movement and action to bridge the frames.",
+                narrative_arc="Begin at the first frame and arrive at the last frame.",
+            ),
+            language_analysis=FrameLanguageAnalysis(
+                recommended_output_language="en",
+                reason="Mock provider uses English for deterministic local output.",
+            ),
+        )
+
+    async def generate_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboard:
+        del first_frame_image_url, last_frame_image_url, frame_analysis
+        first_end = max(1, duration_seconds // 4)
+        last_start = max(first_end + 1, duration_seconds - max(1, duration_seconds // 4))
+        return FrameAnchoredStoryboard(
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            scenes=[
+                FrameAnchoredStoryboardScene(
+                    scene_index=1,
+                    start_second=0,
+                    end_second=first_end,
+                    frame_anchor="first_frame",
+                    visual="Begin from the exact supplied first-frame visual state.",
+                    motion="A subtle camera move begins the transition.",
+                    transition_goal="Leave the opening state without adding unseen elements.",
+                    sound_effects=["Soft opening ambience."],
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=2,
+                    start_second=first_end,
+                    end_second=last_start,
+                    frame_anchor="transition",
+                    visual="Bridge the two supplied visual states through continuous action.",
+                    motion="Camera movement and lighting evolve toward the ending frame.",
+                    transition_goal=(
+                        "Maintain visual continuity while approaching the ending state."
+                    ),
+                    sound_effects=["Transition whoosh."],
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=3,
+                    start_second=last_start,
+                    end_second=duration_seconds,
+                    frame_anchor="last_frame",
+                    visual="Arrive at the exact supplied last-frame visual state.",
+                    motion="Settle into the supplied final composition.",
+                    transition_goal="Preserve the ending frame without adding an end card.",
+                    sound_effects=["Ending ambience."],
+                ),
+            ],
+            sound_design=StoryboardSoundDesign(
+                music="Cinematic instrumental progression.",
+                ambience="Natural ambience that follows the visual transition.",
+            ),
+            rationale="Mock frame-anchored storyboard preserves both supplied frame endpoints.",
+        )
 
     async def extract_delivery_fields(self, raw_content: str) -> dict:
         url_candidates = _find_urls(raw_content)
