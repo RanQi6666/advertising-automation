@@ -22,6 +22,8 @@ from backend.app.integrations.llm.language import (
 from backend.app.schemas.ad_performance import AdPerformanceOptimizationWorkOrder
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    FrameAnalysis,
+    FrameAnchoredStoryboard,
     ImageBrief,
     TopicCandidate,
     VideoStoryboardCandidate,
@@ -480,6 +482,52 @@ class OpenAILLMProvider:
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
             allowed_asset_ids={asset.id for asset in assets},
+        )
+
+    async def analyze_video_frame_pair(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnalysis:
+        data = await self._json_completion(
+            system=_frame_analysis_system_prompt(),
+            user=_frame_pair_user_content(
+                first_frame_image_url,
+                last_frame_image_url,
+                {
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                },
+            ),
+        )
+        return _frame_analysis_from_data(data)
+
+    async def generate_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboard:
+        data = await self._json_completion(
+            system=_frame_anchored_storyboard_system_prompt(),
+            user=_frame_pair_user_content(
+                first_frame_image_url,
+                last_frame_image_url,
+                {
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                    "frame_analysis": frame_analysis.model_dump(mode="json"),
+                },
+            ),
+        )
+        return _frame_anchored_storyboard_from_data(
+            data,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
         )
 
     async def stream_video_storyboard_text(
@@ -1705,6 +1753,176 @@ def _video_storyboard_from_data(
         "rationale": _coerce_optional_text(data.get("rationale")),
     }
     return VideoStoryboardCandidate.model_validate(normalized)
+
+
+def _frame_analysis_system_prompt() -> str:
+    return (
+        "You analyze two supplied video endpoint images. Return JSON only, with exactly "
+        "these root keys: first_frame, last_frame, transition_brief, language_analysis. "
+        "Use this exact shape: {\"first_frame\": {\"visible_subjects\": [\"string\"], "
+        "\"visible_text\": [\"string\"], \"environment\": \"string\", "
+        "\"composition\": \"string\", \"camera_perspective\": \"string\", "
+        "\"visual_style\": \"string\", \"color_and_lighting\": \"string\", "
+        "\"opening_state\": \"string\"}, \"last_frame\": {\"visible_subjects\": "
+        "[\"string\"], \"visible_text\": [\"string\"], \"environment\": \"string\", "
+        "\"composition\": \"string\", \"camera_perspective\": \"string\", "
+        "\"visual_style\": \"string\", \"color_and_lighting\": \"string\", "
+        "\"ending_state\": \"string\"}, \"transition_brief\": "
+        "{\"shared_visual_facts\": [\"string\"], \"continuity_requirements\": "
+        "[\"string\"], \"visual_transition\": \"string\", \"narrative_arc\": "
+        "\"string\"}, \"language_analysis\": {\"first_frame_visible_languages\": "
+        "[\"string\"], \"last_frame_visible_languages\": [\"string\"], "
+        "\"recommended_output_language\": \"string\", \"reason\": \"string\"}}. "
+        "Every visible_text item must be a plain string, never an object. Record factual "
+        "visual observations for each exact image. Use the supplied images as the source "
+        "of truth. Analyze image content neutrally. Do not write a storyboard or create "
+        "new visible copy, logos, labels, or end cards."
+    )
+
+
+def _frame_anchored_storyboard_system_prompt() -> str:
+    return (
+        "You create a frame-anchored video storyboard from two supplied endpoint images "
+        "and their visual analysis. Return valid JSON only with duration_seconds, "
+        "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
+        "scene_index, start_second, end_second, frame_anchor, visual, motion, "
+        "transition_goal, subtitle, voiceover, sound_effects, and notes. The first scene "
+        "must use frame_anchor first_frame and begin from the actual supplied first-frame "
+        "state. Every middle scene must use frame_anchor transition. The final scene must "
+        "use frame_anchor last_frame and arrive at the actual supplied last-frame state. "
+        "Do not invent a key brand, logo, product, major character, core setting, hook, "
+        "or generic end card that is absent from both supplied frames. Apply this rule "
+        "symmetrically to the opening and ending frame. Do not claim an element exists "
+        "unless it is visible in an image or confirmed by the supplied analysis. Do not "
+        "translate or rewrite text visible in either supplied image. Use the supplied "
+        "duration_seconds and aspect_ratio exactly. subtitle and voiceover are optional; "
+        "when present, use the recommended output language. Include optional per-scene "
+        "sound_effects plus overall music and ambience directions in sound_design."
+    )
+
+
+def _frame_pair_user_content(
+    first_frame_image_url: str,
+    last_frame_image_url: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "text",
+            "text": "FIRST FRAME: analyze this exact opening frame.\n"
+            + json.dumps(payload, ensure_ascii=False),
+        },
+        {"type": "image_url", "image_url": {"url": first_frame_image_url}},
+        {"type": "text", "text": "LAST FRAME: analyze this exact ending frame."},
+        {"type": "image_url", "image_url": {"url": last_frame_image_url}},
+    ]
+
+
+def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
+    try:
+        first_frame = data.get("first_frame")
+        last_frame = data.get("last_frame")
+        if not isinstance(first_frame, dict) or not isinstance(last_frame, dict):
+            raise ValueError("frame analysis must include first_frame and last_frame objects")
+
+        transition_source = data.get("transition_brief")
+        if not isinstance(transition_source, dict):
+            transition_source = {}
+        language_source = data.get("language_analysis")
+        if not isinstance(language_source, dict):
+            language_source = {}
+
+        visible_languages = _frame_language_list(
+            language_source.get("visible_languages") or data.get("visible_languages")
+        )
+        normalized = {
+            "first_frame": _frame_visual_facts_from_data(first_frame),
+            "last_frame": _frame_visual_facts_from_data(last_frame),
+            "transition_brief": {
+                "shared_visual_facts": _frame_string_list(
+                    transition_source.get("shared_visual_facts")
+                    or data.get("shared_visual_facts")
+                ),
+                "continuity_requirements": _frame_string_list(
+                    transition_source.get("continuity_requirements")
+                    or data.get("continuity_requirements")
+                ),
+                "visual_transition": _coerce_text(
+                    transition_source.get("visual_transition")
+                    or data.get("plausible_visual_transition")
+                ),
+                "narrative_arc": _coerce_text(
+                    transition_source.get("narrative_arc") or data.get("narrative_arc")
+                ),
+            },
+            "language_analysis": {
+                "first_frame_visible_languages": _frame_language_list(
+                    language_source.get("first_frame_visible_languages")
+                )
+                or visible_languages,
+                "last_frame_visible_languages": _frame_language_list(
+                    language_source.get("last_frame_visible_languages")
+                )
+                or visible_languages,
+                "recommended_output_language": _coerce_text(
+                    language_source.get("recommended_output_language")
+                    or data.get("recommended_output_language")
+                ),
+                "reason": _coerce_text(
+                    language_source.get("reason")
+                    or data.get("recommended_output_language_reason")
+                ),
+            },
+        }
+        return FrameAnalysis.model_validate(normalized)
+    except (TypeError, ValidationError, ValueError) as exc:
+        raise ProviderError("LLM returned invalid frame analysis JSON.") from exc
+
+
+def _frame_visual_facts_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    normalized["visible_text"] = _frame_string_list(data.get("visible_text"))
+    return normalized
+
+
+def _frame_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    values: list[str] = []
+    for item in items:
+        raw_text = item.get("text") if isinstance(item, dict) else item
+        text = _coerce_optional_text(raw_text)
+        if text:
+            values.append(text)
+    return values
+
+
+def _frame_language_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    values: list[str] = []
+    for item in items:
+        raw_language = item.get("language") if isinstance(item, dict) else item
+        language = _coerce_optional_text(raw_language)
+        if language:
+            values.append(language)
+    return values
+
+
+def _frame_anchored_storyboard_from_data(
+    data: dict[str, Any],
+    duration_seconds: int,
+    aspect_ratio: str,
+) -> FrameAnchoredStoryboard:
+    normalized = dict(data)
+    normalized["duration_seconds"] = duration_seconds
+    normalized["aspect_ratio"] = aspect_ratio
+    try:
+        return FrameAnchoredStoryboard.model_validate(normalized)
+    except ValidationError as exc:
+        raise ProviderError("LLM returned invalid frame-anchored storyboard JSON.") from exc
 
 
 def _video_scene_from_data(

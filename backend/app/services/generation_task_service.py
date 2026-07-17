@@ -60,6 +60,7 @@ TEXT_TASK_TYPES = {
     "external_topic_selection",
     "external_copy_generation",
     "external_video_storyboard",
+    "external_video_storyboard_v2",
 }
 IMAGE_TASK_TYPES = {"image_generate", "external_image_generate"}
 VIDEO_TASK_TYPES = {"video_generate", "video_transfer", "external_video_start"}
@@ -1038,6 +1039,7 @@ class GenerationTaskService:
             "external_topic_selection",
             "external_copy_generation",
             "external_video_storyboard",
+            "external_video_storyboard_v2",
         }:
             from backend.app.services.external_ai_generation_service import (
                 ExternalAIGenerationService,
@@ -1423,6 +1425,7 @@ def _should_cache_terminal_task_status(task: GenerationTask) -> bool:
         "external_topic_selection",
         "external_copy_generation",
         "external_video_storyboard",
+        "external_video_storyboard_v2",
         "ad_performance_analysis",
     }
 

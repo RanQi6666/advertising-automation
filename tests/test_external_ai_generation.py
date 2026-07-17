@@ -19,6 +19,13 @@ from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    FrameAnalysis,
+    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardScene,
+    FrameLanguageAnalysis,
+    FrameTransitionBrief,
+    FrameVisualFacts,
+    StoryboardSoundDesign,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
@@ -95,6 +102,9 @@ class RecordingLimiter:
 
 
 class FakeExternalAILLM:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     async def generate_topics(self, campaign, limit: int, signals: dict):
         del campaign, signals
         return [
@@ -142,6 +152,105 @@ class FakeExternalAILLM:
                     voiceover="Discover the product.",
                 )
             ],
+        )
+
+    async def analyze_video_frame_pair(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnalysis:
+        self.calls.append("analyze_video_frame_pair")
+        assert first_frame_image_url.endswith("first.png")
+        assert last_frame_image_url.endswith("last.png")
+        assert duration_seconds == 12
+        assert aspect_ratio == "9:16"
+        return FrameAnalysis(
+            first_frame=FrameVisualFacts(
+                visible_subjects=["opening product"],
+                visible_text=["START"],
+                environment="studio",
+                composition="centered",
+                camera_perspective="eye level",
+                visual_style="clean product video",
+                color_and_lighting="bright",
+                opening_state="product at rest",
+            ),
+            last_frame=FrameVisualFacts(
+                visible_subjects=["ending product"],
+                visible_text=["FINISH"],
+                environment="studio",
+                composition="centered",
+                camera_perspective="eye level",
+                visual_style="clean product video",
+                color_and_lighting="bright",
+                ending_state="product in final state",
+            ),
+            transition_brief=FrameTransitionBrief(
+                shared_visual_facts=["same studio"],
+                continuity_requirements=["preserve visible text"],
+                visual_transition="move between supplied states",
+                narrative_arc="opening to ending",
+            ),
+            language_analysis=FrameLanguageAnalysis(
+                first_frame_visible_languages=["en"],
+                last_frame_visible_languages=["en"],
+                recommended_output_language="en",
+                reason="Visible text is English.",
+            ),
+        )
+
+    async def generate_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboard:
+        self.calls.append("generate_frame_anchored_video_storyboard")
+        assert first_frame_image_url.endswith("first.png")
+        assert last_frame_image_url.endswith("last.png")
+        assert frame_analysis.first_frame.visible_text == ["START"]
+        return FrameAnchoredStoryboard(
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            scenes=[
+                FrameAnchoredStoryboardScene(
+                    scene_index=1,
+                    start_second=0,
+                    end_second=3,
+                    frame_anchor="first_frame",
+                    visual="Hold the supplied opening state.",
+                    motion="Slow push in.",
+                    transition_goal="Start at the supplied first frame.",
+                    sound_effects=["soft room tone"],
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=2,
+                    start_second=3,
+                    end_second=9,
+                    frame_anchor="transition",
+                    visual="Move through the observed visual change.",
+                    motion="Follow the movement.",
+                    transition_goal="Bridge the supplied frames.",
+                    voiceover="Optional narration.",
+                    sound_effects=["movement swish"],
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=3,
+                    start_second=9,
+                    end_second=12,
+                    frame_anchor="last_frame",
+                    visual="Arrive at the supplied ending state.",
+                    motion="Settle into the final composition.",
+                    transition_goal="End at the supplied last frame.",
+                    sound_effects=["music resolve"],
+                ),
+            ],
+            sound_design=StoryboardSoundDesign(music="gentle build", ambience="room tone"),
+            rationale="Bridge the supplied frames without inventing unseen content.",
         )
 
 
@@ -442,6 +551,95 @@ async def test_external_ai_generation_creates_four_async_jobs_and_polling_return
     assert await _count_rows(engine, CreativeAsset) == 0
     assert await _count_rows(engine, VideoAsset) == 0
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2.db",
+    )
+    try:
+        create_response = client.post(
+            "/api/v1/integrations/ai/storyboard-v2",
+            headers=_authorized_headers(),
+            json=_storyboard_v2_payload(),
+        )
+        create_body = create_response.json()
+        job_id = create_body["data"]["job_id"]
+        poll_response = client.get(
+            f"/api/v1/integrations/ai/jobs/{job_id}",
+            headers=_authorized_headers(),
+        )
+        poll_body = poll_response.json()
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert create_response.status_code == 202
+    assert poll_response.status_code == 200
+    assert poll_body["code"] == 0
+    assert poll_body["data"]["status"] == "succeeded"
+    assert poll_body["data"]["request_id"] == "external-ai-storyboard-v2-1"
+    assert poll_body["data"]["duration_seconds"] == 12
+    assert poll_body["data"]["aspect_ratio"] == "9:16"
+    assert "Scene 1" in poll_body["data"]["storyboard_text"]
+    assert "frame_analysis" not in poll_body["data"]
+    assert "storyboard" not in poll_body["data"]
+    assert fake_llm.calls == [
+        "analyze_video_frame_pair",
+        "generate_frame_anchored_video_storyboard",
+    ]
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        task = await session.get(GenerationTask, job_id)
+        assert task is not None
+        assert task.queue_name == "text_queue"
+        assert task.task_type == "external_video_storyboard_v2"
+        assert task.campaign_id is None
+        assert task.metadata_json is not None
+        assert task.metadata_json["frame_analysis"]["first_frame"]["visible_text"] == ["START"]
+        first_scene = task.metadata_json["frame_anchored_storyboard"]["scenes"][0]
+        assert first_scene["frame_anchor"] == "first_frame"
+
+    assert await _count_rows(engine, Campaign) == 0
+    assert await _count_rows(engine, WorkOrder) == 0
+    assert await _count_rows(engine, ContentTopic) == 0
+    assert await _count_rows(engine, CopyDraft) == 0
+    assert await _count_rows(engine, CreativeAsset) == 0
+    assert await _count_rows(engine, VideoAsset) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_rejects_legacy_fields_with_4001(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-validation.db",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/ai/storyboard-v2",
+            headers=_authorized_headers(),
+            json=_storyboard_v2_payload(brief="must not be accepted"),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
 
 
 @pytest.mark.asyncio

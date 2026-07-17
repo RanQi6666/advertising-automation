@@ -12,9 +12,15 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm import get_llm_provider
-from backend.app.schemas.ai import CopyDraftCandidate, TopicCandidate, VideoStoryboardCandidate
+from backend.app.schemas.ai import (
+    CopyDraftCandidate,
+    FrameAnchoredStoryboard,
+    TopicCandidate,
+    VideoStoryboardCandidate,
+)
 from backend.app.schemas.external_ai_generation import (
     ExternalAICopyGenerationCreate,
+    ExternalAIFrameAnchoredStoryboardCreate,
     ExternalAITopicSelectionCreate,
     ExternalAIVideoStoryboardCreate,
     ExternalAIWorkOrderAnalysisCreate,
@@ -43,11 +49,13 @@ EXTERNAL_WORK_ORDER_ANALYSIS_TASK_TYPE = "external_work_order_analysis"
 EXTERNAL_TOPIC_SELECTION_TASK_TYPE = "external_topic_selection"
 EXTERNAL_COPY_GENERATION_TASK_TYPE = "external_copy_generation"
 EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE = "external_video_storyboard"
+EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE = "external_video_storyboard_v2"
 EXTERNAL_AI_TEXT_TASK_TYPES = {
     EXTERNAL_WORK_ORDER_ANALYSIS_TASK_TYPE,
     EXTERNAL_TOPIC_SELECTION_TASK_TYPE,
     EXTERNAL_COPY_GENERATION_TASK_TYPE,
     EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE,
+    EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE,
 }
 
 
@@ -104,6 +112,18 @@ class ExternalAIGenerationService:
             external_request_id=payload.external_request_id,
         )
 
+    async def create_frame_anchored_video_storyboard_job(
+        self,
+        session: AsyncSession,
+        payload: ExternalAIFrameAnchoredStoryboardCreate,
+    ) -> GenerationTask:
+        return await self._create_job(
+            session,
+            task_type=EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE,
+            payload=payload.model_dump(mode="json"),
+            external_request_id=payload.external_request_id,
+        )
+
     async def get_job(self, session: AsyncSession, job_id: str) -> GenerationTask:
         task = await session.get(GenerationTask, job_id)
         if task is None or task.task_type not in EXTERNAL_AI_TEXT_TASK_TYPES:
@@ -119,6 +139,8 @@ class ExternalAIGenerationService:
             return await self.execute_copy_generation(session, task)
         if task.task_type == EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE:
             return await self.execute_video_storyboard(session, task)
+        if task.task_type == EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE:
+            return await self.execute_frame_anchored_video_storyboard(session, task)
         raise AppError(f"Unsupported external ai task type: {task.task_type}")
 
     async def execute_work_order_analysis(
@@ -348,6 +370,45 @@ class ExternalAIGenerationService:
         return {
             "request_id": _request_id(payload.external_request_id, task.id),
             "storyboard_text": _format_external_storyboard_text(storyboard),
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+        }
+
+    async def execute_frame_anchored_video_storyboard(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+    ) -> dict[str, Any]:
+        payload = ExternalAIFrameAnchoredStoryboardCreate.model_validate(task.payload_json or {})
+        llm = get_llm_provider()
+        async with llm_text_rate_limiter():
+            frame_analysis = await llm.analyze_video_frame_pair(
+                first_frame_image_url=payload.first_frame_image_url,
+                last_frame_image_url=payload.last_frame_image_url,
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+            )
+        await _store_frame_anchored_private_metadata(
+            session,
+            task,
+            frame_analysis=frame_analysis.model_dump(mode="json"),
+        )
+        async with llm_text_rate_limiter():
+            storyboard = await llm.generate_frame_anchored_video_storyboard(
+                first_frame_image_url=payload.first_frame_image_url,
+                last_frame_image_url=payload.last_frame_image_url,
+                frame_analysis=frame_analysis,
+                duration_seconds=payload.duration_seconds,
+                aspect_ratio=payload.aspect_ratio,
+            )
+        await _store_frame_anchored_private_metadata(
+            session,
+            task,
+            storyboard=storyboard.model_dump(mode="json"),
+        )
+        return {
+            "request_id": _request_id(payload.external_request_id, task.id),
+            "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
             "duration_seconds": payload.duration_seconds,
             "aspect_ratio": payload.aspect_ratio,
         }
@@ -685,6 +746,64 @@ def _format_external_storyboard_text(storyboard: VideoStoryboardCandidate) -> st
             )
         )
     return "\n\n".join(blocks)
+
+
+async def _store_frame_anchored_private_metadata(
+    session: AsyncSession,
+    task: GenerationTask,
+    *,
+    frame_analysis: dict[str, Any] | None = None,
+    storyboard: dict[str, Any] | None = None,
+) -> None:
+    metadata = task.metadata_json or {}
+    if frame_analysis is not None:
+        metadata = {**metadata, "frame_analysis": frame_analysis}
+    if storyboard is not None:
+        metadata = {**metadata, "frame_anchored_storyboard": storyboard}
+    task.metadata_json = metadata
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+
+def _format_frame_anchored_storyboard_text(storyboard: FrameAnchoredStoryboard) -> str:
+    blocks = [
+        f"Duration: {storyboard.duration_seconds}s",
+        f"Aspect ratio: {storyboard.aspect_ratio}",
+    ]
+    for index, scene in enumerate(storyboard.scenes, start=1):
+        scene_index = scene.scene_index or index
+        timing = _scene_timing(scene.start_second, scene.end_second)
+        lines = [
+            f"Scene {scene_index} ({timing})",
+            f"Anchor: {scene.frame_anchor}",
+            f"Visual: {scene.visual}",
+            f"Camera and motion: {scene.motion or '-'}",
+            f"Transition goal: {scene.transition_goal or '-'}",
+            f"Subtitle: {scene.subtitle or '-'}",
+            f"Voiceover: {scene.voiceover or '-'}",
+            f"Sound effects: {', '.join(scene.sound_effects) or '-'}",
+        ]
+        if scene.notes:
+            lines.append(f"Notes: {scene.notes}")
+        blocks.append("\n".join(lines))
+    blocks.extend(
+        [
+            f"Music: {storyboard.sound_design.music or '-'}",
+            f"Ambience: {storyboard.sound_design.ambience or '-'}",
+        ]
+    )
+    if storyboard.rationale:
+        blocks.append(f"Overall direction: {storyboard.rationale}")
+    return "\n\n".join(blocks)
+
+
+def _scene_timing(start_second: int | None, end_second: int | None) -> str:
+    if start_second is None and end_second is None:
+        return "timing not specified"
+    start = start_second if start_second is not None else "?"
+    end = end_second if end_second is not None else "?"
+    return f"{start}-{end}s"
 
 
 def _request_id(external_request_id: str | None, task_id: str) -> str:

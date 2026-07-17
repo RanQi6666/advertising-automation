@@ -15,6 +15,7 @@ from backend.app.schemas.external_ai_generation import (
     AI_GENERATION_CODE_SUCCESS,
     AI_GENERATION_CODE_VALIDATION_ERROR,
     ExternalAICopyGenerationCreate,
+    ExternalAIFrameAnchoredStoryboardCreate,
     ExternalAIGenerationEnvelope,
     ExternalAITopicSelectionCreate,
     ExternalAIVideoStoryboardCreate,
@@ -151,6 +152,34 @@ async def create_video_storyboard_job(
 ):
     try:
         task = await _service().create_video_storyboard_job(session, payload)
+        schedule_generation_task(task, background_tasks)
+        return _accepted_response(task)
+    except ProviderError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code=AI_GENERATION_CODE_PROVIDER_ERROR,
+        )
+    except AppError as exc:
+        return _error_response(
+            exc,
+            status.HTTP_400_BAD_REQUEST,
+            code=AI_GENERATION_CODE_VALIDATION_ERROR,
+        )
+
+
+@router.post(
+    "/storyboard-v2",
+    response_model=ExternalAIGenerationEnvelope,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_frame_anchored_video_storyboard_job(
+    payload: ExternalAIFrameAnchoredStoryboardCreate,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    try:
+        task = await _service().create_frame_anchored_video_storyboard_job(session, payload)
         schedule_generation_task(task, background_tasks)
         return _accepted_response(task)
     except ProviderError as exc:
