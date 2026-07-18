@@ -17,6 +17,7 @@ from backend.app.schemas.ai import (
     FrameTransitionBrief,
     FrameVisualFacts,
     ImageBrief,
+    ReferenceVideoFrame,
     StoryboardSoundDesign,
     TopicCandidate,
     VideoStoryboardCandidate,
@@ -37,8 +38,17 @@ class MockLLMProvider:
         last_frame_image_url: str,
         duration_seconds: int,
         aspect_ratio: str,
+        reference_frames: list[ReferenceVideoFrame] | None = None,
+        reference_video_duration_seconds: float | None = None,
+        reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
-        del duration_seconds, aspect_ratio
+        del (
+            duration_seconds,
+            aspect_ratio,
+            reference_frames,
+            reference_video_duration_seconds,
+            reference_video_sample_interval_seconds,
+        )
         return FrameAnalysis(
             first_frame=FrameVisualFacts(
                 visible_subjects=[f"Opening frame from {first_frame_image_url}"],

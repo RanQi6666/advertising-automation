@@ -5,7 +5,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.services.generation_task_service as task_module
+from backend.app.api.v1.endpoints.external_ai_generation import _read_reference_video_upload
 from backend.app.core.config import get_settings
+from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.base import Base
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
@@ -25,6 +27,14 @@ from backend.app.schemas.ai import (
     FrameLanguageAnalysis,
     FrameTransitionBrief,
     FrameVisualFacts,
+    ReferenceAdaptedConstraints,
+    ReferenceCameraPattern,
+    ReferenceConstraint,
+    ReferenceSubjectPresence,
+    ReferenceTransitionPattern,
+    ReferenceVideoAnalysis,
+    ReferenceVideoFrame,
+    ReferenceVideoSegment,
     StoryboardSoundDesign,
     TopicCandidate,
     VideoStoryboardCandidate,
@@ -35,6 +45,7 @@ from backend.app.schemas.external_ai_generation import (
 )
 from backend.app.services import external_ai_generation_service as external_ai_service_module
 from backend.app.services.external_ai_generation_service import ExternalAIGenerationService
+from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
 
 @pytest.fixture(autouse=True)
@@ -160,12 +171,19 @@ class FakeExternalAILLM:
         last_frame_image_url: str,
         duration_seconds: int,
         aspect_ratio: str,
+        reference_frames: list[ReferenceVideoFrame] | None = None,
+        reference_video_duration_seconds: float | None = None,
+        reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
         self.calls.append("analyze_video_frame_pair")
         assert first_frame_image_url.endswith("first.png")
         assert last_frame_image_url.endswith("last.png")
         assert duration_seconds == 12
         assert aspect_ratio == "9:16"
+        if reference_frames:
+            assert [frame.timestamp_seconds for frame in reference_frames] == [0.0, 2.0, 5.8]
+            assert reference_video_duration_seconds == 5.8
+            assert reference_video_sample_interval_seconds == 2.0
         return FrameAnalysis(
             first_frame=FrameVisualFacts(
                 visible_subjects=["opening product"],
@@ -199,6 +217,54 @@ class FakeExternalAILLM:
                 recommended_output_language="en",
                 reason="Visible text is English.",
             ),
+            reference_video_analysis=(
+                ReferenceVideoAnalysis(
+                    duration_seconds=5.8,
+                    sample_interval_seconds=2.0,
+                    segments=[
+                        ReferenceVideoSegment(
+                            start_second=0,
+                            end_second=5.8,
+                            subject_presence=ReferenceSubjectPresence(
+                                state="target subject remains visible",
+                                visibility="continuous",
+                                screen_position="center",
+                                movement="forward",
+                            ),
+                            camera=ReferenceCameraPattern(
+                                movement="slow push-in",
+                                intensity="medium",
+                            ),
+                            transition=ReferenceTransitionPattern(
+                                type="continuous_motion",
+                                description="Continuous motion between reference frames.",
+                            ),
+                            effects=["subtle particles"],
+                            confidence="high",
+                        )
+                    ],
+                    adapted_constraints=ReferenceAdaptedConstraints(
+                        subject_presence=ReferenceConstraint(
+                            strength="required",
+                            instruction="Keep the target subject present for most of the video.",
+                        ),
+                        camera_pattern=ReferenceConstraint(
+                            strength="preferred",
+                            instruction="Prefer the reference camera rhythm where compatible.",
+                        ),
+                        transition_pattern=ReferenceConstraint(
+                            strength="preferred",
+                            instruction="Prefer the reference transition rhythm where compatible.",
+                        ),
+                        effects_pattern=ReferenceConstraint(
+                            strength="preferred",
+                            instruction="Adapt visible effects without copying reference content.",
+                        ),
+                    ),
+                )
+                if reference_frames
+                else None
+            ),
         )
 
     async def generate_frame_anchored_video_storyboard(
@@ -213,6 +279,11 @@ class FakeExternalAILLM:
         assert first_frame_image_url.endswith("first.png")
         assert last_frame_image_url.endswith("last.png")
         assert frame_analysis.first_frame.visible_text == ["START"]
+        if frame_analysis.reference_video_analysis is not None:
+            assert (
+                frame_analysis.reference_video_analysis.adapted_constraints.subject_presence.strength
+                == "required"
+            )
         return FrameAnchoredStoryboard(
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
@@ -417,6 +488,86 @@ def test_external_storyboard_v2_rejects_legacy_and_missing_frame_fields() -> Non
         )
 
 
+def test_external_storyboard_v2_accepts_practical_data_url_frames() -> None:
+    image_data_url = "data:image/jpeg;base64," + ("A" * 5_000)
+
+    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+        _storyboard_v2_payload(
+            first_frame_image_url=image_data_url,
+            last_frame_image_url=image_data_url,
+        )
+    )
+
+    assert request.first_frame_image_url == image_data_url
+    assert request.last_frame_image_url == image_data_url
+
+
+@pytest.mark.parametrize(
+    "reference_video",
+    [
+        {"source_type": "url", "video_url": "https://cdn.example.test/reference.mp4"},
+        {"source_type": "uploaded_asset", "upload_asset_id": "upload-reference-1"},
+        {"source_type": "video_asset", "video_asset_id": "video-asset-1"},
+    ],
+)
+def test_external_storyboard_v2_reference_video_schema_accepts_each_source(
+    reference_video: dict[str, str],
+) -> None:
+    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+        _storyboard_v2_payload(reference_video=reference_video)
+    )
+
+    assert request.reference_video is not None
+    assert request.reference_video.source_type == reference_video["source_type"]
+
+
+def test_external_storyboard_v2_reference_video_schema_remains_optional() -> None:
+    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(_storyboard_v2_payload())
+
+    assert request.reference_video is None
+
+
+@pytest.mark.parametrize(
+    "reference_video",
+    [
+        {"source_type": "url"},
+        {
+            "source_type": "url",
+            "video_url": "https://cdn.example.test/reference.mp4",
+            "video_asset_id": "wrong",
+        },
+        {"source_type": "uploaded_asset", "video_url": "https://cdn.example.test/reference.mp4"},
+        {"source_type": "video_asset", "upload_asset_id": "wrong"},
+    ],
+)
+def test_external_storyboard_v2_reference_video_schema_rejects_mismatched_source_fields(
+    reference_video: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        ExternalAIFrameAnchoredStoryboardCreate.model_validate(
+            _storyboard_v2_payload(reference_video=reference_video)
+        )
+
+
+@pytest.mark.asyncio
+async def test_reference_video_upload_stops_reading_when_size_limit_is_exceeded() -> None:
+    class ChunkedUpload:
+        def __init__(self) -> None:
+            self.read_sizes: list[int] = []
+            self.chunks = [b"abc", b"def", b"should-not-be-read"]
+
+        async def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return self.chunks.pop(0) if self.chunks else b""
+
+    upload = ChunkedUpload()
+
+    with pytest.raises(AppError, match="exceeds configured size limit"):
+        await _read_reference_video_upload(upload, max_bytes=5, chunk_size=3)
+
+    assert upload.read_sizes == [3, 3]
+
+
 @pytest.mark.asyncio
 async def test_mock_provider_returns_frame_anchored_storyboard() -> None:
     provider = MockLLMProvider()
@@ -612,6 +763,257 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     assert await _count_rows(engine, WorkOrder) == 0
     assert await _count_rows(engine, ContentTopic) == 0
     assert await _count_rows(engine, CopyDraft) == 0
+    assert await _count_rows(engine, CreativeAsset) == 0
+    assert await _count_rows(engine, VideoAsset) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_storyboard(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+
+    class FakeReferenceVideoService:
+        async def prepare(self, session, reference_video, *, task_id: str):
+            assert session is not None
+            assert reference_video.source_type == "url"
+            assert task_id
+            return PreparedReferenceVideo(
+                duration_seconds=5.8,
+                sample_interval_seconds=2.0,
+                frames=[
+                    ReferenceVideoFrame(
+                        timestamp_seconds=0,
+                        image_url="data:image/jpeg;base64,AAA",
+                    ),
+                    ReferenceVideoFrame(
+                        timestamp_seconds=2,
+                        image_url="data:image/jpeg;base64,BBB",
+                    ),
+                    ReferenceVideoFrame(
+                        timestamp_seconds=5.8,
+                        image_url="data:image/jpeg;base64,CCC",
+                    ),
+                ],
+                working_dir=tmp_path / "reference-analysis",
+            )
+
+        async def cleanup(self, prepared: PreparedReferenceVideo) -> None:
+            assert prepared.duration_seconds == 5.8
+
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "StoryboardReferenceVideoService",
+        FakeReferenceVideoService,
+    )
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-reference.db",
+    )
+    try:
+        created = client.post(
+            "/api/v1/integrations/ai/storyboard-v2",
+            headers=_authorized_headers(),
+            json=_storyboard_v2_payload(
+                reference_video={
+                    "source_type": "url",
+                    "video_url": "https://cdn.example.test/reference.mp4",
+                }
+            ),
+        )
+        job_id = created.json()["data"]["job_id"]
+        polled = client.get(
+            f"/api/v1/integrations/ai/jobs/{job_id}",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    poll_data = polled.json()["data"]
+    assert created.status_code == 202
+    assert polled.status_code == 200
+    assert poll_data["status"] == "succeeded"
+    assert "reference_video_analysis" not in poll_data
+    assert "reference_frames" not in poll_data
+    assert fake_llm.calls == [
+        "analyze_video_frame_pair",
+        "generate_frame_anchored_video_storyboard",
+    ]
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        task = await session.get(GenerationTask, job_id)
+        assert task is not None
+        assert task.metadata_json["frame_analysis"]["reference_video_analysis"][
+            "adapted_constraints"
+        ]["subject_presence"]["strength"] == "required"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_reference_failure_stops_before_storyboard_generation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_ENABLED", "false")
+    get_settings.cache_clear()
+
+    class FailingReferenceVideoService:
+        async def prepare(self, session, reference_video, *, task_id: str):
+            del session, reference_video, task_id
+            raise ProviderError("reference video analysis preparation failed")
+
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "StoryboardReferenceVideoService",
+        FailingReferenceVideoService,
+    )
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-reference-failure.db",
+    )
+    try:
+        created = client.post(
+            "/api/v1/integrations/ai/storyboard-v2",
+            headers=_authorized_headers(),
+            json=_storyboard_v2_payload(
+                reference_video={
+                    "source_type": "url",
+                    "video_url": "https://cdn.example.test/reference.mp4",
+                }
+            ),
+        )
+        job_id = created.json()["data"]["job_id"]
+        polled = client.get(
+            f"/api/v1/integrations/ai/jobs/{job_id}",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert polled.json()["data"]["status"] == "failed"
+    assert "reference video analysis preparation failed" in polled.json()["data"]["error"]
+    assert fake_llm.calls == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_reference_video_upload_returns_opaque_asset_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_STORAGE_ROOT", str(tmp_path / "storage"))
+    get_settings.cache_clear()
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-upload.db",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/ai/storyboard-v2/reference-video",
+            headers=_authorized_headers(),
+            files={"video": ("reference.mp4", b"video-bytes", "video/mp4")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    body = response.json()
+    assert response.status_code == 201
+    assert body["code"] == 0
+    upload_asset_id = body["data"]["upload_asset_id"]
+    assert upload_asset_id
+    stored = list(
+        (tmp_path / "storage" / "videos" / "storyboard_reference_uploads").glob(
+            f"{upload_asset_id}.*"
+        )
+    )
+    assert len(stored) == 1
+    assert stored[0].read_bytes() == b"video-bytes"
+    assert await _count_rows(engine, Campaign) == 0
+    assert await _count_rows(engine, CreativeAsset) == 0
+    assert await _count_rows(engine, VideoAsset) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content_type", "content"),
+    [
+        ("reference.avi", "video/x-msvideo", b"video-bytes"),
+        ("reference.mp4", "video/mp4", b""),
+    ],
+)
+async def test_external_storyboard_v2_reference_video_upload_rejects_invalid_input(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    content: bytes,
+) -> None:
+    monkeypatch.setenv("LOCAL_STORAGE_ROOT", str(tmp_path / "storage"))
+    get_settings.cache_clear()
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-upload-invalid.db",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/ai/storyboard-v2/reference-video",
+            headers=_authorized_headers(),
+            files={"video": (filename, content, content_type)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert not (tmp_path / "storage" / "videos" / "storyboard_reference_uploads").exists()
+    assert await _count_rows(engine, Campaign) == 0
+    assert await _count_rows(engine, CreativeAsset) == 0
+    assert await _count_rows(engine, VideoAsset) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_reference_video_upload_rejects_oversized_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("VIDEO_DOWNLOAD_MAX_BYTES", "5")
+    get_settings.cache_clear()
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-upload-oversized.db",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/ai/storyboard-v2/reference-video",
+            headers=_authorized_headers(),
+            files={"video": ("reference.mp4", b"123456", "video/mp4")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert "exceeds configured size limit" in response.json()["message"]
+    assert not (tmp_path / "storage" / "videos" / "storyboard_reference_uploads").exists()
+    assert await _count_rows(engine, Campaign) == 0
     assert await _count_rows(engine, CreativeAsset) == 0
     assert await _count_rows(engine, VideoAsset) == 0
     await engine.dispose()

@@ -1,14 +1,17 @@
 import json
+import logging
 
 import httpx
 import pytest
 
+from backend.app.core.errors import ProviderError
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameLanguageAnalysis,
     FrameTransitionBrief,
     FrameVisualFacts,
+    ReferenceVideoFrame,
 )
 
 FIRST_FRAME_URL = "https://cdn.example.test/first.png"
@@ -53,6 +56,193 @@ async def test_gateway_frame_analysis_sends_first_then_last_image() -> None:
     assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
     system_prompt = captured[0]["input"][0]["content"]
     _assert_no_legacy_content(system_prompt)
+
+
+@pytest.mark.asyncio
+async def test_gateway_joint_analysis_sends_reference_frames_chronologically() -> None:
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "transition_brief": {
+                "shared_visual_facts": ["shared subject"],
+                "continuity_requirements": ["preserve target frame truth"],
+                "visual_transition": "adapt the reference motion",
+                "narrative_arc": "opening to ending",
+            },
+            "language_analysis": {
+                "first_frame_visible_languages": [],
+                "last_frame_visible_languages": [],
+                "recommended_output_language": "en",
+                "reason": "No target-frame text requires another language.",
+            },
+            "reference_video_analysis": _reference_video_analysis_data(),
+        }
+    )
+    reference_frames = [
+        ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA"),
+        ReferenceVideoFrame(timestamp_seconds=2, image_url="data:image/jpeg;base64,BBB"),
+        ReferenceVideoFrame(timestamp_seconds=5.8, image_url="data:image/jpeg;base64,CCC"),
+    ]
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        12,
+        "9:16",
+        reference_frames=reference_frames,
+        reference_video_duration_seconds=5.8,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    assert analysis.reference_video_analysis is not None
+    assert analysis.reference_video_analysis.adapted_constraints.subject_presence.strength == (
+        "required"
+    )
+    content = captured[0]["input"][1]["content"]
+    assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
+    assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
+    assert "REFERENCE FRAME 0.00s" in content[4]["text"]
+    assert content[5] == {"type": "input_image", "image_url": reference_frames[0].image_url}
+    assert "REFERENCE FRAME 2.00s" in content[6]["text"]
+    assert content[7] == {"type": "input_image", "image_url": reference_frames[1].image_url}
+    assert "REFERENCE FRAME 5.80s" in content[8]["text"]
+    assert content[9] == {"type": "input_image", "image_url": reference_frames[2].image_url}
+    system_prompt = captured[0]["input"][0]["content"]
+    assert "subject presence" in system_prompt.lower()
+    assert "required" in system_prompt.lower()
+    assert "camera" in system_prompt.lower()
+    assert "preferred" in system_prompt.lower()
+    assert "do not copy" in system_prompt.lower()
+    for excluded in ("audio", "speech", "lyrics", "voiceover", "transcript"):
+        assert excluded in system_prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_normalizes_observed_reference_text_shape() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "reference_video_analysis": {
+                "duration_seconds": 10.0,
+                "sample_interval_seconds": 2.0,
+                "segments": [
+                    {
+                        "start_second": 0.0,
+                        "end_second": 2.0,
+                        "subject_presence": (
+                            "The person remains visible in a medium full-body shot."
+                        ),
+                        "camera": "A gentle forward push follows the person.",
+                        "transition": "Continuous movement carries into the next beat.",
+                        "effects": "Soft light trails accent the motion.",
+                        "confidence": "high",
+                    }
+                ],
+                "adapted_constraints": {
+                    "subject_presence": "Keep the target person present for most of the video.",
+                    "camera_pattern": (
+                        "Prefer a gentle forward push where the target frames allow it."
+                    ),
+                    "transition_pattern": "Prefer continuous movement between beats.",
+                    "effects_pattern": (
+                        "Prefer restrained light-trail effects without copying reference content."
+                    ),
+                },
+            },
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        10,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=10,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    assert reference.segments[0].subject_presence.state == (
+        "The person remains visible in a medium full-body shot."
+    )
+    assert reference.segments[0].camera.movement == "A gentle forward push follows the person."
+    assert reference.segments[0].transition.description == (
+        "Continuous movement carries into the next beat."
+    )
+    assert reference.segments[0].effects == ["Soft light trails accent the motion."]
+    assert reference.adapted_constraints.subject_presence.strength == "required"
+    assert reference.adapted_constraints.camera_pattern.strength == "preferred"
+    assert reference.adapted_constraints.transition_pattern.strength == "preferred"
+    assert reference.adapted_constraints.effects_pattern.strength == "preferred"
+
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_accepts_chronological_segments_alias() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "reference_video_analysis": {
+                "duration_seconds": 10.0,
+                "sample_interval_seconds": 2.0,
+                "chronological_segments": _reference_video_analysis_data()["segments"],
+                "adapted_constraints": _reference_video_analysis_data()["adapted_constraints"],
+            },
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        10,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=10,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    assert len(reference.segments) == 1
+    assert reference.segments[0].start_second == 0
+    assert reference.segments[0].end_second == 2
+
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_rejects_reference_analysis_without_segments() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "reference_video_analysis": {
+                "duration_seconds": 10.0,
+                "sample_interval_seconds": 2.0,
+                "segments": [],
+                "adapted_constraints": _reference_video_analysis_data()["adapted_constraints"],
+            },
+        }
+    )
+
+    with pytest.raises(ProviderError, match="invalid frame analysis JSON"):
+        await provider.analyze_video_frame_pair(
+            FIRST_FRAME_URL,
+            LAST_FRAME_URL,
+            10,
+            "9:16",
+            reference_frames=[
+                ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+            ],
+            reference_video_duration_seconds=10,
+            reference_video_sample_interval_seconds=2,
+        )
 
 
 @pytest.mark.asyncio
@@ -102,6 +292,49 @@ async def test_gateway_frame_analysis_normalizes_real_semi_flat_response_shape()
     assert analysis.language_analysis.last_frame_visible_languages == ["English"]
     assert analysis.language_analysis.recommended_output_language == "English"
     assert analysis.language_analysis.reason == "The supplied frame shows English text."
+
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_logs_sanitized_reference_validation_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "reference_video_analysis": {
+                "duration_seconds": 5.8,
+                "sample_interval_seconds": 2,
+                "segments": [],
+                "unexpected_image": "data:image/jpeg;base64,DO_NOT_LOG_THIS",
+            },
+        }
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        ProviderError, match="invalid frame analysis JSON"
+    ):
+        await provider.analyze_video_frame_pair(
+            FIRST_FRAME_URL,
+            LAST_FRAME_URL,
+            12,
+            "9:16",
+            reference_frames=[
+                ReferenceVideoFrame(
+                    timestamp_seconds=0,
+                    image_url="data:image/jpeg;base64,ALSO_DO_NOT_LOG_THIS",
+                )
+            ],
+            reference_video_duration_seconds=5.8,
+            reference_video_sample_interval_seconds=2,
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Frame analysis JSON validation failed" in messages
+    assert "reference_video_analysis.adapted_constraints" in messages
+    assert "response_shape" in messages
+    assert "data:image" not in messages
+    assert "DO_NOT_LOG_THIS" not in messages
 
 
 @pytest.mark.asyncio
@@ -185,6 +418,67 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "Do not translate or rewrite text visible in either supplied image" in system_prompt
 
 
+@pytest.mark.asyncio
+async def test_gateway_storyboard_prioritizes_target_truth_and_reference_constraints() -> None:
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 8,
+                    "frame_anchor": "first_frame",
+                    "visual": "Keep the supplied target subject visible through the main action.",
+                    "motion": "Adapt a gradual push-in.",
+                    "transition_goal": "Begin from the supplied first frame.",
+                    "subtitle": None,
+                    "voiceover": None,
+                    "sound_effects": ["light effect accent"],
+                    "notes": None,
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 8,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Reach the exact supplied ending state.",
+                    "motion": "Settle into the final composition.",
+                    "transition_goal": "End at the supplied last frame.",
+                    "subtitle": None,
+                    "voiceover": None,
+                    "sound_effects": ["music resolve"],
+                    "notes": None,
+                },
+            ],
+            "sound_design": {"music": "instrumental", "ambience": "room tone"},
+            "rationale": "Target truth takes priority.",
+        }
+    )
+    analysis = FrameAnalysis.model_validate(
+        {**_analysis().model_dump(), "reference_video_analysis": _reference_video_analysis_data()}
+    )
+
+    await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis,
+        12,
+        "9:16",
+    )
+
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "target frame truth" in system_prompt
+    assert "subject presence" in system_prompt
+    assert "required" in system_prompt
+    assert "camera" in system_prompt
+    assert "transitions" in system_prompt
+    assert "effects" in system_prompt
+    assert "preferred" in system_prompt
+    assert "advertising objective" in system_prompt
+
+
 def _gateway_provider_with_responses(
     response_data: dict[str, object],
 ) -> tuple[GatewayResponsesLLMProvider, list[dict[str, object]]]:
@@ -238,6 +532,50 @@ def _analysis() -> FrameAnalysis:
             reason="Visible text is English.",
         ),
     )
+
+
+def _reference_video_analysis_data() -> dict[str, object]:
+    return {
+        "duration_seconds": 5.8,
+        "sample_interval_seconds": 2,
+        "segments": [
+            {
+                "start_second": 0,
+                "end_second": 2,
+                "subject_presence": {
+                    "state": "continuous",
+                    "visibility": "mostly_full_body",
+                    "screen_position": "center",
+                    "movement": "moves_forward",
+                },
+                "camera": {"movement": "slow_push_in", "intensity": "medium"},
+                "transition": {
+                    "type": "continuous_motion",
+                    "description": "Movement continues into the next interval.",
+                },
+                "effects": ["gold particles"],
+                "confidence": "high",
+            }
+        ],
+        "adapted_constraints": {
+            "subject_presence": {
+                "strength": "required",
+                "instruction": "Keep the target subject present for most of the video.",
+            },
+            "camera_pattern": {
+                "strength": "preferred",
+                "instruction": "Use a gradual push-in where compatible.",
+            },
+            "transition_pattern": {
+                "strength": "preferred",
+                "instruction": "Prefer continuous movement transitions.",
+            },
+            "effects_pattern": {
+                "strength": "preferred",
+                "instruction": "Adapt particle accents without copying content.",
+            },
+        },
+    }
 
 
 def _assert_no_legacy_content(system_prompt: str) -> None:

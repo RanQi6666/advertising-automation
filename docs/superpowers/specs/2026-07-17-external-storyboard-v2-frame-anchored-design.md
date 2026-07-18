@@ -281,3 +281,92 @@ Focused tests must cover:
 10. Legacy external AI tests remain passing.
 
 After implementation, run a local production-like Docker rebuild and one controlled V2 request with public images. Verify the public polling envelope and the internal task metadata.
+
+## Reference Video Extension
+
+This approved extension adds an optional motion and presentation reference to the same V2 endpoint. It does not change the legacy storyboard or video-generation endpoints.
+
+### Public Contract
+
+The create request may include exactly one of these strict source objects:
+
+```json
+{"reference_video": {"source_type": "url", "video_url": "https://example.com/reference.mp4"}}
+```
+
+```json
+{"reference_video": {"source_type": "uploaded_asset", "upload_asset_id": "opaque-upload-id"}}
+```
+
+```json
+{"reference_video": {"source_type": "video_asset", "video_asset_id": "video-asset-uuid"}}
+```
+
+Each source object uses `extra="forbid"` and accepts only the identifier matching its `source_type`. Omitting `reference_video` preserves the existing first/last-frame behavior.
+
+Uploaded reference sources are created through:
+
+```http
+POST /api/v1/integrations/ai/storyboard-v2/reference-video
+Content-Type: multipart/form-data
+```
+
+The upload endpoint accepts MP4, MOV, or WebM, stores a private temporary source under local storage, and returns an opaque `upload_asset_id`. It creates no Campaign, CreativeAsset, or VideoAsset rows.
+
+### Media Processing
+
+The worker resolves the supplied URL, upload reference, or existing `VideoAsset`, then verifies the file with FFprobe. Reference videos longer than 30 seconds are rejected.
+
+FFmpeg extracts downscaled JPEG analysis frames sequentially at:
+
+```text
+0s, 2s, 4s, ... and the exact final frame
+```
+
+Duplicate final timestamps are removed. Images are not analyzed in parallel and the system does not make one model request per frame.
+
+### Joint Visual Analysis
+
+The first model call receives all images in this exact order:
+
+```text
+TARGET FIRST FRAME
+TARGET LAST FRAME
+REFERENCE 0s
+REFERENCE 2s
+REFERENCE 4s
+...
+REFERENCE FINAL
+```
+
+Target frames decide what is actually present in the generated video. Reference frames describe only how content moves and is presented. The advertising request decides what the video expresses.
+
+The model extracts only:
+
+```text
+subject presence
+camera movement
+transitions
+visible effects
+```
+
+It must not analyze reference audio, speech, lyrics, voiceover, narration, subtitles, or transcripts. It must not copy reference characters, brands, text, products, or setting into the target video.
+
+The existing `FrameAnalysis` gains an optional validated `reference_video_analysis` containing chronological segments and adapted constraints. Subject-presence continuity has strength `required`. Camera, transition, and effects patterns have strength `preferred` and may adapt where target-frame truth requires it.
+
+The second model call receives the full private analysis. Its priority order is:
+
+```text
+1. Target first/last frame truth
+2. Required subject-presence continuity
+3. Advertising objective
+4. Preferred camera, transition, and effects patterns
+```
+
+Reference analysis remains private task metadata and is never returned by public polling.
+
+### Failure Semantics
+
+When `reference_video` is present, any source-resolution, download, format, duration, FFprobe, FFmpeg extraction, joint-model analysis, or reference-schema failure stops the task before storyboard generation. The worker must not silently fall back to first/last-frame inference.
+
+Verification must additionally prove source-schema validation, 2-second chronological sampling with exact opening/final coverage, one-request image ordering, required/preferred prompt rules, failure before call 2, upload privacy, and unchanged no-reference behavior.

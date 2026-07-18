@@ -1,5 +1,7 @@
+import re
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -35,6 +37,51 @@ class VideoStorageService:
         if not public_url:
             raise ProviderError("Failed to build local video public URL.")
         return public_url, storage_key
+
+    def store_uploaded_reference_video(
+        self,
+        data: bytes,
+        content_type: str | None,
+        filename: str | None = None,
+    ) -> str:
+        if self.settings.object_storage_provider != "local":
+            raise ProviderError(
+                f"Unsupported object storage provider: {self.settings.object_storage_provider}"
+            )
+        if not data:
+            raise ProviderError("Uploaded reference video is empty.")
+
+        extension = _reference_video_extension(content_type, filename)
+        upload_asset_id = str(uuid4())
+        relative_path = (
+            Path("videos")
+            / "storyboard_reference_uploads"
+            / f"{upload_asset_id}{extension}"
+        )
+        target_path = self.storage_root / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(data)
+        return upload_asset_id
+
+    def path_for_uploaded_reference_video(self, upload_asset_id: str) -> Path:
+        if not _OPAQUE_UPLOAD_ID.fullmatch(upload_asset_id):
+            raise ProviderError("Invalid reference video upload asset id.")
+        upload_root = self.storage_root / "videos" / "storyboard_reference_uploads"
+        matches = [
+            path
+            for path in upload_root.glob(f"{upload_asset_id}.*")
+            if path.is_file() and path.suffix.lower() in _VIDEO_EXTENSIONS
+        ]
+        if len(matches) != 1:
+            raise ProviderError("Uploaded reference video was not found.")
+        return matches[0]
+
+    def path_for_storage_key(self, storage_key: str | None) -> Path | None:
+        if not storage_key or not storage_key.startswith("local://"):
+            return None
+        relative_path = _relative_path_from_storage_key(storage_key)
+        path = self.storage_root / Path(relative_path)
+        return path if path.is_file() else None
 
     def public_url_for_storage_key(self, storage_key: str | None) -> str | None:
         if not storage_key or not storage_key.startswith("local://"):
@@ -94,7 +141,22 @@ class VideoStorageService:
 
 def _extension_from_url(url: str) -> str:
     suffix = Path(urlparse(url).path).suffix.lower()
-    return suffix if suffix in {".mp4", ".mov", ".webm"} else ".mp4"
+    return suffix if suffix in _VIDEO_EXTENSIONS else ".mp4"
+
+
+def _reference_video_extension(content_type: str | None, filename: str | None) -> str:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    by_content_type = {
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/webm": ".webm",
+    }
+    if normalized in by_content_type:
+        return by_content_type[normalized]
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in _VIDEO_EXTENSIONS:
+        return suffix
+    raise ProviderError("Reference video must be MP4, MOV, or WebM.")
 
 
 def _relative_path_from_storage_key(storage_key: str) -> str:
@@ -103,3 +165,7 @@ def _relative_path_from_storage_key(storage_key: str) -> str:
     if not raw_path or relative_path.is_absolute() or ".." in relative_path.parts:
         raise ProviderError("Invalid local video storage key.")
     return relative_path.as_posix()
+
+
+_VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
+_OPAQUE_UPLOAD_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")

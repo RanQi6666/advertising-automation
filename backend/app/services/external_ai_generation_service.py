@@ -5,7 +5,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.errors import AppError, NotFoundError
+from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -40,6 +40,10 @@ from backend.app.services.generation_task_service import (
     GenerationTaskService,
 )
 from backend.app.services.llm_rate_limit import ExternalAIIdempotencyLock, llm_text_rate_limiter
+from backend.app.services.storyboard_reference_video_service import (
+    PreparedReferenceVideo,
+    StoryboardReferenceVideoService,
+)
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -381,37 +385,67 @@ class ExternalAIGenerationService:
     ) -> dict[str, Any]:
         payload = ExternalAIFrameAnchoredStoryboardCreate.model_validate(task.payload_json or {})
         llm = get_llm_provider()
-        async with llm_text_rate_limiter():
-            frame_analysis = await llm.analyze_video_frame_pair(
-                first_frame_image_url=payload.first_frame_image_url,
-                last_frame_image_url=payload.last_frame_image_url,
-                duration_seconds=payload.duration_seconds,
-                aspect_ratio=payload.aspect_ratio,
+        reference_service = StoryboardReferenceVideoService()
+        prepared_reference: PreparedReferenceVideo | None = None
+        try:
+            if payload.reference_video is not None:
+                prepared_reference = await reference_service.prepare(
+                    session,
+                    payload.reference_video,
+                    task_id=task.id,
+                )
+            async with llm_text_rate_limiter():
+                frame_analysis = await llm.analyze_video_frame_pair(
+                    first_frame_image_url=payload.first_frame_image_url,
+                    last_frame_image_url=payload.last_frame_image_url,
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                    reference_frames=(
+                        prepared_reference.frames if prepared_reference is not None else None
+                    ),
+                    reference_video_duration_seconds=(
+                        prepared_reference.duration_seconds
+                        if prepared_reference is not None
+                        else None
+                    ),
+                    reference_video_sample_interval_seconds=(
+                        prepared_reference.sample_interval_seconds
+                        if prepared_reference is not None
+                        else None
+                    ),
+                )
+            if (
+                payload.reference_video is not None
+                and frame_analysis.reference_video_analysis is None
+            ):
+                raise ProviderError("Visual model did not return reference video analysis.")
+            await _store_frame_anchored_private_metadata(
+                session,
+                task,
+                frame_analysis=frame_analysis.model_dump(mode="json"),
             )
-        await _store_frame_anchored_private_metadata(
-            session,
-            task,
-            frame_analysis=frame_analysis.model_dump(mode="json"),
-        )
-        async with llm_text_rate_limiter():
-            storyboard = await llm.generate_frame_anchored_video_storyboard(
-                first_frame_image_url=payload.first_frame_image_url,
-                last_frame_image_url=payload.last_frame_image_url,
-                frame_analysis=frame_analysis,
-                duration_seconds=payload.duration_seconds,
-                aspect_ratio=payload.aspect_ratio,
+            async with llm_text_rate_limiter():
+                storyboard = await llm.generate_frame_anchored_video_storyboard(
+                    first_frame_image_url=payload.first_frame_image_url,
+                    last_frame_image_url=payload.last_frame_image_url,
+                    frame_analysis=frame_analysis,
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                )
+            await _store_frame_anchored_private_metadata(
+                session,
+                task,
+                storyboard=storyboard.model_dump(mode="json"),
             )
-        await _store_frame_anchored_private_metadata(
-            session,
-            task,
-            storyboard=storyboard.model_dump(mode="json"),
-        )
-        return {
-            "request_id": _request_id(payload.external_request_id, task.id),
-            "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
-            "duration_seconds": payload.duration_seconds,
-            "aspect_ratio": payload.aspect_ratio,
-        }
+            return {
+                "request_id": _request_id(payload.external_request_id, task.id),
+                "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
+                "duration_seconds": payload.duration_seconds,
+                "aspect_ratio": payload.aspect_ratio,
+            }
+        finally:
+            if prepared_reference is not None:
+                await reference_service.cleanup(prepared_reference)
 
     async def _create_job(
         self,

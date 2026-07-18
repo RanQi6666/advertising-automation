@@ -10,6 +10,7 @@ from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameAnchoredStoryboard,
     ImageBrief,
+    ReferenceVideoFrame,
     TopicCandidate,
     VideoStoryboardCandidate,
 )
@@ -88,8 +89,11 @@ class LLMProvider(Protocol):
         last_frame_image_url: str,
         duration_seconds: int,
         aspect_ratio: str,
+        reference_frames: list[ReferenceVideoFrame] | None = None,
+        reference_video_duration_seconds: float | None = None,
+        reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
-        """Analyze exact first and last frame images for visual continuity."""
+        """Analyze exact endpoint images and optional chronological reference frames."""
 
     async def generate_frame_anchored_video_storyboard(
         self,

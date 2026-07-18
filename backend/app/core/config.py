@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     image_download_max_bytes: int = 25 * 1024 * 1024
     video_download_timeout_seconds: float = 120.0
     video_download_max_bytes: int = 500 * 1024 * 1024
+    storyboard_reference_video_max_duration_seconds: int = Field(default=30, ge=1, le=30)
+    storyboard_reference_video_sample_interval_seconds: float = Field(
+        default=2.0, ge=0.5, le=10
+    )
+    storyboard_reference_video_frame_width: int = Field(default=768, ge=320, le=1920)
+    storyboard_reference_video_jpeg_quality: int = Field(default=4, ge=2, le=31)
+    storyboard_reference_video_ffprobe_timeout_seconds: float = Field(
+        default=10.0, ge=0.01, le=120
+    )
+    storyboard_reference_video_ffmpeg_timeout_seconds: float = Field(
+        default=15.0, ge=0.01, le=120
+    )
+    storyboard_reference_video_allow_private_hosts: bool = False
     ad_analysis_media_root: str = "data/ad-analysis-media"
     ad_analysis_media_processing_enabled: bool = True
     ad_analysis_allow_private_media_hosts: bool = False

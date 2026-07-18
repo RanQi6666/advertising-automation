@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +26,7 @@ from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameAnchoredStoryboard,
     ImageBrief,
+    ReferenceVideoFrame,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
@@ -35,6 +37,8 @@ from backend.app.services.creative_safety_prompts import (
     sanitize_creative_safety_text,
 )
 from backend.app.services.creative_strategy_builder import compact_creative_strategy
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILLMProvider:
@@ -490,6 +494,9 @@ class OpenAILLMProvider:
         last_frame_image_url: str,
         duration_seconds: int,
         aspect_ratio: str,
+        reference_frames: list[ReferenceVideoFrame] | None = None,
+        reference_video_duration_seconds: float | None = None,
+        reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
         data = await self._json_completion(
             system=_frame_analysis_system_prompt(),
@@ -499,7 +506,16 @@ class OpenAILLMProvider:
                 {
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
+                    "reference_video": (
+                        {
+                            "duration_seconds": reference_video_duration_seconds,
+                            "sample_interval_seconds": reference_video_sample_interval_seconds,
+                        }
+                        if reference_frames
+                        else None
+                    ),
                 },
+                reference_frames=reference_frames,
             ),
         )
         return _frame_analysis_from_data(data)
@@ -1757,8 +1773,9 @@ def _video_storyboard_from_data(
 
 def _frame_analysis_system_prompt() -> str:
     return (
-        "You analyze two supplied video endpoint images. Return JSON only, with exactly "
-        "these root keys: first_frame, last_frame, transition_brief, language_analysis. "
+        "You jointly analyze two target endpoint images and optional chronological reference "
+        "video frames. Return JSON only, with root keys first_frame, last_frame, "
+        "transition_brief, language_analysis, and optional reference_video_analysis. "
         "Use this exact shape: {\"first_frame\": {\"visible_subjects\": [\"string\"], "
         "\"visible_text\": [\"string\"], \"environment\": \"string\", "
         "\"composition\": \"string\", \"camera_perspective\": \"string\", "
@@ -1776,7 +1793,16 @@ def _frame_analysis_system_prompt() -> str:
         "Every visible_text item must be a plain string, never an object. Record factual "
         "visual observations for each exact image. Use the supplied images as the source "
         "of truth. Analyze image content neutrally. Do not write a storyboard or create "
-        "new visible copy, logos, labels, or end cards."
+        "new visible copy, logos, labels, or end cards. TARGET FRAME content is factual truth "
+        "and cannot be overridden. REFERENCE FRAME content is used only to extract subject "
+        "presence, camera movement, transitions, and visible effects. Do not copy reference "
+        "characters, brands, text, products, settings, or other content into the target video. "
+        "Do not analyze audio, speech, lyrics, voiceover, narration, subtitles, or transcripts. "
+        "When reference frames exist, return reference_video_analysis with duration_seconds, "
+        "sample_interval_seconds, chronological segments, and adapted_constraints. Each segment "
+        "must include start_second, end_second, subject_presence, camera, transition, effects, "
+        "and confidence. adapted_constraints must include subject_presence strength required, "
+        "plus camera_pattern, transition_pattern, and effects_pattern strength preferred."
     )
 
 
@@ -1797,7 +1823,13 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "translate or rewrite text visible in either supplied image. Use the supplied "
         "duration_seconds and aspect_ratio exactly. subtitle and voiceover are optional; "
         "when present, use the recommended output language. Include optional per-scene "
-        "sound_effects plus overall music and ambience directions in sound_design."
+        "sound_effects plus overall music and ambience directions in sound_design. When "
+        "reference_video_analysis exists, apply this strict priority order: (1) target frame "
+        "truth, (2) required subject presence continuity, (3) the advertising objective "
+        "expressed by the target content, and (4) preferred camera, transitions, and effects "
+        "patterns. A required subject presence instruction must be reflected throughout the "
+        "scene visuals. Camera, transitions, and visible effects are preferred only where "
+        "compatible with the target first and last frames. Never copy reference-video content."
     )
 
 
@@ -1805,17 +1837,32 @@ def _frame_pair_user_content(
     first_frame_image_url: str,
     last_frame_image_url: str,
     payload: dict[str, Any],
+    reference_frames: list[ReferenceVideoFrame] | None = None,
 ) -> list[dict[str, Any]]:
-    return [
+    content = [
         {
             "type": "text",
-            "text": "FIRST FRAME: analyze this exact opening frame.\n"
+            "text": "TARGET FIRST FRAME: analyze this exact opening frame.\n"
             + json.dumps(payload, ensure_ascii=False),
         },
         {"type": "image_url", "image_url": {"url": first_frame_image_url}},
-        {"type": "text", "text": "LAST FRAME: analyze this exact ending frame."},
+        {"type": "text", "text": "TARGET LAST FRAME: analyze this exact ending frame."},
         {"type": "image_url", "image_url": {"url": last_frame_image_url}},
     ]
+    for frame in reference_frames or []:
+        content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        f"REFERENCE FRAME {frame.timestamp_seconds:.2f}s: extract only "
+                        "subject presence, camera, transition, and visible effects."
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": frame.image_url}},
+            ]
+        )
+    return content
 
 
 def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
@@ -1874,9 +1921,46 @@ def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
                 ),
             },
         }
+        if isinstance(data.get("reference_video_analysis"), dict):
+            normalized["reference_video_analysis"] = _reference_video_analysis_from_data(
+                data["reference_video_analysis"]
+            )
         return FrameAnalysis.model_validate(normalized)
     except (TypeError, ValidationError, ValueError) as exc:
+        logger.warning(
+            "Frame analysis JSON validation failed: errors=%s response_shape=%s",
+            _frame_analysis_validation_errors(exc),
+            _frame_analysis_response_shape(data),
+        )
         raise ProviderError("LLM returned invalid frame analysis JSON.") from exc
+
+
+def _frame_analysis_validation_errors(exc: Exception) -> list[dict[str, str]]:
+    if not isinstance(exc, ValidationError):
+        return [{"field": "root", "type": type(exc).__name__}]
+    return [
+        {
+            "field": ".".join(str(part) for part in error.get("loc", ("root",))),
+            "type": str(error.get("type", "validation_error")),
+        }
+        for error in exc.errors()
+    ]
+
+
+def _frame_analysis_response_shape(value: Any, depth: int = 0) -> Any:
+    if depth >= 3:
+        return type(value).__name__
+    if isinstance(value, dict):
+        return {
+            str(key): _frame_analysis_response_shape(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _frame_analysis_response_shape(item, depth + 1)
+            for item in value[:3]
+        ]
+    return type(value).__name__
 
 
 def _frame_visual_facts_from_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -1909,6 +1993,74 @@ def _frame_language_list(value: Any) -> list[str]:
         if language:
             values.append(language)
     return values
+
+
+def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    segments = data.get("segments")
+    if segments is None:
+        segments = data.get("chronological_segments")
+    if isinstance(segments, list):
+        normalized["segments"] = [
+            _reference_video_segment_from_data(segment)
+            for segment in segments
+            if isinstance(segment, dict)
+        ]
+
+    constraints = data.get("adapted_constraints")
+    if isinstance(constraints, dict):
+        normalized["adapted_constraints"] = {
+            "subject_presence": _reference_constraint_from_data(
+                constraints.get("subject_presence"),
+                strength="required",
+            ),
+            "camera_pattern": _reference_constraint_from_data(
+                constraints.get("camera_pattern"),
+                strength="preferred",
+            ),
+            "transition_pattern": _reference_constraint_from_data(
+                constraints.get("transition_pattern"),
+                strength="preferred",
+            ),
+            "effects_pattern": _reference_constraint_from_data(
+                constraints.get("effects_pattern"),
+                strength="preferred",
+            ),
+        }
+    return normalized
+
+
+def _reference_video_segment_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    normalized["subject_presence"] = _reference_pattern_from_data(
+        data.get("subject_presence"),
+        text_field="state",
+    )
+    normalized["camera"] = _reference_pattern_from_data(
+        data.get("camera"),
+        text_field="movement",
+    )
+    normalized["transition"] = _reference_pattern_from_data(
+        data.get("transition"),
+        text_field="description",
+    )
+    normalized["effects"] = _frame_string_list(data.get("effects"))
+    normalized["confidence"] = _coerce_text(data.get("confidence"))
+    return normalized
+
+
+def _reference_pattern_from_data(value: Any, *, text_field: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {text_field: _coerce_text(value)}
+
+
+def _reference_constraint_from_data(value: Any, *, strength: str) -> dict[str, str]:
+    instruction = value.get("instruction") if isinstance(value, dict) else value
+    return {
+        "strength": strength,
+        "instruction": _coerce_text(instruction),
+    }
 
 
 def _frame_anchored_storyboard_from_data(

@@ -79,11 +79,76 @@ class FrameLanguageAnalysis(BaseModel):
     reason: str = ""
 
 
+class ReferenceVideoFrame(BaseModel):
+    timestamp_seconds: float = Field(ge=0)
+    image_url: str = Field(min_length=1)
+
+
+class ReferenceSubjectPresence(BaseModel):
+    state: str = ""
+    visibility: str = ""
+    screen_position: str = ""
+    movement: str = ""
+
+
+class ReferenceCameraPattern(BaseModel):
+    movement: str = ""
+    intensity: str = ""
+
+
+class ReferenceTransitionPattern(BaseModel):
+    type: str = ""
+    description: str = ""
+
+
+class ReferenceVideoSegment(BaseModel):
+    start_second: float = Field(ge=0)
+    end_second: float = Field(ge=0)
+    subject_presence: ReferenceSubjectPresence
+    camera: ReferenceCameraPattern
+    transition: ReferenceTransitionPattern
+    effects: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class ReferenceConstraint(BaseModel):
+    strength: Literal["required", "preferred"]
+    instruction: str = Field(min_length=1)
+
+
+class ReferenceAdaptedConstraints(BaseModel):
+    subject_presence: ReferenceConstraint
+    camera_pattern: ReferenceConstraint
+    transition_pattern: ReferenceConstraint
+    effects_pattern: ReferenceConstraint
+
+    @model_validator(mode="after")
+    def validate_strengths(self) -> "ReferenceAdaptedConstraints":
+        if self.subject_presence.strength != "required":
+            raise ValueError("reference subject presence must be required")
+        for constraint in (
+            self.camera_pattern,
+            self.transition_pattern,
+            self.effects_pattern,
+        ):
+            if constraint.strength != "preferred":
+                raise ValueError("reference presentation constraints must be preferred")
+        return self
+
+
+class ReferenceVideoAnalysis(BaseModel):
+    duration_seconds: float = Field(gt=0, le=30)
+    sample_interval_seconds: float = Field(gt=0)
+    segments: list[ReferenceVideoSegment] = Field(min_length=1)
+    adapted_constraints: ReferenceAdaptedConstraints
+
+
 class FrameAnalysis(BaseModel):
     first_frame: FrameVisualFacts
     last_frame: FrameVisualFacts
     transition_brief: FrameTransitionBrief
     language_analysis: FrameLanguageAnalysis
+    reference_video_analysis: ReferenceVideoAnalysis | None = None
 
 
 class StoryboardSoundDesign(BaseModel):
