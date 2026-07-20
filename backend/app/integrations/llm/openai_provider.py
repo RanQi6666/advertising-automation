@@ -71,6 +71,9 @@ class OpenAILLMProvider:
         except json.JSONDecodeError as exc:
             raise ProviderError("LLM returned invalid JSON.") from exc
 
+    async def _vision_json_completion(self, system: str, user: Any) -> dict[str, Any]:
+        return await self._json_completion(system, user)
+
     async def extract_delivery_fields(self, raw_content: str) -> dict[str, Any]:
         return await self._json_completion(
             system=(
@@ -498,7 +501,7 @@ class OpenAILLMProvider:
         reference_video_duration_seconds: float | None = None,
         reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
-        data = await self._json_completion(
+        data = await self._vision_json_completion(
             system=_frame_analysis_system_prompt(),
             user=_frame_pair_user_content(
                 first_frame_image_url,
@@ -528,7 +531,7 @@ class OpenAILLMProvider:
         duration_seconds: int,
         aspect_ratio: str,
     ) -> FrameAnchoredStoryboard:
-        data = await self._json_completion(
+        data = await self._vision_json_completion(
             system=_frame_anchored_storyboard_system_prompt(),
             user=_frame_pair_user_content(
                 first_frame_image_url,
@@ -1776,7 +1779,7 @@ def _frame_analysis_system_prompt() -> str:
         "You jointly analyze two target endpoint images and optional chronological reference "
         "video frames. Return JSON only, with root keys first_frame, last_frame, "
         "transition_brief, language_analysis, and optional reference_video_analysis. "
-        "Use this exact shape: {\"first_frame\": {\"visible_subjects\": [\"string\"], "
+        "Use this exact base shape: {\"first_frame\": {\"visible_subjects\": [\"string\"], "
         "\"visible_text\": [\"string\"], \"environment\": \"string\", "
         "\"composition\": \"string\", \"camera_perspective\": \"string\", "
         "\"visual_style\": \"string\", \"color_and_lighting\": \"string\", "
@@ -1791,18 +1794,46 @@ def _frame_analysis_system_prompt() -> str:
         "[\"string\"], \"last_frame_visible_languages\": [\"string\"], "
         "\"recommended_output_language\": \"string\", \"reason\": \"string\"}}. "
         "Every visible_text item must be a plain string, never an object. Record factual "
-        "visual observations for each exact image. Use the supplied images as the source "
-        "of truth. Analyze image content neutrally. Do not write a storyboard or create "
-        "new visible copy, logos, labels, or end cards. TARGET FRAME content is factual truth "
-        "and cannot be overridden. REFERENCE FRAME content is used only to extract subject "
-        "presence, camera movement, transitions, and visible effects. Do not copy reference "
-        "characters, brands, text, products, settings, or other content into the target video. "
-        "Do not analyze audio, speech, lyrics, voiceover, narration, subtitles, or transcripts. "
+        "visual observations for each exact image. Do not write a storyboard or create new "
+        "visible copy, logos, labels, or end cards. The target first and last frames define "
+        "the required base layers at their anchors. Reference content can be an additional "
+        "middle layer or final overlay only when the reference analysis explicitly maps it. "
+        "Reference frames are the preferred source for the observed behavior graph: dynamically "
+        "extract entities, action and causal beats, visible evidence, dependencies, camera, "
+        "transitions, effects, and the lifecycle of any character, appearance, prop, product, "
+        "brand, text, reward, UI, setting, or other visual element. Do not use any fixed "
+        "action, object, product, or reward template. "
         "When reference frames exist, return reference_video_analysis with duration_seconds, "
-        "sample_interval_seconds, chronological segments, and adapted_constraints. Each segment "
-        "must include start_second, end_second, subject_presence, camera, transition, effects, "
-        "and confidence. adapted_constraints must include subject_presence strength required, "
-        "plus camera_pattern, transition_pattern, and effects_pattern strength preferred."
+        "sample_interval_seconds, chronological segments, visual_identity_mappings, "
+        "behavior_graph, and adapted_constraints. Each segment must include start_second, "
+        "end_second, subject_presence, camera, transition, effects, and confidence. "
+        "behavior_graph must contain entities and beats. Each beat must include beat_id, "
+        "reference_start_second, reference_end_second, description, visible_evidence, "
+        "behavior_type (action, state, or overlay), importance (core, supporting, or decorative), "
+        "minimum_readable_duration_seconds, depends_on, must_remain_visible_until_final, and "
+        "locked_text. Use reference seconds only to "
+        "describe observed order and duration; they are not target-generation seconds. "
+        "Set must_remain_visible_until_final=true only for a non-diegetic visual overlay such as "
+        "readable reward text, logo, label, or UI layer that remains visible at the reference end. "
+        "Never mark a character, prop, setting, camera move, action, transformation, hit, or "
+        "effect as a final overlay merely because it appears near the end. "
+        "For an overlay containing readable text, set locked_text to the exact observed string; "
+        "otherwise set locked_text to null. "
+        "visual_identity_mappings items must include reference_element, element_type, strategy, "
+        "target_first_frame_equivalent, target_last_frame_equivalent, and instruction. "
+        "element_type must be one of character, appearance, prop, product, brand, text, reward, "
+        "setting, or other. strategy must be exactly preserve, replace_with_target, "
+        "morph_to_target, endpoint_only, or preserve_through_last_anchor. Use "
+        "preserve_through_last_anchor when a reference element remains visible near the "
+        "reference ending and should continue into the generated final frame even if no "
+        "target-frame equivalent exists. Its instruction must state that the target last frame "
+        "is the base layer and the reference element is a readable final overlay; it may be "
+        "repositioned or scaled to avoid obscuring a target subject, product, or brand but must "
+        "not be deleted. Use replace_with_target or morph_to_target when a target frame visibly "
+        "supplies the same semantic role with different content. adapted_constraints must include "
+        "subject_presence, camera_pattern, transition_pattern, and effects_pattern, all with "
+        "strength preferred. Do not analyze audio, speech, lyrics, voiceover, narration, "
+        "subtitles, or transcripts."
     )
 
 
@@ -1814,22 +1845,39 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, and notes. The first scene "
         "must use frame_anchor first_frame and begin from the actual supplied first-frame "
-        "state. Every middle scene must use frame_anchor transition. The final scene must "
-        "use frame_anchor last_frame and arrive at the actual supplied last-frame state. "
-        "Do not invent a key brand, logo, product, major character, core setting, hook, "
-        "or generic end card that is absent from both supplied frames. Apply this rule "
-        "symmetrically to the opening and ending frame. Do not claim an element exists "
-        "unless it is visible in an image or confirmed by the supplied analysis. Do not "
-        "translate or rewrite text visible in either supplied image. Use the supplied "
-        "duration_seconds and aspect_ratio exactly. subtitle and voiceover are optional; "
-        "when present, use the recommended output language. Include optional per-scene "
-        "sound_effects plus overall music and ambience directions in sound_design. When "
-        "reference_video_analysis exists, apply this strict priority order: (1) target frame "
-        "truth, (2) required subject presence continuity, (3) the advertising objective "
-        "expressed by the target content, and (4) preferred camera, transitions, and effects "
-        "patterns. A required subject presence instruction must be reflected throughout the "
-        "scene visuals. Camera, transitions, and visible effects are preferred only where "
-        "compatible with the target first and last frames. Never copy reference-video content."
+        "base layer. Every middle scene must use frame_anchor transition. The final scene "
+        "must use frame_anchor last_frame and arrive at the actual supplied last-frame base "
+        "layer. Do not alter or translate text that is visibly supplied by either target image. "
+        "Use the supplied duration_seconds and aspect_ratio exactly. Scene start_second and "
+        "end_second values are target-generation seconds and may use decimals when needed "
+        "for a readable adapted beat; do not round them merely to copy reference timing. "
+        "When reference_video_analysis exists, use its behavior_graph and its target "
+        "timeline_adaptation_plan together: reference seconds explain observed behavior only; "
+        "the target plan defines the target scene windows. Do not mechanically copy reference "
+        "seconds or linearly scale them. Preserve the dependency order and allocate readable "
+        "time to core causal beats; compress repeated or decorative material first and extend "
+        "readability or the final state when the target duration is longer. "
+        "For each core behavior beat, describe the actual available actors, objects, action, "
+        "interaction, causal change, and visible result from the analysis. Do not replace a "
+        "specific observed causal action with a generic effect, passive pose, or static result. "
+        "Reference characters, appearance, props, products, brands, text, rewards, UI, settings, "
+        "camera, transitions, and effects may be preserved when their visual_identity_mappings "
+        "permit it. Follow every mapping: preserve keeps the reference element; "
+        "replace_with_target keeps its presentation while substituting the exact visible "
+        "target-frame equivalent; morph_to_target transforms it before the ending; endpoint_only "
+        "reserves it for the applicable endpoint; preserve_through_last_anchor introduces the "
+        "reference element at its target window and keeps it readable through the final frame. "
+        "For preserve_through_last_anchor, the target last frame is the final base layer and the "
+        "reference element is a required final overlay. It may be scaled or repositioned to "
+        "avoid obscuring a target subject, product, or brand, but it must not be omitted merely "
+        "because the target last frame has no equivalent. State this requirement explicitly in "
+        "the final scene visual or notes. Include optional per-scene sound_effects plus overall "
+        "music and ambience directions in sound_design. Do not invent visual identities absent "
+        "from both supplied target frames and reference analysis. Apply this priority order: "
+        "(1) target-frame base-layer truth and continuity, (2) required mapped reference "
+        "lifecycle and causal behavior, including final overlays, (3) the advertising objective "
+        "where it does not contradict supplied images, and (4) preferred reference camera, "
+        "transitions, and effects."
     )
 
 
@@ -1856,7 +1904,8 @@ def _frame_pair_user_content(
                     "type": "text",
                     "text": (
                         f"REFERENCE FRAME {frame.timestamp_seconds:.2f}s: extract only "
-                        "subject presence, camera, transition, and visible effects."
+                        "subject presence, appearance or entry, action, interaction, camera, "
+                        "transition, and visible effects."
                     ),
                 },
                 {"type": "image_url", "image_url": {"url": frame.image_url}},
@@ -2007,12 +2056,31 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
             if isinstance(segment, dict)
         ]
 
+    mappings = data.get("visual_identity_mappings")
+    if isinstance(mappings, list):
+        normalized["visual_identity_mappings"] = [
+            _reference_visual_identity_mapping_from_data(mapping)
+            for mapping in mappings
+            if isinstance(mapping, dict)
+        ]
+
+    behavior_graph = data.get("behavior_graph")
+    if isinstance(behavior_graph, dict):
+        normalized["behavior_graph"] = {
+            "entities": _frame_string_list(behavior_graph.get("entities")),
+            "beats": [
+                _reference_behavior_beat_from_data(beat)
+                for beat in behavior_graph.get("beats", [])
+                if isinstance(beat, dict)
+            ],
+        }
+
     constraints = data.get("adapted_constraints")
     if isinstance(constraints, dict):
         normalized["adapted_constraints"] = {
             "subject_presence": _reference_constraint_from_data(
                 constraints.get("subject_presence"),
-                strength="required",
+                strength="preferred",
             ),
             "camera_pattern": _reference_constraint_from_data(
                 constraints.get("camera_pattern"),
@@ -2027,6 +2095,80 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
                 strength="preferred",
             ),
         }
+    return normalized
+
+
+def _reference_visual_identity_mapping_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    normalized["reference_element"] = _coerce_text(data.get("reference_element"))
+    element_type = _coerce_text(data.get("element_type")).lower()
+    normalized["element_type"] = (
+        element_type
+        if element_type
+        in {
+            "character",
+            "appearance",
+            "prop",
+            "product",
+            "brand",
+            "text",
+            "reward",
+            "setting",
+            "other",
+        }
+        else "other"
+    )
+    strategy = _coerce_text(data.get("strategy")).lower()
+    normalized["strategy"] = (
+        strategy
+        if strategy
+        in {
+            "preserve",
+            "replace_with_target",
+            "morph_to_target",
+            "endpoint_only",
+            "preserve_through_last_anchor",
+        }
+        else "preserve"
+    )
+    normalized["target_first_frame_equivalent"] = _coerce_optional_text(
+        data.get("target_first_frame_equivalent")
+    )
+    normalized["target_last_frame_equivalent"] = _coerce_optional_text(
+        data.get("target_last_frame_equivalent")
+    )
+    normalized["instruction"] = _coerce_text(data.get("instruction"))
+    return normalized
+
+
+def _reference_behavior_beat_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    normalized["beat_id"] = _coerce_text(data.get("beat_id"))
+    normalized["reference_start_second"] = _coerce_float(data.get("reference_start_second"))
+    normalized["reference_end_second"] = _coerce_float(data.get("reference_end_second"))
+    normalized["description"] = _coerce_text(data.get("description"))
+    normalized["visible_evidence"] = _frame_string_list(data.get("visible_evidence"))
+    behavior_type = _coerce_text(data.get("behavior_type")).lower()
+    normalized["behavior_type"] = (
+        behavior_type if behavior_type in {"action", "state", "overlay"} else "action"
+    )
+    importance = _coerce_text(data.get("importance")).lower()
+    normalized["importance"] = (
+        importance if importance in {"core", "supporting", "decorative"} else "supporting"
+    )
+    normalized["minimum_readable_duration_seconds"] = _coerce_float(
+        data.get("minimum_readable_duration_seconds"),
+        default=0.5,
+    )
+    normalized["depends_on"] = _frame_string_list(data.get("depends_on"))
+    normalized["must_remain_visible_until_final"] = (
+        normalized["behavior_type"] == "overlay"
+        and bool(data.get("must_remain_visible_until_final"))
+    )
+    locked_text = _coerce_optional_text(data.get("locked_text"))
+    normalized["locked_text"] = (
+        locked_text if normalized["behavior_type"] == "overlay" else None
+    )
     return normalized
 
 
@@ -2074,6 +2216,11 @@ def _frame_anchored_storyboard_from_data(
     try:
         return FrameAnchoredStoryboard.model_validate(normalized)
     except ValidationError as exc:
+        logger.warning(
+            "Frame-anchored storyboard JSON validation failed: errors=%s response_shape=%s",
+            _frame_analysis_validation_errors(exc),
+            _frame_analysis_response_shape(data),
+        )
         raise ProviderError("LLM returned invalid frame-anchored storyboard JSON.") from exc
 
 
@@ -2449,6 +2596,13 @@ def _coerce_score(value: Any) -> float | None:
     if score > 1 and score <= 10:
         score = score / 10
     return max(0.0, min(1.0, score))
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _coerce_int(value: Any, fallback: int) -> int:

@@ -57,6 +57,71 @@ async def test_gateway_frame_analysis_sends_first_then_last_image() -> None:
     system_prompt = captured[0]["input"][0]["content"]
     _assert_no_legacy_content(system_prompt)
 
+@pytest.mark.asyncio
+async def test_gateway_frame_anchored_operations_use_long_timeout() -> None:
+    captured_timeouts: list[dict[str, float | None]] = []
+    response_texts = [
+        json.dumps(_analysis().model_dump(mode="json")),
+        json.dumps(
+            {
+                "duration_seconds": 12,
+                "aspect_ratio": "9:16",
+                "scenes": [
+                    {
+                        "scene_index": 1,
+                        "start_second": 0,
+                        "end_second": 6,
+                        "frame_anchor": "first_frame",
+                        "visual": "Start from the supplied first frame.",
+                    },
+                    {
+                        "scene_index": 2,
+                        "start_second": 6,
+                        "end_second": 12,
+                        "frame_anchor": "last_frame",
+                        "visual": "End on the supplied last frame.",
+                    },
+                ],
+            }
+        ),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"output_text": response_texts.pop(0)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://model.example.test/v1",
+        timeout=None,
+    ) as client:
+        provider = GatewayResponsesLLMProvider(
+            api_key="gateway-key",
+            base_url="https://model.example.test/v1",
+            model="gpt-5.5",
+            timeout_seconds=180,
+            fast_timeout_seconds=45,
+            http_client=client,
+        )
+        analysis = await provider.analyze_video_frame_pair(
+            FIRST_FRAME_URL,
+            LAST_FRAME_URL,
+            12,
+            "9:16",
+        )
+        storyboard = await provider.generate_frame_anchored_video_storyboard(
+            FIRST_FRAME_URL,
+            LAST_FRAME_URL,
+            analysis,
+            12,
+            "9:16",
+        )
+
+    assert len(storyboard.scenes) == 2
+    assert captured_timeouts == [
+        {"connect": 5.0, "read": 180.0, "write": 10.0, "pool": 5.0},
+        {"connect": 5.0, "read": 180.0, "write": 10.0, "pool": 5.0},
+    ]
 
 @pytest.mark.asyncio
 async def test_gateway_joint_analysis_sends_reference_frames_chronologically() -> None:
@@ -97,7 +162,16 @@ async def test_gateway_joint_analysis_sends_reference_frames_chronologically() -
 
     assert analysis.reference_video_analysis is not None
     assert analysis.reference_video_analysis.adapted_constraints.subject_presence.strength == (
-        "required"
+        "preferred"
+    )
+    assert analysis.reference_video_analysis.segments[0].subject_presence.appearance == (
+        "The subject enters from the right edge behind foreground light."
+    )
+    assert analysis.reference_video_analysis.segments[0].subject_presence.action == (
+        "The subject walks to center, turns toward the camera, and raises the target object."
+    )
+    assert analysis.reference_video_analysis.segments[0].subject_presence.interaction == (
+        "The gesture intensifies the surrounding gold particles."
     )
     content = captured[0]["input"][1]["content"]
     assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
@@ -109,11 +183,18 @@ async def test_gateway_joint_analysis_sends_reference_frames_chronologically() -
     assert "REFERENCE FRAME 5.80s" in content[8]["text"]
     assert content[9] == {"type": "input_image", "image_url": reference_frames[2].image_url}
     system_prompt = captured[0]["input"][0]["content"]
-    assert "subject presence" in system_prompt.lower()
-    assert "required" in system_prompt.lower()
+    assert "subject_presence" in system_prompt.lower()
+    assert "behavior graph" in system_prompt.lower()
+    assert "dependencies" in system_prompt.lower()
+    assert "target first and last frames" in system_prompt.lower()
     assert "camera" in system_prompt.lower()
     assert "preferred" in system_prompt.lower()
-    assert "do not copy" in system_prompt.lower()
+    assert "visual_identity_mappings" in system_prompt.lower()
+    assert "replace_with_target" in system_prompt.lower()
+    assert "morph_to_target" in system_prompt.lower()
+    assert "preserve_through_last_anchor" in system_prompt.lower()
+    assert "final overlay" in system_prompt.lower()
+    assert "diamond" not in system_prompt.lower()
     for excluded in ("audio", "speech", "lyrics", "voiceover", "transcript"):
         assert excluded in system_prompt.lower()
 
@@ -131,9 +212,19 @@ async def test_gateway_frame_analysis_normalizes_observed_reference_text_shape()
                     {
                         "start_second": 0.0,
                         "end_second": 2.0,
-                        "subject_presence": (
-                            "The person remains visible in a medium full-body shot."
-                        ),
+                        "subject_presence": {
+                            "state": "The person remains visible in a medium full-body shot.",
+                            "appearance": (
+                                "The person enters from the right edge behind foreground light."
+                            ),
+                            "action": (
+                                "The person walks to center, turns to the camera, and raises "
+                                "the target object."
+                            ),
+                            "interaction": (
+                                "The gesture intensifies the surrounding gold particles."
+                            ),
+                        },
                         "camera": "A gentle forward push follows the person.",
                         "transition": "Continuous movement carries into the next beat.",
                         "effects": "Soft light trails accent the motion.",
@@ -171,15 +262,154 @@ async def test_gateway_frame_analysis_normalizes_observed_reference_text_shape()
     assert reference.segments[0].subject_presence.state == (
         "The person remains visible in a medium full-body shot."
     )
+    assert reference.segments[0].subject_presence.appearance == (
+        "The person enters from the right edge behind foreground light."
+    )
+    assert reference.segments[0].subject_presence.action == (
+        "The person walks to center, turns to the camera, and raises the target object."
+    )
+    assert reference.segments[0].subject_presence.interaction == (
+        "The gesture intensifies the surrounding gold particles."
+    )
     assert reference.segments[0].camera.movement == "A gentle forward push follows the person."
     assert reference.segments[0].transition.description == (
         "Continuous movement carries into the next beat."
     )
     assert reference.segments[0].effects == ["Soft light trails accent the motion."]
-    assert reference.adapted_constraints.subject_presence.strength == "required"
+    assert reference.adapted_constraints.subject_presence.strength == "preferred"
     assert reference.adapted_constraints.camera_pattern.strength == "preferred"
     assert reference.adapted_constraints.transition_pattern.strength == "preferred"
     assert reference.adapted_constraints.effects_pattern.strength == "preferred"
+
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_emits_reference_identity_mapping_plan() -> None:
+    reference_analysis = _reference_video_analysis_data()
+    reference_analysis["visual_identity_mappings"] = [
+        {
+            "reference_element": "Gold x200,000 reward text over the shattered diamond.",
+            "element_type": "reward",
+            "strategy": "replace_with_target",
+            "target_first_frame_equivalent": None,
+            "target_last_frame_equivalent": "Gold x50,000 reward text in the supplied last frame.",
+            "instruction": (
+                "Keep the reference reward reveal timing and gold burst, but show the exact "
+                "target last-frame reward value at the ending anchor."
+            ),
+        }
+    ]
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "transition_brief": {
+                "shared_visual_facts": ["golden subject"],
+                "continuity_requirements": ["begin and end at the supplied images"],
+                "visual_transition": "A sword strike resolves into the ending reward frame.",
+                "narrative_arc": "activation to reward reveal",
+            },
+            "language_analysis": {
+                "first_frame_visible_languages": [],
+                "last_frame_visible_languages": ["en"],
+                "recommended_output_language": "en",
+                "reason": "The ending reward text is English.",
+            },
+            "reference_video_analysis": reference_analysis,
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        12,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=5.8,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    assert analysis.reference_video_analysis is not None
+    mapping = analysis.reference_video_analysis.visual_identity_mappings[0]
+    assert mapping.strategy == "replace_with_target"
+    assert mapping.target_last_frame_equivalent == (
+        "Gold x50,000 reward text in the supplied last frame."
+    )
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "visual_identity_mappings" in system_prompt
+    assert "replace_with_target" in system_prompt
+    assert "morph_to_target" in system_prompt
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_keeps_behavior_graph_and_final_overlay_mapping() -> None:
+    reference_data = _reference_video_analysis_data()
+    reference_data["visual_identity_mappings"] = [
+        {
+            "reference_element": "reward panel with a visible value",
+            "element_type": "reward",
+            "strategy": "preserve_through_last_anchor",
+            "target_first_frame_equivalent": None,
+            "target_last_frame_equivalent": None,
+            "instruction": "Keep the panel readable through the generated final frame.",
+        }
+    ]
+    reference_data["behavior_graph"] = {
+        "entities": ["performer", "tool", "target", "reward panel"],
+        "beats": [
+            {
+                "beat_id": "approach",
+                "reference_start_second": 0,
+                "reference_end_second": 2,
+                "description": "The performer approaches the target with the tool.",
+                "visible_evidence": ["performer", "tool", "target"],
+                "importance": "core",
+                "minimum_readable_duration_seconds": 1,
+            },
+            {
+                "beat_id": "result_overlay",
+                "reference_start_second": 4,
+                "reference_end_second": 6,
+                "description": "The reward panel appears after the result and stays visible.",
+                "visible_evidence": ["reward panel"],
+                "behavior_type": "overlay",
+                "importance": "supporting",
+                "minimum_readable_duration_seconds": 1,
+                "depends_on": ["approach"],
+                "must_remain_visible_until_final": True,
+                "locked_text": "x200,000",
+            },
+        ],
+    }
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "transition_brief": {},
+            "language_analysis": {},
+            "reference_video_analysis": reference_data,
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        6,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=6,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    assert reference.visual_identity_mappings[0].strategy == "preserve_through_last_anchor"
+    assert reference.behavior_graph is not None
+    assert reference.behavior_graph.beats[1].must_remain_visible_until_final is True
+    assert reference.behavior_graph.beats[1].locked_text == "x200,000"
+    assert reference.behavior_graph.beats[1].depends_on == ["approach"]
 
 
 @pytest.mark.asyncio
@@ -338,6 +568,98 @@ async def test_gateway_frame_analysis_logs_sanitized_reference_validation_detail
 
 
 @pytest.mark.asyncio
+async def test_gateway_storyboard_logs_sanitized_validation_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "unexpected_image": "data:image/jpeg;base64,DO_NOT_LOG_THIS",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "frame_anchor": "opening",
+                    "visual": "Start from the supplied first frame.",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 6,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "End on the supplied last frame.",
+                },
+            ],
+        }
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        ProviderError, match="invalid frame-anchored storyboard JSON"
+    ):
+        await provider.generate_frame_anchored_video_storyboard(
+            FIRST_FRAME_URL,
+            LAST_FRAME_URL,
+            _analysis(),
+            12,
+            "9:16",
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Frame-anchored storyboard JSON validation failed" in messages
+    assert "scenes.0.frame_anchor" in messages
+    assert "response_shape" in messages
+    assert "data:image" not in messages
+    assert "DO_NOT_LOG_THIS" not in messages
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_accepts_fractional_target_scene_boundaries() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 10,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 1.5,
+                    "frame_anchor": "first_frame",
+                    "visual": "Begin from the supplied first-frame base layer.",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 1.5,
+                    "end_second": 8.5,
+                    "frame_anchor": "transition",
+                    "visual": "Carry out the adapted causal action in target timing.",
+                },
+                {
+                    "scene_index": 3,
+                    "start_second": 8.5,
+                    "end_second": 10,
+                    "frame_anchor": "last_frame",
+                    "visual": "End on the supplied last-frame base layer and its required overlay.",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        10,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].end_second == 1.5
+    assert storyboard.scenes[1].start_second == 1.5
+    assert storyboard.scenes[-1].end_second == 10
+
+
+@pytest.mark.asyncio
 async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     provider, captured = _gateway_provider_with_responses(
         {
@@ -415,7 +737,10 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "subtitle" in system_prompt
     assert "voiceover" in system_prompt
     assert "sound_effects" in system_prompt
-    assert "Do not translate or rewrite text visible in either supplied image" in system_prompt
+    assert (
+        "Do not alter or translate text that is visibly supplied by either target image"
+        in system_prompt
+    )
 
 
 @pytest.mark.asyncio
@@ -469,14 +794,21 @@ async def test_gateway_storyboard_prioritizes_target_truth_and_reference_constra
     )
 
     system_prompt = captured[0]["input"][0]["content"].lower()
-    assert "target frame truth" in system_prompt
-    assert "subject presence" in system_prompt
-    assert "required" in system_prompt
+    assert "last-frame base" in system_prompt
+    assert "behavior_graph" in system_prompt
+    assert "timeline_adaptation_plan" in system_prompt
+    assert "reference seconds" in system_prompt
+    assert "causal behavior" in system_prompt
     assert "camera" in system_prompt
     assert "transitions" in system_prompt
     assert "effects" in system_prompt
-    assert "preferred" in system_prompt
     assert "advertising objective" in system_prompt
+    assert "visual_identity_mappings" in system_prompt
+    assert "replace_with_target" in system_prompt
+    assert "morph_to_target" in system_prompt
+    assert "preserve_through_last_anchor" in system_prompt
+    assert "required final overlay" in system_prompt
+    assert "diamond" not in system_prompt
 
 
 def _gateway_provider_with_responses(
@@ -547,6 +879,14 @@ def _reference_video_analysis_data() -> dict[str, object]:
                     "visibility": "mostly_full_body",
                     "screen_position": "center",
                     "movement": "moves_forward",
+                    "appearance": (
+                        "The subject enters from the right edge behind foreground light."
+                    ),
+                    "action": (
+                        "The subject walks to center, turns toward the camera, and raises "
+                        "the target object."
+                    ),
+                    "interaction": "The gesture intensifies the surrounding gold particles.",
                 },
                 "camera": {"movement": "slow_push_in", "intensity": "medium"},
                 "transition": {
@@ -559,8 +899,11 @@ def _reference_video_analysis_data() -> dict[str, object]:
         ],
         "adapted_constraints": {
             "subject_presence": {
-                "strength": "required",
-                "instruction": "Keep the target subject present for most of the video.",
+                "strength": "preferred",
+                "instruction": (
+                    "Use reference subject staging through middle scenes, then satisfy the exact "
+                    "target endpoint anchors."
+                ),
             },
             "camera_pattern": {
                 "strength": "preferred",
@@ -572,7 +915,10 @@ def _reference_video_analysis_data() -> dict[str, object]:
             },
             "effects_pattern": {
                 "strength": "preferred",
-                "instruction": "Adapt particle accents without copying content.",
+                "instruction": (
+                    "Preserve reference visible effects through the middle unless a mapping "
+                    "replaces them."
+                ),
             },
         },
     }

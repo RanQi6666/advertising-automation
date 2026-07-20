@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.models.video_asset import VideoAsset
-from backend.app.schemas.ai import ReferenceVideoFrame
+from backend.app.schemas.ai import (
+    ReferenceVideoAnalysis,
+    ReferenceVideoFrame,
+    TimelineAdaptationBeat,
+    TimelineAdaptationPlan,
+)
 from backend.app.schemas.external_ai_generation import ExternalAIReferenceVideo
 from backend.app.services.safe_public_http import (
     SafePublicHTTPError,
@@ -24,6 +29,7 @@ from backend.app.services.video_storage_service import VideoStorageService
 
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm"}
 _SUPPORTED_VIDEO_PROBE_FORMATS = {"mp4", "mov", "webm", "matroska"}
+_FINAL_REFERENCE_FRAME_SEEK_MARGIN_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,137 @@ class PreparedReferenceVideo:
     sample_interval_seconds: float
     frames: list[ReferenceVideoFrame]
     working_dir: Path
+
+
+def adapt_reference_behavior_timeline(
+    reference: ReferenceVideoAnalysis,
+    *,
+    target_duration_seconds: float,
+) -> TimelineAdaptationPlan:
+    """Convert reference-relative behavior beats into target-generation time windows.
+
+    Reference seconds describe observed timing only.  The returned windows are a fresh,
+    non-linear target timeline: causal beats retain their order and readability, while
+    persistent reference elements may overlap the final target anchor as an overlay.
+    """
+    if target_duration_seconds <= 0:
+        raise ValueError("target_duration_seconds must be greater than zero")
+
+    graph = reference.behavior_graph
+    source_beats = sorted(
+        graph.beats if graph is not None else [],
+        key=lambda beat: (beat.reference_start_second, beat.reference_end_second, beat.beat_id),
+    )
+    if not source_beats:
+        return TimelineAdaptationPlan(
+            reference_duration_seconds=reference.duration_seconds,
+            target_duration_seconds=target_duration_seconds,
+        )
+
+    persistent_beats = [
+        beat
+        for beat in source_beats
+        if beat.behavior_type == "overlay" and beat.must_remain_visible_until_final
+    ]
+    sequential_beats = [beat for beat in source_beats if beat not in persistent_beats]
+    risks: list[str] = []
+    target_by_id: dict[str, TimelineAdaptationBeat] = {}
+
+    if sequential_beats:
+        minimum_total = sum(
+            beat.minimum_readable_duration_seconds for beat in sequential_beats
+        )
+        reference_weight_total = sum(
+            max(0.001, beat.reference_end_second - beat.reference_start_second)
+            for beat in sequential_beats
+        )
+        if minimum_total > target_duration_seconds:
+            risks.append(
+                "Target duration is shorter than the combined readable minimum for the "
+                "reference behavior chain; preserve causal order and review the render."
+            )
+            scale = target_duration_seconds / minimum_total
+            durations = [
+                beat.minimum_readable_duration_seconds * scale for beat in sequential_beats
+            ]
+        else:
+            spare = target_duration_seconds - minimum_total
+            durations = [
+                beat.minimum_readable_duration_seconds
+                + spare
+                * (max(0.001, beat.reference_end_second - beat.reference_start_second)
+                   / reference_weight_total)
+                for beat in sequential_beats
+            ]
+
+        cursor = 0.0
+        for index, (beat, duration) in enumerate(zip(sequential_beats, durations, strict=True)):
+            start = cursor
+            end = (
+                target_duration_seconds
+                if index == len(sequential_beats) - 1
+                else cursor + duration
+            )
+            for dependency_id in beat.depends_on:
+                dependency = target_by_id.get(dependency_id)
+                if dependency is not None and start < dependency.target_end_second:
+                    shift = dependency.target_end_second - start
+                    start += shift
+                    end += shift
+            if end > target_duration_seconds:
+                end = target_duration_seconds
+                start = min(start, max(0.0, end - min(duration, end)))
+            target_by_id[beat.beat_id] = TimelineAdaptationBeat(
+                beat_id=beat.beat_id,
+                description=beat.description,
+                target_start_second=start,
+                target_end_second=end,
+                importance=beat.importance,
+                depends_on=beat.depends_on,
+                locked_text=beat.locked_text,
+                adaptation_instruction=(
+                    "Keep this causal beat readable in the target timeline; use its target "
+                    "window rather than copying the observed reference seconds."
+                ),
+            )
+            cursor = end
+
+    for beat in persistent_beats:
+        relative_start = min(
+            1.0,
+            max(0.0, beat.reference_start_second / reference.duration_seconds),
+        )
+        start = relative_start * target_duration_seconds
+        for dependency_id in beat.depends_on:
+            dependency = target_by_id.get(dependency_id)
+            if dependency is not None:
+                start = max(start, dependency.target_end_second)
+        if start >= target_duration_seconds:
+            start = max(0.0, target_duration_seconds - min(
+                beat.minimum_readable_duration_seconds,
+                target_duration_seconds,
+            ))
+        target_by_id[beat.beat_id] = TimelineAdaptationBeat(
+            beat_id=beat.beat_id,
+            description=beat.description,
+            target_start_second=start,
+            target_end_second=target_duration_seconds,
+            importance=beat.importance,
+            depends_on=beat.depends_on,
+            must_remain_visible_until_final=True,
+            locked_text=beat.locked_text,
+            adaptation_instruction=(
+                "Introduce this reference element in the target window and keep it visible "
+                "as a final overlay on top of the target last-frame base layer."
+            ),
+        )
+
+    return TimelineAdaptationPlan(
+        reference_duration_seconds=reference.duration_seconds,
+        target_duration_seconds=target_duration_seconds,
+        beats=[target_by_id[beat.beat_id] for beat in source_beats],
+        adaptation_risks=risks,
+    )
 
 
 class StoryboardReferenceVideoService:
@@ -187,7 +324,7 @@ async def _probe_reference_video(
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name:format=duration,format_name",
+        "stream=codec_name,duration:format=duration,format_name",
         "-of",
         "json",
         str(source),
@@ -213,7 +350,9 @@ async def _probe_reference_video(
         data = json.loads(stdout.decode("utf-8"))
         format_data = data.get("format") or {}
         streams = data.get("streams") or []
-        duration = float(format_data.get("duration"))
+        format_duration = float(format_data.get("duration"))
+        stream_duration = float(streams[0].get("duration") or 0)
+        duration = stream_duration if stream_duration > 0 else format_duration
         format_name = str(format_data.get("format_name") or "")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ProviderError("ffprobe returned invalid reference video metadata.") from exc
@@ -248,11 +387,10 @@ async def _extract_reference_video_frame(
 ) -> Path:
     if shutil.which("ffmpeg") is None:
         raise ProviderError("ffmpeg is unavailable; reference frames cannot be extracted.")
-    seek_arguments = (
-        ["-sseof", "-0.05"]
-        if is_final
-        else ["-ss", f"{timestamp_seconds:.6f}"]
-    )
+    seek_seconds = timestamp_seconds
+    if is_final:
+        seek_seconds = max(0.0, timestamp_seconds - _FINAL_REFERENCE_FRAME_SEEK_MARGIN_SECONDS)
+    seek_arguments = ["-ss", f"{seek_seconds:.6f}"]
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",

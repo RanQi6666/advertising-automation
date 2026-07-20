@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     FrameAnchoredStoryboard,
+    TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
 )
@@ -43,6 +45,11 @@ from backend.app.services.llm_rate_limit import ExternalAIIdempotencyLock, llm_t
 from backend.app.services.storyboard_reference_video_service import (
     PreparedReferenceVideo,
     StoryboardReferenceVideoService,
+    adapt_reference_behavior_timeline,
+)
+from backend.app.services.video_final_overlay_service import (
+    FINAL_TEXT_OVERLAY_LOCKS_BEGIN,
+    FINAL_TEXT_OVERLAY_LOCKS_END,
 )
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
@@ -419,6 +426,15 @@ class ExternalAIGenerationService:
                 and frame_analysis.reference_video_analysis is None
             ):
                 raise ProviderError("Visual model did not return reference video analysis.")
+            if frame_analysis.reference_video_analysis is not None:
+                frame_analysis = frame_analysis.model_copy(
+                    update={
+                        "timeline_adaptation_plan": adapt_reference_behavior_timeline(
+                            frame_analysis.reference_video_analysis,
+                            target_duration_seconds=payload.duration_seconds,
+                        )
+                    }
+                )
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
@@ -439,7 +455,10 @@ class ExternalAIGenerationService:
             )
             return {
                 "request_id": _request_id(payload.external_request_id, task.id),
-                "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
+                "storyboard_text": _format_frame_anchored_storyboard_text(
+                    storyboard,
+                    timeline_adaptation_plan=frame_analysis.timeline_adaptation_plan,
+                ),
                 "duration_seconds": payload.duration_seconds,
                 "aspect_ratio": payload.aspect_ratio,
             }
@@ -800,7 +819,11 @@ async def _store_frame_anchored_private_metadata(
     await session.refresh(task)
 
 
-def _format_frame_anchored_storyboard_text(storyboard: FrameAnchoredStoryboard) -> str:
+def _format_frame_anchored_storyboard_text(
+    storyboard: FrameAnchoredStoryboard,
+    *,
+    timeline_adaptation_plan: TimelineAdaptationPlan | None = None,
+) -> str:
     blocks = [
         f"Duration: {storyboard.duration_seconds}s",
         f"Aspect ratio: {storyboard.aspect_ratio}",
@@ -829,15 +852,70 @@ def _format_frame_anchored_storyboard_text(storyboard: FrameAnchoredStoryboard) 
     )
     if storyboard.rationale:
         blocks.append(f"Overall direction: {storyboard.rationale}")
+    if timeline_adaptation_plan is not None and timeline_adaptation_plan.beats:
+        timeline_lines = [
+            "Target timeline adaptation (reference seconds are not generation seconds):"
+        ]
+        for beat in timeline_adaptation_plan.beats:
+            persistence = (
+                "; required final overlay on the target last-frame base layer"
+                if beat.must_remain_visible_until_final
+                else ""
+            )
+            timeline_lines.append(
+                f"- {beat.beat_id} ({beat.target_start_second:.2f}-{beat.target_end_second:.2f}s): "
+                f"{beat.description}. {beat.adaptation_instruction}{persistence}"
+            )
+        if timeline_adaptation_plan.adaptation_risks:
+            timeline_lines.append(
+                "Timing review: " + " ".join(timeline_adaptation_plan.adaptation_risks)
+            )
+        blocks.append("\n".join(timeline_lines))
+    final_text_overlay_locks = _final_text_overlay_locks(timeline_adaptation_plan)
+    if final_text_overlay_locks:
+        blocks.append(
+            "\n".join(
+                (
+                    FINAL_TEXT_OVERLAY_LOCKS_BEGIN,
+                    json.dumps(final_text_overlay_locks, ensure_ascii=False),
+                    FINAL_TEXT_OVERLAY_LOCKS_END,
+                )
+            )
+        )
     return "\n\n".join(blocks)
 
 
-def _scene_timing(start_second: int | None, end_second: int | None) -> str:
+def _final_text_overlay_locks(
+    timeline_adaptation_plan: TimelineAdaptationPlan | None,
+) -> list[dict[str, Any]]:
+    if timeline_adaptation_plan is None:
+        return []
+    return [
+        {
+            "kind": "text",
+            "text": beat.locked_text,
+            "show_from_second": round(beat.target_start_second, 3),
+            "placement": "lower_center",
+        }
+        for beat in timeline_adaptation_plan.beats
+        if beat.must_remain_visible_until_final and beat.locked_text
+    ]
+
+
+def _scene_timing(start_second: float | None, end_second: float | None) -> str:
     if start_second is None and end_second is None:
         return "timing not specified"
-    start = start_second if start_second is not None else "?"
-    end = end_second if end_second is not None else "?"
+    start = _format_timeline_second(start_second)
+    end = _format_timeline_second(end_second)
     return f"{start}-{end}s"
+
+
+def _format_timeline_second(value: float | None) -> str:
+    if value is None:
+        return "?"
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def _request_id(external_request_id: str | None, task_id: str) -> str:

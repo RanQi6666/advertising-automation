@@ -23,6 +23,9 @@ from backend.app.schemas.external_video_generation import (
 from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
 from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
 from backend.app.services.image_storage_service import ImageStorageService
+from backend.app.services.video_final_overlay_service import (
+    extract_final_text_overlay_locks,
+)
 from backend.app.services.video_service import VideoService
 
 VIDEO_START_RETRY_DELAYS_SECONDS = (0.2, 0.5)
@@ -68,6 +71,11 @@ class ExternalVideoGenerationService:
                 await session.refresh(existing)
                 return self._job_read(existing), retry_task
             return self._job_read(existing), None
+
+        final_text_overlay_locks = extract_final_text_overlay_locks(
+            storyboard_text,
+            duration_seconds=payload.duration_seconds,
+        )
 
         decoded_images = [_decode_base64_image(image) for image in payload.images]
         max_bytes = self.image_storage.settings.image_download_max_bytes
@@ -147,13 +155,15 @@ class ExternalVideoGenerationService:
                     "storyboard_text": storyboard_text,
                     "duration_seconds": payload.duration_seconds,
                     "aspect_ratio": payload.aspect_ratio,
+                    "final_text_overlay_locks": final_text_overlay_locks,
                     "implementation_status": "configured",
                 },
             )
             session.add(video)
             await session.flush()
 
-            # create_task 会提交当前 session；调度前必须让独立 worker 看见 video 和 task。
+            # create_task commits the session. The worker must see the video
+            # and task before dispatch.
             task = await self.task_service.create_task(
                 session,
                 queue_name=VIDEO_QUEUE_NAME,

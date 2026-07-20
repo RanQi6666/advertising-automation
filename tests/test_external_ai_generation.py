@@ -28,6 +28,8 @@ from backend.app.schemas.ai import (
     FrameTransitionBrief,
     FrameVisualFacts,
     ReferenceAdaptedConstraints,
+    ReferenceBehaviorBeat,
+    ReferenceBehaviorGraph,
     ReferenceCameraPattern,
     ReferenceConstraint,
     ReferenceSubjectPresence,
@@ -35,7 +37,10 @@ from backend.app.schemas.ai import (
     ReferenceVideoAnalysis,
     ReferenceVideoFrame,
     ReferenceVideoSegment,
+    ReferenceVisualIdentityMapping,
     StoryboardSoundDesign,
+    TimelineAdaptationBeat,
+    TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
@@ -230,6 +235,14 @@ class FakeExternalAILLM:
                                 visibility="continuous",
                                 screen_position="center",
                                 movement="forward",
+                                appearance=(
+                                    "The subject enters from the right behind foreground light."
+                                ),
+                                action=(
+                                    "The subject moves to center, turns toward the camera, "
+                                    "and raises the target object."
+                                ),
+                                interaction="The gesture intensifies the surrounding particles.",
                             ),
                             camera=ReferenceCameraPattern(
                                 movement="slow push-in",
@@ -243,10 +256,50 @@ class FakeExternalAILLM:
                             confidence="high",
                         )
                     ],
+                    visual_identity_mappings=[
+                        ReferenceVisualIdentityMapping(
+                            reference_element="reward panel",
+                            element_type="reward",
+                            strategy="preserve_through_last_anchor",
+                            instruction=(
+                                "Keep the reward panel readable as a final overlay on the target "
+                                "last-frame base layer."
+                            ),
+                        )
+                    ],
+                    behavior_graph=ReferenceBehaviorGraph(
+                        entities=["subject", "target object", "reward panel"],
+                        beats=[
+                            ReferenceBehaviorBeat(
+                                beat_id="approach",
+                                reference_start_second=0,
+                                reference_end_second=3,
+                                description="The subject approaches the target object.",
+                                visible_evidence=["subject", "target object"],
+                                importance="core",
+                                minimum_readable_duration_seconds=1,
+                            ),
+                            ReferenceBehaviorBeat(
+                                beat_id="reward_overlay",
+                                reference_start_second=4,
+                                reference_end_second=5.8,
+                                description="The reward panel appears and remains visible.",
+                                visible_evidence=["reward panel"],
+                                behavior_type="overlay",
+                                importance="supporting",
+                                minimum_readable_duration_seconds=1,
+                                depends_on=["approach"],
+                                must_remain_visible_until_final=True,
+                            ),
+                        ],
+                    ),
                     adapted_constraints=ReferenceAdaptedConstraints(
                         subject_presence=ReferenceConstraint(
-                            strength="required",
-                            instruction="Keep the target subject present for most of the video.",
+                            strength="preferred",
+                            instruction=(
+                                "Adapt the reference subject staging and action only when the "
+                                "target frames confirm a compatible subject."
+                            ),
                         ),
                         camera_pattern=ReferenceConstraint(
                             strength="preferred",
@@ -282,8 +335,10 @@ class FakeExternalAILLM:
         if frame_analysis.reference_video_analysis is not None:
             assert (
                 frame_analysis.reference_video_analysis.adapted_constraints.subject_presence.strength
-                == "required"
+                == "preferred"
             )
+            assert frame_analysis.timeline_adaptation_plan is not None
+            assert frame_analysis.timeline_adaptation_plan.beats[-1].must_remain_visible_until_final
         return FrameAnchoredStoryboard(
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
@@ -838,6 +893,11 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     assert created.status_code == 202
     assert polled.status_code == 200
     assert poll_data["status"] == "succeeded"
+    assert "Target timeline adaptation" in poll_data["storyboard_text"]
+    assert (
+        "required final overlay on the target last-frame base layer"
+        in poll_data["storyboard_text"]
+    )
     assert "reference_video_analysis" not in poll_data
     assert "reference_frames" not in poll_data
     assert fake_llm.calls == [
@@ -850,7 +910,10 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
         assert task is not None
         assert task.metadata_json["frame_analysis"]["reference_video_analysis"][
             "adapted_constraints"
-        ]["subject_presence"]["strength"] == "required"
+        ]["subject_presence"]["strength"] == "preferred"
+        assert task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
+            "must_remain_visible_until_final"
+        ] is True
     await engine.dispose()
 
 
@@ -1224,3 +1287,50 @@ async def test_external_ai_polling_reads_terminal_result_from_cache_when_db_miss
     assert body["code"] == 0
     assert body["data"]["job_id"] == job_id
     assert body["data"]["copywritings"]
+
+
+def test_frame_anchored_storyboard_exports_machine_readable_final_text_lock() -> None:
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=9.35,
+                frame_anchor="first_frame",
+                visual="Begin from the provided first frame.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=9.35,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Arrive at the provided final frame.",
+            ),
+        ],
+    )
+    plan = TimelineAdaptationPlan(
+        reference_duration_seconds=10,
+        target_duration_seconds=10,
+        beats=[
+            TimelineAdaptationBeat(
+                beat_id="final_reward",
+                description="The reward text holds through the final frame.",
+                target_start_second=9.35,
+                target_end_second=10,
+                must_remain_visible_until_final=True,
+                locked_text="x200,000",
+                adaptation_instruction="Keep the overlay through the final frame.",
+            )
+        ],
+    )
+
+    text = external_ai_service_module._format_frame_anchored_storyboard_text(
+        storyboard,
+        timeline_adaptation_plan=plan,
+    )
+
+    assert "[FINAL_TEXT_OVERLAY_LOCKS]" in text
+    assert '"text": "x200,000"' in text
+    assert '"show_from_second": 9.35' in text

@@ -134,6 +134,13 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
             ) from exc
         return _extract_response_text(response.json())
 
+    async def _vision_json_completion(self, system: str, user: Any) -> dict[str, Any]:
+        return await self._json_completion(
+            system,
+            user,
+            timeout_seconds=self.timeout_seconds,
+        )
+
     async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:
         is_operator_result = _uses_facebook_operator_result(context)
         data = await self._json_completion(

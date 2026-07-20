@@ -350,6 +350,122 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
 
 
 @pytest.mark.asyncio
+async def test_external_video_generation_persists_final_text_overlay_locks_from_storyboard(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        lambda *args, **kwargs: None,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    storyboard_text = "\n".join(
+        (
+            "The final reward is held over the last frame.",
+            "[FINAL_TEXT_OVERLAY_LOCKS]",
+            '[{"kind":"text","text":"x200,000","show_from_second":9.35,"placement":"lower_center"}]',
+            "[/FINAL_TEXT_OVERLAY_LOCKS]",
+        )
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id="video-final-text-lock",
+                duration_seconds=10,
+                storyboard_text=storyboard_text,
+            ),
+        )
+        job_id = response.json()["data"]["job_id"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    async with session_factory() as session:
+        video = await session.get(VideoAsset, job_id)
+
+    assert video is not None
+    assert video.metadata_json["final_text_overlay_locks"] == [
+        {
+            "kind": "text",
+            "text": "x200,000",
+            "show_from_second": 9.35,
+            "placement": "lower_center",
+        }
+    ]
+    await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_video_transfer_applies_persisted_final_text_overlay_locks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "video-final-overlay-transfer.db")
+    storage_path = tmp_path / "storage" / "videos" / "overlay-test" / "provider.mp4"
+    storage_path.parent.mkdir(parents=True)
+    storage_path.write_bytes(b"saved-provider-video")
+    calls: list[tuple[object, list[dict[str, object]]]] = []
+
+    async def fake_apply_final_text_overlay_locks(video_path, *, overlays):
+        calls.append((video_path, overlays))
+        return overlays
+
+    monkeypatch.setattr(
+        video_service_module,
+        "apply_final_text_overlay_locks",
+        fake_apply_final_text_overlay_locks,
+        raising=False,
+    )
+    async with session_factory() as session:
+        campaign = Campaign(name="Overlay transfer campaign")
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            storage_key="local://videos/overlay-test/provider.mp4",
+            status=VideoStatus.GENERATED.value,
+            metadata_json={
+                "final_text_overlay_locks": [
+                    {
+                        "kind": "text",
+                        "text": "x200,000",
+                        "show_from_second": 9.35,
+                        "placement": "lower_center",
+                    }
+                ]
+            },
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+
+        transferred = await VideoService().transfer_completed_video(session, video.id)
+
+    assert calls == [
+        (
+            storage_path,
+            [
+                {
+                    "kind": "text",
+                    "text": "x200,000",
+                    "show_from_second": 9.35,
+                    "placement": "lower_center",
+                }
+            ],
+        )
+    ]
+    assert transferred.metadata_json["final_text_overlay_status"] == "applied"
+    await engine.dispose()
+
+@pytest.mark.asyncio
 async def test_external_video_generation_start_task_then_polling_returns_url(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

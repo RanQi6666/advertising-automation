@@ -89,6 +89,9 @@ class ReferenceSubjectPresence(BaseModel):
     visibility: str = ""
     screen_position: str = ""
     movement: str = ""
+    appearance: str = ""
+    action: str = ""
+    interaction: str = ""
 
 
 class ReferenceCameraPattern(BaseModel):
@@ -111,6 +114,97 @@ class ReferenceVideoSegment(BaseModel):
     confidence: str = ""
 
 
+class ReferenceBehaviorBeat(BaseModel):
+    beat_id: str = Field(min_length=1)
+    reference_start_second: float = Field(ge=0)
+    reference_end_second: float = Field(gt=0)
+    description: str = Field(min_length=1)
+    visible_evidence: list[str] = Field(default_factory=list)
+    behavior_type: Literal["action", "state", "overlay"] = "action"
+    importance: Literal["core", "supporting", "decorative"] = "supporting"
+    minimum_readable_duration_seconds: float = Field(default=0.5, gt=0)
+    depends_on: list[str] = Field(default_factory=list)
+    must_remain_visible_until_final: bool = False
+    locked_text: str | None = None
+
+    @model_validator(mode="after")
+    def validate_reference_window(self) -> "ReferenceBehaviorBeat":
+        if self.reference_end_second <= self.reference_start_second:
+            raise ValueError("reference behavior beat end must be after its start")
+        if self.must_remain_visible_until_final and self.behavior_type != "overlay":
+            raise ValueError("only visual overlays may remain visible until the final frame")
+        if self.locked_text and self.behavior_type != "overlay":
+            raise ValueError("only visual overlays may define locked text")
+        return self
+
+
+class ReferenceBehaviorGraph(BaseModel):
+    entities: list[str] = Field(default_factory=list)
+    beats: list[ReferenceBehaviorBeat] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_dependencies(self) -> "ReferenceBehaviorGraph":
+        beat_ids = [beat.beat_id for beat in self.beats]
+        if len(beat_ids) != len(set(beat_ids)):
+            raise ValueError("reference behavior beat ids must be unique")
+        known_ids = set(beat_ids)
+        for beat in self.beats:
+            unknown_dependencies = set(beat.depends_on) - known_ids
+            if unknown_dependencies:
+                raise ValueError("reference behavior beat dependencies must reference known beats")
+        return self
+
+
+class TimelineAdaptationBeat(BaseModel):
+    beat_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    target_start_second: float = Field(ge=0)
+    target_end_second: float = Field(gt=0)
+    importance: Literal["core", "supporting", "decorative"] = "supporting"
+    depends_on: list[str] = Field(default_factory=list)
+    must_remain_visible_until_final: bool = False
+    locked_text: str | None = None
+    adaptation_instruction: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_target_window(self) -> "TimelineAdaptationBeat":
+        if self.target_end_second <= self.target_start_second:
+            raise ValueError("target timeline beat end must be after its start")
+        return self
+
+
+class TimelineAdaptationPlan(BaseModel):
+    reference_duration_seconds: float = Field(gt=0)
+    target_duration_seconds: float = Field(gt=0)
+    beats: list[TimelineAdaptationBeat] = Field(default_factory=list)
+    adaptation_risks: list[str] = Field(default_factory=list)
+
+
+class ReferenceVisualIdentityMapping(BaseModel):
+    reference_element: str = Field(min_length=1)
+    element_type: Literal[
+        "character",
+        "appearance",
+        "prop",
+        "product",
+        "brand",
+        "text",
+        "reward",
+        "setting",
+        "other",
+    ] = "other"
+    strategy: Literal[
+        "preserve",
+        "replace_with_target",
+        "morph_to_target",
+        "endpoint_only",
+        "preserve_through_last_anchor",
+    ]
+    target_first_frame_equivalent: str | None = None
+    target_last_frame_equivalent: str | None = None
+    instruction: str = Field(min_length=1)
+
+
 class ReferenceConstraint(BaseModel):
     strength: Literal["required", "preferred"]
     instruction: str = Field(min_length=1)
@@ -124,15 +218,14 @@ class ReferenceAdaptedConstraints(BaseModel):
 
     @model_validator(mode="after")
     def validate_strengths(self) -> "ReferenceAdaptedConstraints":
-        if self.subject_presence.strength != "required":
-            raise ValueError("reference subject presence must be required")
         for constraint in (
+            self.subject_presence,
             self.camera_pattern,
             self.transition_pattern,
             self.effects_pattern,
         ):
             if constraint.strength != "preferred":
-                raise ValueError("reference presentation constraints must be preferred")
+                raise ValueError("reference video constraints must be preferred")
         return self
 
 
@@ -140,7 +233,9 @@ class ReferenceVideoAnalysis(BaseModel):
     duration_seconds: float = Field(gt=0, le=30)
     sample_interval_seconds: float = Field(gt=0)
     segments: list[ReferenceVideoSegment] = Field(min_length=1)
+    visual_identity_mappings: list[ReferenceVisualIdentityMapping] = Field(default_factory=list)
     adapted_constraints: ReferenceAdaptedConstraints
+    behavior_graph: ReferenceBehaviorGraph | None = None
 
 
 class FrameAnalysis(BaseModel):
@@ -149,6 +244,7 @@ class FrameAnalysis(BaseModel):
     transition_brief: FrameTransitionBrief
     language_analysis: FrameLanguageAnalysis
     reference_video_analysis: ReferenceVideoAnalysis | None = None
+    timeline_adaptation_plan: TimelineAdaptationPlan | None = None
 
 
 class StoryboardSoundDesign(BaseModel):
@@ -158,8 +254,10 @@ class StoryboardSoundDesign(BaseModel):
 
 class FrameAnchoredStoryboardScene(BaseModel):
     scene_index: int
-    start_second: int | None = None
-    end_second: int | None = None
+    # Target scene windows may use sub-second boundaries after adapting a reference
+    # video's observed behavior to a different requested duration.
+    start_second: float | None = None
+    end_second: float | None = None
     frame_anchor: Literal["first_frame", "transition", "last_frame"]
     visual: str
     motion: str | None = None

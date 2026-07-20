@@ -6,6 +6,11 @@ import pytest
 from backend.app.core.config import Settings
 from backend.app.core.errors import AppError, ProviderError
 from backend.app.db.models.video_asset import VideoAsset
+from backend.app.schemas.ai import (
+    ReferenceBehaviorBeat,
+    ReferenceBehaviorGraph,
+    ReferenceVideoAnalysis,
+)
 from backend.app.schemas.external_ai_generation import (
     ExternalAIReferenceVideoAsset,
     ExternalAIReferenceVideoUpload,
@@ -14,7 +19,10 @@ from backend.app.schemas.external_ai_generation import (
 from backend.app.services.safe_public_http import DownloadedFile
 from backend.app.services.storyboard_reference_video_service import (
     StoryboardReferenceVideoService,
+    _extract_reference_video_frame,
+    _probe_reference_video,
     _reference_frame_timestamps,
+    adapt_reference_behavior_timeline,
 )
 from backend.app.services.video_storage_service import VideoStorageService
 
@@ -337,3 +345,208 @@ def test_existing_video_asset_prefers_local_storage_key_over_url(
 
     assert prepared.duration_seconds == 2.0
     assert [frame.timestamp_seconds for frame in prepared.frames] == [0.0, 2.0]
+
+
+def test_reference_video_probe_prefers_video_stream_duration_over_longer_audio(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b'{"streams":[{"codec_name":"h264","duration":"10.066667"}],"format":{"duration":"10.192154","format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}',
+                b"",
+            )
+
+    async def fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.shutil.which",
+        lambda _name: "/usr/bin/ffprobe",
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    metadata = asyncio.run(
+        _probe_reference_video(tmp_path / "reference.mp4", timeout_seconds=10)
+    )
+
+    assert metadata["duration_seconds"] == 10.066667
+
+
+def test_final_reference_frame_seeks_before_video_end_not_container_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[str] = []
+    destination = tmp_path / "final.jpg"
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            destination.write_bytes(b"jpeg")
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args: object, **_kwargs: object) -> FakeProcess:
+        captured.extend(str(argument) for argument in args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.shutil.which",
+        lambda _name: "/usr/bin/ffmpeg",
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    extracted = asyncio.run(
+        _extract_reference_video_frame(
+            tmp_path / "reference.mp4",
+            destination,
+            10.066667,
+            is_final=True,
+            width=768,
+            jpeg_quality=4,
+            timeout_seconds=15,
+        )
+    )
+
+    assert extracted == destination
+    assert "-sseof" not in captured
+    assert captured[captured.index("-ss") + 1] == "10.016667"
+
+
+def test_timeline_adaptation_preserves_causal_order_and_final_overlay() -> None:
+    reference = ReferenceVideoAnalysis.model_validate(
+        {
+            "duration_seconds": 10,
+            "sample_interval_seconds": 2,
+            "segments": [
+                {
+                    "start_second": 0,
+                    "end_second": 10,
+                    "subject_presence": {},
+                    "camera": {},
+                    "transition": {},
+                }
+            ],
+            "adapted_constraints": {
+                name: {"strength": "preferred", "instruction": "adapt when compatible"}
+                for name in (
+                    "subject_presence",
+                    "camera_pattern",
+                    "transition_pattern",
+                    "effects_pattern",
+                )
+            },
+            "behavior_graph": ReferenceBehaviorGraph(
+                entities=["performer", "handheld tool", "target object", "reward panel"],
+                beats=[
+                    ReferenceBehaviorBeat(
+                        beat_id="approach",
+                        reference_start_second=0,
+                        reference_end_second=3,
+                        description="The performer approaches the target with the tool.",
+                        visible_evidence=["performer", "tool", "target"],
+                        importance="core",
+                        minimum_readable_duration_seconds=1.5,
+                    ),
+                    ReferenceBehaviorBeat(
+                        beat_id="contact",
+                        reference_start_second=3,
+                        reference_end_second=5,
+                        description="The tool contacts the target and causes a visible change.",
+                        visible_evidence=["contact", "target change"],
+                        importance="core",
+                        minimum_readable_duration_seconds=1.25,
+                        depends_on=["approach"],
+                    ),
+                    ReferenceBehaviorBeat(
+                        beat_id="reward_overlay",
+                        reference_start_second=7,
+                        reference_end_second=10,
+                        description="A reward panel appears and remains visible.",
+                        visible_evidence=["reward panel"],
+                        behavior_type="overlay",
+                        importance="supporting",
+                        minimum_readable_duration_seconds=1,
+                        must_remain_visible_until_final=True,
+                    ),
+                ],
+            ),
+        }
+    )
+
+    plan = adapt_reference_behavior_timeline(reference, target_duration_seconds=6)
+
+    by_id = {beat.beat_id: beat for beat in plan.beats}
+    assert by_id["approach"].target_start_second < by_id["contact"].target_start_second
+    assert by_id["approach"].target_end_second <= by_id["contact"].target_start_second
+    assert by_id["approach"].target_end_second - by_id["approach"].target_start_second >= 1.5
+    assert by_id["contact"].target_end_second - by_id["contact"].target_start_second >= 1.25
+    assert by_id["reward_overlay"].target_end_second == 6
+    assert by_id["reward_overlay"].must_remain_visible_until_final is True
+
+def test_reference_behavior_only_allows_a_visual_overlay_to_lock_the_final_frame() -> None:
+    with pytest.raises(ValueError, match="only visual overlays"):
+        ReferenceBehaviorBeat(
+            beat_id="strike",
+            reference_start_second=3,
+            reference_end_second=5,
+            description="The hero strikes the target.",
+            behavior_type="action",
+            must_remain_visible_until_final=True,
+        )
+
+
+def test_timeline_adaptation_carries_exact_locked_text_for_final_overlay() -> None:
+    reference = ReferenceVideoAnalysis.model_validate(
+        {
+            "duration_seconds": 10,
+            "sample_interval_seconds": 2,
+            "segments": [
+                {
+                    "start_second": 0,
+                    "end_second": 10,
+                    "subject_presence": {},
+                    "camera": {},
+                    "transition": {},
+                }
+            ],
+            "adapted_constraints": {
+                name: {"strength": "preferred", "instruction": "adapt when compatible"}
+                for name in (
+                    "subject_presence",
+                    "camera_pattern",
+                    "transition_pattern",
+                    "effects_pattern",
+                )
+            },
+            "behavior_graph": {
+                "entities": ["reward text"],
+                "beats": [
+                    {
+                        "beat_id": "final_reward",
+                        "reference_start_second": 9,
+                        "reference_end_second": 10,
+                        "description": "The reward text appears and holds.",
+                        "behavior_type": "overlay",
+                        "locked_text": "x200,000",
+                        "must_remain_visible_until_final": True,
+                    }
+                ],
+            },
+        }
+    )
+
+    plan = adapt_reference_behavior_timeline(reference, target_duration_seconds=6)
+
+    assert plan.beats[0].must_remain_visible_until_final is True
+    assert plan.beats[0].locked_text == "x200,000"
