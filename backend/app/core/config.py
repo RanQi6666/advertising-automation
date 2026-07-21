@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
+    ad_research_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    ad_research_model_concurrency: int = Field(default=6, ge=1, le=64)
+    ad_research_model: str = "gpt-5.4-mini"
+    ad_research_model_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
+    ad_research_model_lease_seconds: int = Field(default=90, ge=10, le=600)
+    ad_research_collector_base_url: str = "http://meta_ads_collector:8090"
+    ad_research_collector_timeout_seconds: float = Field(default=120.0, ge=5, le=600)
     generation_task_target_concurrent_users: int = Field(default=30, ge=1, le=1000)
     generation_runtime_monitor_timeout_seconds: float = Field(default=1.0, ge=0.1, le=10)
     generation_runtime_monitor_cache_seconds: float = Field(default=2.0, ge=0, le=30)

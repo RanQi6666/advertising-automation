@@ -9,6 +9,7 @@ from celery.signals import worker_process_shutdown
 from backend.app.core.config import get_settings
 from backend.app.db.session import AsyncSessionLocal
 from backend.app.services.ad_generation_service import AdGenerationService
+from backend.app.services.ad_research_service import AdResearchService
 from backend.app.services.generation_task_dispatcher import schedule_generation_task_id
 from backend.app.services.generation_task_service import GenerationTaskService
 from backend.app.worker.celery_app import celery_app
@@ -26,6 +27,31 @@ def process_generation_task(task_id: str) -> None:
 @celery_app.task(name="ad_generation_jobs.process", ignore_result=True)
 def process_ad_generation_job(job_id: str) -> None:
     _run_async(AdGenerationService().run_job(job_id))
+
+
+@celery_app.task(name="ad_research_jobs.process", ignore_result=True)
+def process_ad_research_job(task_id: str) -> None:
+    _run_async(_process_ad_research_job(task_id))
+
+
+async def _process_ad_research_job(task_id: str) -> None:
+    from backend.app.db.models.generation_task import GenerationTask
+    from backend.app.services.ad_research_orchestrator import AdResearchOrchestrator
+
+    async with AsyncSessionLocal() as session:
+        task = await session.get(GenerationTask, task_id)
+        if task is not None:
+            await AdResearchOrchestrator().execute_task(session, task)
+
+
+@celery_app.task(name="ad_research_jobs.cleanup_expired", ignore_result=True)
+def cleanup_expired_ad_research_jobs() -> None:
+    _run_async(_cleanup_expired_ad_research_jobs())
+
+
+async def _cleanup_expired_ad_research_jobs() -> None:
+    async with AsyncSessionLocal() as session:
+        await AdResearchService().cleanup_expired_results(session)
 
 
 @celery_app.task(name="generation_tasks.recover_stale", ignore_result=True)
