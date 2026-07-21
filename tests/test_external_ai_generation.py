@@ -21,7 +21,9 @@ from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorBeat,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
@@ -320,6 +322,45 @@ class FakeExternalAILLM:
             ),
         )
 
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        self.calls.append("direct_frame_anchored_video_storyboard")
+        assert first_frame_image_url.endswith("first.png")
+        assert last_frame_image_url.endswith("last.png")
+        assert duration_seconds == 12
+        assert aspect_ratio == "9:16"
+        if frame_analysis.reference_video_analysis is not None:
+            assert frame_analysis.timeline_adaptation_plan is not None
+        return FrameAnchoredDirectorPlan(
+            narrative_objective="Drive the observed action to a distinct visible result.",
+            attention_path=["opening", "action", "impact", "ending"],
+            tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+            climax_beats=[
+                DirectorBeat(
+                    beat_id="causal_peak",
+                    stage="climax",
+                    source_evidence=["The analyzed transition contains a visible causal action."],
+                    start_ratio=0.4,
+                    end_ratio=0.72,
+                    attention_objective="Focus attention on the action result.",
+                    camera_instruction="Use an in-shot push and reframing at impact.",
+                    action_requirement="Show the action before its visible result.",
+                    effect_requirement="Peak the observed effect at the visible impact.",
+                    importance="core",
+                )
+            ],
+            anchor_adaptation_plan=["Resolve to the supplied last-frame composition."],
+            anti_flattening_constraints=[
+                "Keep trigger, action, impact, and ending as distinct readable phases."
+            ],
+        )
+
     async def generate_frame_anchored_video_storyboard(
         self,
         first_frame_image_url: str,
@@ -332,6 +373,7 @@ class FakeExternalAILLM:
         assert first_frame_image_url.endswith("first.png")
         assert last_frame_image_url.endswith("last.png")
         assert frame_analysis.first_frame.visible_text == ["START"]
+        assert frame_analysis.director_plan is not None
         if frame_analysis.reference_video_analysis is not None:
             assert (
                 frame_analysis.reference_video_analysis.adapted_constraints.subject_presence.strength
@@ -363,6 +405,12 @@ class FakeExternalAILLM:
                     transition_goal="Bridge the supplied frames.",
                     voiceover="Optional narration.",
                     sound_effects=["movement swish"],
+                    cinematic_beat="causal_peak",
+                    camera_instruction="Use an in-shot push and reframing at impact.",
+                    tension_stage="climax",
+                    action_result_requirement="Show the action before its visible result.",
+                    effect_timing="Peak the observed effect at the visible impact.",
+                    anti_flattening_requirement="Keep impact distinct from the final resolution.",
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=3,
@@ -796,10 +844,13 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     assert poll_body["data"]["duration_seconds"] == 12
     assert poll_body["data"]["aspect_ratio"] == "9:16"
     assert "Scene 1" in poll_body["data"]["storyboard_text"]
+    assert "Cinematic beat: causal_peak" in poll_body["data"]["storyboard_text"]
     assert "frame_analysis" not in poll_body["data"]
+    assert "director_plan" not in poll_body["data"]
     assert "storyboard" not in poll_body["data"]
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
+        "direct_frame_anchored_video_storyboard",
         "generate_frame_anchored_video_storyboard",
     ]
 
@@ -811,6 +862,8 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         assert task.campaign_id is None
         assert task.metadata_json is not None
         assert task.metadata_json["frame_analysis"]["first_frame"]["visible_text"] == ["START"]
+        director_plan = task.metadata_json["frame_analysis"]["director_plan"]
+        assert director_plan["climax_beats"][0]["beat_id"] == "causal_peak"
         first_scene = task.metadata_json["frame_anchored_storyboard"]["scenes"][0]
         assert first_scene["frame_anchor"] == "first_frame"
 
@@ -902,6 +955,7 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     assert "reference_frames" not in poll_data
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
+        "direct_frame_anchored_video_storyboard",
         "generate_frame_anchored_video_storyboard",
     ]
 

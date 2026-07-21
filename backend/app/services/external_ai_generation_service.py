@@ -18,6 +18,7 @@ from backend.app.schemas.ai import (
     TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
+    validate_director_coverage,
 )
 from backend.app.schemas.external_ai_generation import (
     ExternalAICopyGenerationCreate,
@@ -430,6 +431,17 @@ class ExternalAIGenerationService:
                         )
                     }
                 )
+            async with llm_text_rate_limiter():
+                director_plan = await llm.direct_frame_anchored_video_storyboard(
+                    first_frame_image_url=payload.first_frame_image_url,
+                    last_frame_image_url=payload.last_frame_image_url,
+                    frame_analysis=frame_analysis,
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                )
+            frame_analysis = frame_analysis.model_copy(
+                update={"director_plan": director_plan}
+            )
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
@@ -443,6 +455,12 @@ class ExternalAIGenerationService:
                     duration_seconds=payload.duration_seconds,
                     aspect_ratio=payload.aspect_ratio,
                 )
+            try:
+                validate_director_coverage(storyboard, frame_analysis.director_plan)
+            except ValueError as exc:
+                raise ProviderError(
+                    "LLM storyboard does not cover the required director climax beats."
+                ) from exc
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
@@ -830,12 +848,26 @@ def _format_frame_anchored_storyboard_text(
             f"Scene {scene_index} ({timing})",
             f"Anchor: {scene.frame_anchor}",
             f"Visual: {scene.visual}",
+            f"Cinematic beat: {scene.cinematic_beat or '-'}",
+            f"Tension stage: {scene.tension_stage or '-'}",
             f"Camera and motion: {scene.motion or '-'}",
+            f"Camera instruction: {scene.camera_instruction or '-'}",
             f"Transition goal: {scene.transition_goal or '-'}",
+            f"Action-result requirement: {scene.action_result_requirement or '-'}",
+            f"Effect timing: {scene.effect_timing or '-'}",
+            f"Anti-flattening requirement: {scene.anti_flattening_requirement or '-'}",
             f"Subtitle: {scene.subtitle or '-'}",
             f"Voiceover: {scene.voiceover or '-'}",
             f"Sound effects: {', '.join(scene.sound_effects) or '-'}",
         ]
+        if scene.overlay_instruction is not None:
+            overlay = scene.overlay_instruction
+            lines.append(
+                "Overlay lifecycle: "
+                f"{overlay.reference_element} -> {overlay.strategy}; "
+                f"timing: {overlay.timing_instruction}; "
+                f"final frame: {overlay.final_frame_requirement}"
+            )
         if scene.notes:
             lines.append(f"Notes: {scene.notes}")
         blocks.append("\n".join(lines))

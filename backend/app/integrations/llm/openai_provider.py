@@ -24,6 +24,7 @@ from backend.app.schemas.ad_performance import AdPerformanceOptimizationWorkOrde
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     ImageBrief,
     ReferenceVideoFrame,
@@ -522,6 +523,28 @@ class OpenAILLMProvider:
             ),
         )
         return _frame_analysis_from_data(data)
+
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        data = await self._vision_json_completion(
+            system=_frame_anchored_director_system_prompt(),
+            user=_frame_pair_user_content(
+                first_frame_image_url,
+                last_frame_image_url,
+                {
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                    "frame_analysis": frame_analysis.model_dump(mode="json"),
+                },
+            ),
+        )
+        return _frame_anchored_director_plan_from_data(data)
 
     async def generate_frame_anchored_video_storyboard(
         self,
@@ -1837,6 +1860,41 @@ def _frame_analysis_system_prompt() -> str:
     )
 
 
+def _frame_anchored_director_system_prompt() -> str:
+    return (
+        "You are the director of a high-end game cinematic and commercial film. Create a private "
+        "evidence-backed director plan for one frame-anchored generated video. Return valid JSON "
+        "only with narrative_objective, attention_path, tension_curve, climax_beats, "
+        "overlay_lifecycle_plan, anchor_adaptation_plan, and anti_flattening_constraints. "
+        "First distinguish observed evidence from director inference: source_evidence for every "
+        "climax beat must describe visible facts from the supplied target frames or the supplied "
+        "reference-video analysis; all camera, timing, performance, and effects proposals are "
+        "director inference grounded in that evidence. Do not present an unsupported inference as "
+        "an observed fact. The supplied first frame is the exact opening visual anchor and the "
+        "supplied last frame is the exact final visual anchor, including its visible composition, "
+        "text, brand, product, reward, character appearance, and setting. Reference-video analysis "
+        "can transfer observed action, action-result causality, entry or staging, camera language, "
+        "timing, effects timing, and overlay lifecycle. Do not copy a reference-specific identity, "
+        "brand, logo, product, character, text, reward, or setting unless its equivalent is "
+        "visibly "
+        "provided by a target frame or the existing visual identity mapping explicitly permits it. "
+        "Plan the experience as one generated clip: camera changes, reframing, push-ins, reveals, "
+        "or viewpoint changes must happen in-shot. Do not require post-production editing, multi-"
+        "segment generation, stitching, or external compositing. Build a tension_curve in "
+        "ascending "
+        "setup, trigger, escalation, climax, resolution order. Include one or more evidence-backed "
+        "climax_beats. Each climax beat must have a stable beat_id, a 0-to-1 start_ratio and "
+        "end_ratio, source_evidence, attention_objective, camera_instruction, action_requirement, "
+        "effect_requirement, importance, and dependency ids when needed. Core beats must separate "
+        "cause, action, impact, and visible result rather than flattening them into a generic "
+        "continuous move. For each observed overlay or UI element, decide dynamically whether to "
+        "inherit it, replace it with the target equivalent, persist it to the final frame, or omit "
+        "it; state the final-frame requirement without inventing a fixed overlay rule. Provide "
+        "non-empty anti_flattening_constraints that preserve causal readability, the effect peak, "
+        "and the ending anchor."
+    )
+
+
 def _frame_anchored_storyboard_system_prompt() -> str:
     return (
         "You create a frame-anchored video storyboard from two supplied endpoint images "
@@ -2203,6 +2261,20 @@ def _reference_constraint_from_data(value: Any, *, strength: str) -> dict[str, s
         "strength": strength,
         "instruction": _coerce_text(instruction),
     }
+
+
+def _frame_anchored_director_plan_from_data(
+    data: dict[str, Any],
+) -> FrameAnchoredDirectorPlan:
+    try:
+        return FrameAnchoredDirectorPlan.model_validate(data)
+    except ValidationError as exc:
+        logger.warning(
+            "Frame-anchored director-plan JSON validation failed: errors=%s response_shape=%s",
+            _frame_analysis_validation_errors(exc),
+            _frame_analysis_response_shape(data),
+        )
+        raise ProviderError("LLM returned invalid frame-anchored director-plan JSON.") from exc
 
 
 def _frame_anchored_storyboard_from_data(

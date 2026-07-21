@@ -8,6 +8,7 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     ImageBrief,
     ReferenceVideoFrame,
@@ -94,6 +95,16 @@ class LLMProvider(Protocol):
         reference_video_sample_interval_seconds: float | None = None,
     ) -> FrameAnalysis:
         """Analyze exact endpoint images and optional chronological reference frames."""
+
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        """Create a private evidence-backed cinematic director plan for one generated clip."""
 
     async def generate_frame_anchored_video_storyboard(
         self,

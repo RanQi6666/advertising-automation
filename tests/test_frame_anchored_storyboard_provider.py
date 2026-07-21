@@ -3,19 +3,135 @@ import logging
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
+    DirectorBeat,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
+    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
     FrameTransitionBrief,
     FrameVisualFacts,
     ReferenceVideoFrame,
+    validate_director_coverage,
 )
 
 FIRST_FRAME_URL = "https://cdn.example.test/first.png"
 LAST_FRAME_URL = "https://cdn.example.test/last.png"
+
+
+def test_director_plan_rejects_climax_without_causal_evidence() -> None:
+    with pytest.raises(ValidationError, match="climax beat requires source evidence"):
+        FrameAnchoredDirectorPlan.model_validate(
+            {
+                "narrative_objective": "Build to a decisive result.",
+                "attention_path": ["subject", "result"],
+                "tension_curve": ["setup", "climax", "resolution"],
+                "climax_beats": [
+                    {
+                        "beat_id": "impact",
+                        "stage": "climax",
+                        "source_evidence": [],
+                    }
+                ],
+                "anchor_adaptation_plan": ["End in the supplied last frame."],
+                "anti_flattening_constraints": ["Do not merge impact and result."],
+            }
+        )
+
+
+def test_director_coverage_requires_frame_anchored_storyboard_to_represent_climax() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Build to a decisive result.",
+        attention_path=["subject", "impact", "result"],
+        tension_curve=["setup", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="impact",
+                stage="climax",
+                source_evidence=["The reference motion culminates in an observable impact."],
+                importance="core",
+            )
+        ],
+        anchor_adaptation_plan=["End in the supplied last frame."],
+        anti_flattening_constraints=["Do not merge impact and result."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                frame_anchor="first_frame",
+                visual="Open in the supplied first-frame composition.",
+                cinematic_beat="setup",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                frame_anchor="last_frame",
+                visual="Resolve in the supplied last-frame composition.",
+                cinematic_beat="resolution",
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="required director beat: impact"):
+        validate_director_coverage(storyboard, director_plan)
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() -> None:
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "narrative_objective": "Escalate observed action into a decisive visible result.",
+            "attention_path": ["opening subject", "causal action", "visible result"],
+            "tension_curve": ["setup", "trigger", "escalation", "climax", "resolution"],
+            "climax_beats": [
+                {
+                    "beat_id": "decisive_result",
+                    "stage": "climax",
+                    "source_evidence": [
+                        "The reference shows a causal action followed by a result."
+                    ],
+                    "start_ratio": 0.45,
+                    "end_ratio": 0.72,
+                    "attention_objective": "Hold attention on the result of the action.",
+                    "camera_instruction": "Use an in-shot viewpoint change to sharpen the impact.",
+                    "action_requirement": "Show the action before its visible result.",
+                    "effect_requirement": "Peak the observed effect at the causal result.",
+                    "importance": "core",
+                }
+            ],
+            "overlay_lifecycle_plan": [],
+            "anchor_adaptation_plan": ["Resolve to the exact supplied last-frame composition."],
+            "anti_flattening_constraints": [
+                "Do not collapse trigger, action, impact, and resolution into one flat move."
+            ],
+        }
+    )
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert plan.climax_beats[0].beat_id == "decisive_result"
+    content = captured[0]["input"][1]["content"]
+    assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
+    assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
+    assert '"frame_analysis"' in content[0]["text"]
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "observed evidence" in system_prompt
+    assert "director inference" in system_prompt
+    assert "post-production" in system_prompt
+    assert "identity" in system_prompt
 
 
 @pytest.mark.asyncio
