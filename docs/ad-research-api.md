@@ -181,3 +181,21 @@ GET /api/v1/integrations/ad-research/jobs/{task_id}
 5. 每轮结束后，若合格结果不足目标数量，系统使用新的查询词继续补采；达到目标或上限后返回结果。
 
 模型调用采用 Redis 全局租约限流：广告研究 Worker 并发为 2，模型并发总上限为 6。最终结果仅在任务库中临时保留 24 小时供轮询，过期后自动清除完整结果。
+
+## Collector build configuration
+
+`meta_ads_collector` pins `athm793/meta-ads-scraper` to a known commit at build time and downloads Playwright Chromium. To reduce transient Debian CDN or network-proxy failures, the build retries APT downloads and browser downloads up to three times each.
+
+The default APT HTTPS mirror host is `mirrors.aliyun.com`. Compose reads the following build-only setting from its environment file. External API callers do not need, and cannot provide, this value:
+
+```env
+META_ADS_APT_MIRROR_HOST=mirrors.aliyun.com
+```
+
+The value must be a mirror hostname only: do not include `http://`, `https://`, or a path. If the test server cannot reliably access the default mirror, change this value in that server's `.env.production` to a reachable Debian mirror hostname, then rebuild the Collector and its dependent Worker:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build meta_ads_collector worker_ad_research
+```
+
+The first Docker Hub base-image pull can still be affected by a short-lived Docker Desktop/proxy network interruption. If it fails with an OAuth `EOF`, retry the build. That condition is separate from the Collector code, the pinned upstream scraper, and a query returning zero ads.

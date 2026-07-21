@@ -250,6 +250,7 @@ services:
       dockerfile: collector/meta_ads_bridge/Dockerfile
       args:
         META_ADS_SCRAPER_REF: ${META_ADS_SCRAPER_REF:-5a83208e4e69e66ba5ba1eb9817771043ac169ed}
+        APT_MIRROR_HOST: ${META_ADS_APT_MIRROR_HOST:-mirrors.aliyun.com}
     restart: unless-stopped
     # No host port: collector is only reachable by the internal research worker.
     tmpfs:
