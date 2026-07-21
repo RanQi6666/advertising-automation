@@ -350,7 +350,7 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
 
 
 @pytest.mark.asyncio
-async def test_external_video_generation_persists_final_text_overlay_locks_from_storyboard(
+async def test_external_video_generation_does_not_persist_legacy_final_text_overlay_locks(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,18 +393,11 @@ async def test_external_video_generation_persists_final_text_overlay_locks_from_
         video = await session.get(VideoAsset, job_id)
 
     assert video is not None
-    assert video.metadata_json["final_text_overlay_locks"] == [
-        {
-            "kind": "text",
-            "text": "x200,000",
-            "show_from_second": 9.35,
-            "placement": "lower_center",
-        }
-    ]
+    assert "final_text_overlay_locks" not in (video.metadata_json or {})
     await engine.dispose()
 
 @pytest.mark.asyncio
-async def test_video_transfer_applies_persisted_final_text_overlay_locks(
+async def test_video_transfer_does_not_apply_legacy_final_text_overlay_locks(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -412,18 +405,6 @@ async def test_video_transfer_applies_persisted_final_text_overlay_locks(
     storage_path = tmp_path / "storage" / "videos" / "overlay-test" / "provider.mp4"
     storage_path.parent.mkdir(parents=True)
     storage_path.write_bytes(b"saved-provider-video")
-    calls: list[tuple[object, list[dict[str, object]]]] = []
-
-    async def fake_apply_final_text_overlay_locks(video_path, *, overlays):
-        calls.append((video_path, overlays))
-        return overlays
-
-    monkeypatch.setattr(
-        video_service_module,
-        "apply_final_text_overlay_locks",
-        fake_apply_final_text_overlay_locks,
-        raising=False,
-    )
     async with session_factory() as session:
         campaign = Campaign(name="Overlay transfer campaign")
         session.add(campaign)
@@ -449,20 +430,8 @@ async def test_video_transfer_applies_persisted_final_text_overlay_locks(
 
         transferred = await VideoService().transfer_completed_video(session, video.id)
 
-    assert calls == [
-        (
-            storage_path,
-            [
-                {
-                    "kind": "text",
-                    "text": "x200,000",
-                    "show_from_second": 9.35,
-                    "placement": "lower_center",
-                }
-            ],
-        )
-    ]
-    assert transferred.metadata_json["final_text_overlay_status"] == "applied"
+    assert "final_text_overlay_status" not in (transferred.metadata_json or {})
+    assert "final_text_overlay_applied_locks" not in (transferred.metadata_json or {})
     await engine.dispose()
 
 @pytest.mark.asyncio

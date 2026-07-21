@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
-from backend.app.core.errors import AppError, ProviderError
+from backend.app.core.errors import AppError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -35,7 +35,6 @@ from backend.app.services.landing_visual_reference import merge_landing_visual_r
 from backend.app.services.llm_rate_limit import llm_text_rate_limiter
 from backend.app.services.model_selection import effective_text_model, settings_for_text_model
 from backend.app.services.utils import get_required
-from backend.app.services.video_final_overlay_service import apply_final_text_overlay_locks
 from backend.app.services.video_storage_service import VideoStorageService
 
 VIDEO_STREAM_HEARTBEAT_SECONDS = 5.0
@@ -484,7 +483,6 @@ class VideoService:
         stored_video_url = self.video_storage.public_url_for_storage_key(video.storage_key)
         if stored_video_url:
             video.url = stored_video_url
-            await self._apply_final_text_overlay_locks(video)
             video.metadata_json = _merge_metadata(
                 video.metadata_json,
                 {
@@ -521,7 +519,6 @@ class VideoService:
         video.storage_key = stored_storage_key
         video.status = VideoStatus.GENERATED.value
         video.error_message = None
-        await self._apply_final_text_overlay_locks(video)
         video.metadata_json = _merge_metadata(
             video.metadata_json,
             {
@@ -536,31 +533,6 @@ class VideoService:
         await session.commit()
         await session.refresh(video)
         return video  # type: ignore[return-value]
-
-    async def _apply_final_text_overlay_locks(self, video: VideoAsset) -> None:
-        metadata = video.metadata_json or {}
-        overlays = metadata.get("final_text_overlay_locks")
-        if not isinstance(overlays, list) or not overlays:
-            return
-        if metadata.get("final_text_overlay_status") == "applied":
-            return
-        if not all(isinstance(overlay, dict) for overlay in overlays):
-            raise ProviderError("Final text overlay locks have an invalid stored format.")
-
-        video_path = self.video_storage.path_for_storage_key(video.storage_key)
-        if video_path is None:
-            raise ProviderError("Saved video was not found for final overlay composition.")
-        applied_overlays = await apply_final_text_overlay_locks(
-            video_path,
-            overlays=overlays,
-        )
-        video.metadata_json = _merge_metadata(
-            video.metadata_json,
-            {
-                "final_text_overlay_status": "applied",
-                "final_text_overlay_applied_locks": applied_overlays,
-            },
-        )
 
 
     async def _schedule_video_transfer_task(

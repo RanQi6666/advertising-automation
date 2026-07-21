@@ -1289,7 +1289,7 @@ async def test_external_ai_polling_reads_terminal_result_from_cache_when_db_miss
     assert body["data"]["copywritings"]
 
 
-def test_frame_anchored_storyboard_exports_machine_readable_final_text_lock() -> None:
+def test_frame_anchored_storyboard_does_not_export_machine_readable_final_text_lock() -> None:
     storyboard = FrameAnchoredStoryboard(
         duration_seconds=10,
         aspect_ratio="9:16",
@@ -1331,6 +1331,5 @@ def test_frame_anchored_storyboard_exports_machine_readable_final_text_lock() ->
         timeline_adaptation_plan=plan,
     )
 
-    assert "[FINAL_TEXT_OVERLAY_LOCKS]" in text
-    assert '"text": "x200,000"' in text
-    assert '"show_from_second": 9.35' in text
+    assert "[FINAL_TEXT_OVERLAY_LOCKS]" not in text
+    assert "[/FINAL_TEXT_OVERLAY_LOCKS]" not in text

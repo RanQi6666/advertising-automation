@@ -1,5 +1,4 @@
 import asyncio
-import json
 from typing import Any
 from uuid import uuid4
 
@@ -46,10 +45,6 @@ from backend.app.services.storyboard_reference_video_service import (
     PreparedReferenceVideo,
     StoryboardReferenceVideoService,
     adapt_reference_behavior_timeline,
-)
-from backend.app.services.video_final_overlay_service import (
-    FINAL_TEXT_OVERLAY_LOCKS_BEGIN,
-    FINAL_TEXT_OVERLAY_LOCKS_END,
 )
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
@@ -871,35 +866,7 @@ def _format_frame_anchored_storyboard_text(
                 "Timing review: " + " ".join(timeline_adaptation_plan.adaptation_risks)
             )
         blocks.append("\n".join(timeline_lines))
-    final_text_overlay_locks = _final_text_overlay_locks(timeline_adaptation_plan)
-    if final_text_overlay_locks:
-        blocks.append(
-            "\n".join(
-                (
-                    FINAL_TEXT_OVERLAY_LOCKS_BEGIN,
-                    json.dumps(final_text_overlay_locks, ensure_ascii=False),
-                    FINAL_TEXT_OVERLAY_LOCKS_END,
-                )
-            )
-        )
     return "\n\n".join(blocks)
-
-
-def _final_text_overlay_locks(
-    timeline_adaptation_plan: TimelineAdaptationPlan | None,
-) -> list[dict[str, Any]]:
-    if timeline_adaptation_plan is None:
-        return []
-    return [
-        {
-            "kind": "text",
-            "text": beat.locked_text,
-            "show_from_second": round(beat.target_start_second, 3),
-            "placement": "lower_center",
-        }
-        for beat in timeline_adaptation_plan.beats
-        if beat.must_remain_visible_until_final and beat.locked_text
-    ]
 
 
 def _scene_timing(start_second: float | None, end_second: float | None) -> str:
