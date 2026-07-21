@@ -507,6 +507,97 @@ async def test_external_video_generation_start_task_then_polling_returns_url(
 
 
 @pytest.mark.asyncio
+async def test_external_video_start_passes_storyboard_text_without_backend_augmentation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+    captured_prompts: list[str] = []
+    captured_metadata: list[dict] = []
+
+    class CapturingVideoProvider:
+        async def start_generation(self, request):
+            captured_prompts.append(request.prompt)
+            captured_metadata.append(request.metadata)
+            return VideoGenerationStart(
+                provider_job_id="provider-passthrough-job",
+                provider_status="queued",
+                raw_response={"id": "provider-passthrough-job", "status": "queued"},
+                request_payload={"prompt": request.prompt},
+            )
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        video_service_module,
+        "get_video_provider",
+        lambda settings: CapturingVideoProvider(),
+    )
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    storyboard_text = """
+777 casino lobby opens with a cash balance and withdraw button.
+Continue the exact first-frame action, then resolve into the supplied last frame.
+"""
+
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id="external-video-passthrough",
+                storyboard_text=storyboard_text,
+            ),
+        )
+        job_id = response.json()["data"]["job_id"]
+        start_task_id, start_queue_name, _priority = enqueued[0]
+        assert start_queue_name == VIDEO_QUEUE_NAME
+
+        async with session_factory() as session:
+            video = await session.get(VideoAsset, job_id)
+            assert video is not None
+            video.metadata_json = {
+                **(video.metadata_json or {}),
+                "creative_strategy": {
+                    "style_pack_id": "must-not-be-injected",
+                    "style_pack": {"visual_direction": "must-not-be-injected"},
+                    "market_game_style_pack": {
+                        "video_guidance": "must-not-be-injected"
+                    },
+                },
+            }
+            await session.commit()
+
+        await GenerationTaskService().process_task(start_task_id)
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    assert captured_prompts == [storyboard_text.strip()]
+    assert len(captured_metadata) == 1
+    assert "creative_strategy" not in captured_metadata[0]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_external_video_generation_retries_transient_start_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
