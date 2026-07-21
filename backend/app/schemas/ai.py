@@ -82,6 +82,7 @@ class FrameLanguageAnalysis(BaseModel):
 class ReferenceVideoFrame(BaseModel):
     timestamp_seconds: float = Field(ge=0)
     image_url: str = Field(min_length=1)
+    selection_reason: Literal["baseline", "opening", "ending", "high_change"] = "baseline"
 
 
 class ReferenceSubjectPresence(BaseModel):
