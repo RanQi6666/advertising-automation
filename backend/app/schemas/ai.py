@@ -338,7 +338,9 @@ class FrameAnchoredStoryboardScene(BaseModel):
     tension_stage: DirectorTensionStage | None = None
     action_result_requirement: str | None = None
     effect_timing: str | None = None
-    overlay_instruction: DirectorOverlayInstruction | None = None
+    # Preserve provider-flattened director prose rather than dropping its intent.
+    # The external contract is the rendered storyboard_text.
+    overlay_instruction: DirectorOverlayInstruction | str | None = None
     anti_flattening_requirement: str | None = None
 
 

@@ -998,6 +998,7 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "sound_effects" in system_prompt
     assert "cinematic_beat" in system_prompt
     assert "exact beat_id" in system_prompt
+    assert "overlay_instruction must be null or an object" in system_prompt
     assert (
         "Do not alter or translate text that is visibly supplied by either target image"
         in system_prompt
@@ -1041,6 +1042,49 @@ async def test_gateway_storyboard_normalizes_string_sound_effects() -> None:
 
     assert storyboard.scenes[0].sound_effects == ["soft cinematic rise"]
     assert storyboard.scenes[1].sound_effects == ["golden impact burst"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_preserves_freeform_overlay_instruction() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open from the supplied first-frame base layer.",
+                    "overlay_instruction": "Introduce the observed interface after activation.",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 6,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "overlay_instruction": "Keep the selected overlay readable through the ending.",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].overlay_instruction == (
+        "Introduce the observed interface after activation."
+    )
+    assert storyboard.scenes[1].overlay_instruction == (
+        "Keep the selected overlay readable through the ending."
+    )
 
 
 @pytest.mark.asyncio

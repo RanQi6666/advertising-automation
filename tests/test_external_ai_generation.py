@@ -1387,3 +1387,35 @@ def test_frame_anchored_storyboard_does_not_export_machine_readable_final_text_l
 
     assert "[FINAL_TEXT_OVERLAY_LOCKS]" not in text
     assert "[/FINAL_TEXT_OVERLAY_LOCKS]" not in text
+
+
+def test_frame_anchored_storyboard_formats_freeform_overlay_instruction() -> None:
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=5,
+                frame_anchor="first_frame",
+                visual="Begin from the supplied first frame.",
+                overlay_instruction="Introduce the observed interface after activation.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=5,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last frame.",
+                overlay_instruction="Keep the selected overlay readable through the ending.",
+            ),
+        ],
+    )
+
+    text = external_ai_service_module._format_frame_anchored_storyboard_text(storyboard)
+
+    assert (
+        "Overlay lifecycle: Keep the selected overlay readable through the ending."
+        in text
+    )
