@@ -4,7 +4,11 @@ import httpx
 import pytest
 
 from backend.app.core.config import get_settings
-from backend.app.services.ad_research_model import AdResearchModel, RedisGlobalLimiter
+from backend.app.services.ad_research_model import (
+    AdResearchModel,
+    RedisGlobalLimiter,
+    _validated_classification,
+)
 
 
 class Lease:
@@ -130,3 +134,112 @@ async def test_model_classification_sends_thumbnail_as_responses_input_image(mon
     assert image == {"type": "input_image", "image_url": "https://cdn.example/ad-1.jpg"}
     await client.aclose()
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_model_classification_normalizes_natural_language_keep_recommendation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "category_match": True,
+                        "category_confidence": 0.99,
+                        "business_type": "gambling",
+                        "creative_relevance_score": 90,
+                        "public_performance_signal_score": 80,
+                        "real_money_signal_score": 0.9,
+                        "is_obviously_unrelated": False,
+                        "text_evidence": [],
+                        "visual_evidence": [],
+                        "public_signal_evidence": [],
+                        "public_risk_signals": [],
+                        "recommendation": (
+                            "Likely gambling-related; keep as a high-confidence match."
+                        ),
+                    }
+                )
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
+    )
+    model = AdResearchModel(http_client=client, limiter=Limiter())
+    from backend.app.schemas.ad_research import CollectorAd
+
+    classification = await model.classify(
+        category="gambling",
+        candidate=CollectorAd(ad_library_id="ad-1"),
+    )
+
+    assert classification["recommendation"] == "keep"
+    await client.aclose()
+    get_settings.cache_clear()
+
+@pytest.mark.asyncio
+async def test_model_classification_excludes_negative_natural_language_recommendation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "category_match": True,
+                        "category_confidence": 0.99,
+                        "business_type": "gambling",
+                        "creative_relevance_score": 90,
+                        "public_performance_signal_score": 80,
+                        "real_money_signal_score": 0.9,
+                        "is_obviously_unrelated": False,
+                        "text_evidence": [],
+                        "visual_evidence": [],
+                        "public_signal_evidence": [],
+                        "public_risk_signals": [],
+                        "recommendation": "Do not classify this candidate as gambling.",
+                    }
+                )
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
+    )
+    model = AdResearchModel(http_client=client, limiter=Limiter())
+    from backend.app.schemas.ad_research import CollectorAd
+
+    classification = await model.classify(
+        category="gambling",
+        candidate=CollectorAd(ad_library_id="ad-1"),
+    )
+
+    assert classification["recommendation"] == "exclude"
+    await client.aclose()
+    get_settings.cache_clear()
+
+
+def test_classification_excludes_prose_that_starts_with_exclude() -> None:
+    classification = _validated_classification(
+        {
+            "category_match": True,
+            "is_obviously_unrelated": False,
+            "recommendation": "Exclude this candidate because the public signals are weak.",
+        }
+    )
+
+    assert classification["recommendation"] == "exclude"

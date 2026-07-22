@@ -126,6 +126,7 @@ class AdResearchModel:
                 "creative_relevance_score, public_performance_signal_score, "
                 "real_money_signal_score, is_obviously_unrelated, text_evidence, "
                 "visual_evidence, public_signal_evidence, public_risk_signals, recommendation. "
+                "recommendation must be exactly the enum value keep or exclude; never prose. "
                 "public_performance_signal_score is a public continuity proxy, not actual cost, "
                 "CPA, ROAS, spend, or conversion. Do not confirm cloaking; "
                 "use public mismatch signals."
@@ -272,21 +273,48 @@ def _mock_classification(category: str, candidate: CollectorAd) -> dict[str, Any
 
 def _validated_classification(data: Any) -> dict[str, Any]:
     data = data if isinstance(data, dict) else {}
+    category_match = bool(data.get("category_match"))
+    is_obviously_unrelated = bool(data.get("is_obviously_unrelated"))
     result = {
-        "category_match": bool(data.get("category_match")),
+        "category_match": category_match,
         "category_confidence": _score(data.get("category_confidence"), fractional=True),
         "business_type": str(data.get("business_type") or "unknown")[:128],
         "creative_relevance_score": _score(data.get("creative_relevance_score")),
         "public_performance_signal_score": _score(data.get("public_performance_signal_score")),
         "real_money_signal_score": _score(data.get("real_money_signal_score"), fractional=True),
-        "is_obviously_unrelated": bool(data.get("is_obviously_unrelated")),
+        "is_obviously_unrelated": is_obviously_unrelated,
         "text_evidence": _strings(data.get("text_evidence")),
         "visual_evidence": _strings(data.get("visual_evidence")),
         "public_signal_evidence": _strings(data.get("public_signal_evidence")),
         "public_risk_signals": _strings(data.get("public_risk_signals")),
-        "recommendation": str(data.get("recommendation") or "exclude").lower(),
+        "recommendation": _normalize_recommendation(
+            data.get("recommendation"),
+            category_match=category_match,
+            is_obviously_unrelated=is_obviously_unrelated,
+        ),
     }
     return result
+
+
+def _normalize_recommendation(
+    value: Any, *, category_match: bool, is_obviously_unrelated: bool
+) -> str:
+    recommendation = str(value or "").strip().casefold()
+    if recommendation in {"keep", "include", "retain"}:
+        return "keep"
+    if recommendation in {"exclude", "drop", "reject"}:
+        return "exclude"
+    if recommendation.startswith(("exclude", "drop", "reject")) or any(
+        phrase in recommendation
+        for phrase in ("do not keep", "don't keep", "do not classify", "not gambling", "unrelated")
+    ):
+        return "exclude"
+    if any(
+        phrase in recommendation
+        for phrase in ("keep", "include", "retain", "high-confidence match", "gambling-related")
+    ):
+        return "keep"
+    return "keep" if category_match and not is_obviously_unrelated else "exclude"
 
 
 def _score(value: Any, *, fractional: bool = False) -> float:
