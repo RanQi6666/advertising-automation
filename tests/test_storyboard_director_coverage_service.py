@@ -329,7 +329,32 @@ def test_review_rejects_effect_only_flattening() -> None:
     )
     review = review_director_action_coverage(_analysis(), plan)
     assert review.status == "corrective"
-    assert any("subject/state motion" in item for item in review.correction_requirements)
+    assert review.correction_requirements == [
+        "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
+    ]
+
+
+def test_review_rejects_camera_only_flattening() -> None:
+    plan = _plan(source_ids=["core_behavior"])
+    plan = plan.model_copy(
+        update={
+            "action_arc_windows": [
+                window.model_copy(
+                    update={
+                        "subject_motion_intensity": 0.05,
+                        "camera_intensity": 0.95 if window.phase == "action" else 0.1,
+                        "effect_intensity": 0.01,
+                    }
+                )
+                for window in plan.action_arc_windows
+            ]
+        }
+    )
+    review = review_director_action_coverage(_analysis(), plan)
+    assert review.status == "corrective"
+    assert review.correction_requirements == [
+        "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
+    ]
 
 
 def test_review_does_not_force_action_without_reference_core_behavior() -> None:
@@ -343,30 +368,91 @@ def test_review_does_not_force_action_without_reference_core_behavior() -> None:
 def test_final_validation_rejects_missing_signature_id() -> None:
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[1].signature_moment_ids = []
-    with pytest.raises(ValueError, match="missing required signature moment"):
+    with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "storyboard is missing required signature moment: signature_action"
 
 
 def test_final_validation_rejects_id_without_action_direction() -> None:
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[1].motion = None
     storyboard.scenes[1].action_result_requirement = None
-    with pytest.raises(ValueError, match="lacks executable action or result direction"):
+    with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == (
+        "signature moment signature_action lacks executable action or result direction"
+    )
+
+
+def test_final_validation_rejects_missing_camera_support() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].camera_instruction = None
+    with pytest.raises(ValueError) as excinfo:
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "signature moment signature_action lacks camera support"
+
+
+def test_final_validation_rejects_missing_effect_support() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].effect_timing = None
+    with pytest.raises(ValueError) as excinfo:
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "signature moment signature_action lacks effect support"
+
+
+def test_final_validation_rejects_missing_visible_payoff() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].action_result_requirement = None
+    with pytest.raises(ValueError) as excinfo:
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "signature moment signature_action lacks visible payoff"
+
+
+def test_final_validation_rejects_missing_required_source_behavior_beat() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].source_behavior_beat_ids = []
+    plan = analysis.director_plan.model_copy(
+        update={
+            "signature_moment_plan": [
+                analysis.director_plan.signature_moment_plan[0].model_copy(
+                    update={"source_behavior_beat_ids": []}
+                )
+            ]
+        }
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    with pytest.raises(ValueError) as excinfo:
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == (
+        "storyboard is missing required source behavior beats: core_behavior"
+    )
 
 
 def test_final_validation_rejects_missing_return() -> None:
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[2].anchor_return_instruction = None
-    with pytest.raises(ValueError, match="missing anchor return instruction"):
+    with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "storyboard is missing anchor return instruction"
 
 
 def test_final_validation_rejects_wrong_final_end_time() -> None:
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[-1].end_second = 9.5
-    with pytest.raises(ValueError, match="final scene must end at requested duration"):
+    with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == "final scene must end at requested duration"
+
+
+def test_final_validation_rejects_scene_timing_out_of_order() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[2].start_second = 8
+    storyboard.scenes[2].end_second = 7
+    with pytest.raises(ValueError) as excinfo:
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+    assert str(excinfo.value) == (
+        "storyboard scene timing must be ordered within requested duration"
+    )
 
 
 def test_final_validation_accepts_valid_storyboard() -> None:

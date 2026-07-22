@@ -32,7 +32,7 @@ def _has_required_arc(plan: FrameAnchoredDirectorPlan) -> bool:
     return action < returning < lock and plan.action_arc_windows[lock].end_ratio == 1
 
 
-def _effect_only_flattened(
+def _support_only_flattened(
     core_beats: list[ReferenceBehaviorBeat],
     plan: FrameAnchoredDirectorPlan,
 ) -> bool:
@@ -44,7 +44,9 @@ def _effect_only_flattened(
     if not action_windows:
         return True
     peak_subject = max(window.subject_motion_intensity for window in action_windows)
-    peak_effect = max(window.effect_intensity for window in action_windows)
+    peak_support = max(
+        max(window.camera_intensity, window.effect_intensity) for window in action_windows
+    )
     hold_subject = min(
         (
             window.subject_motion_intensity
@@ -53,7 +55,7 @@ def _effect_only_flattened(
         ),
         default=0,
     )
-    return peak_effect > peak_subject and peak_subject <= hold_subject
+    return peak_support > peak_subject and peak_subject <= hold_subject
 
 
 def _has_execution_detail(moment: object) -> bool:
@@ -124,7 +126,7 @@ def review_director_action_coverage(
         )
     if required_ids and not director_plan.final_anchor_return.strip():
         corrections.append("State the continuous final-anchor return before the final lock.")
-    if _effect_only_flattened(core_beats, director_plan):
+    if _support_only_flattened(core_beats, director_plan):
         corrections.append(
             "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
         )
