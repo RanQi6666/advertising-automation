@@ -295,18 +295,36 @@ DirectorSignatureTransferRole = Literal[
 ]
 
 
+_ENDPOINT_TERMS = ("final", "last frame", "endpoint", "ending")
+_ENDPOINT_MATCH_TERMS = ("pose", "position", "orientation", "framing", "composition", "scale")
+_NON_ENDPOINT_INFEASIBILITY_EVIDENCE = (
+    "no controllable",
+    "lacks a controllable",
+    "lacks controllable",
+    "no target-compatible entity",
+    "no compatible entity",
+    "not present in the target",
+    "absent from the target",
+    "unavailable in the target",
+    "would contradict target identity",
+    "would violate target semantics",
+)
+
+
 def _endpoint_mismatch_only(*reasons: str) -> bool:
-    text = " ".join(reason.casefold() for reason in reasons)
-    endpoint = any(term in text for term in ("final", "last frame", "endpoint", "ending"))
-    mismatch = any(
-        term in text
-        for term in ("pose", "position", "orientation", "framing", "composition", "scale")
-    )
-    infeasible = any(
-        term in text
-        for term in ("infeasible", "impossible", "contradict", "no compatible", "cannot execute")
-    )
-    return endpoint and mismatch and not infeasible
+    for reason in reasons:
+        text = reason.casefold().strip()
+        if not text:
+            continue
+        has_endpoint_constraint = any(term in text for term in _ENDPOINT_TERMS) and any(
+            term in text for term in _ENDPOINT_MATCH_TERMS
+        )
+        has_independent_infeasibility = any(
+            term in text for term in _NON_ENDPOINT_INFEASIBILITY_EVIDENCE
+        )
+        if has_endpoint_constraint and not has_independent_infeasibility:
+            return True
+    return False
 
 
 class DirectorActionArcWindow(BaseModel):
@@ -327,8 +345,24 @@ class DirectorActionArcWindow(BaseModel):
         return self
 
 
+DirectorActionCorrectionType = Literal[
+    "execution",
+    "payoff",
+    "return",
+    "support",
+    "action_arc",
+]
+
+
+class DirectorActionCorrection(BaseModel):
+    correction_type: DirectorActionCorrectionType
+    signature_moment_ids: list[str] = Field(min_length=1)
+    source_behavior_beat_ids: list[str] = Field(min_length=1)
+    instruction: str = Field(min_length=1)
+
+
 class DirectorActionCoverageReview(BaseModel):
-    status: Literal["pass", "corrective"]
+    status: Literal["pass", "corrective", "unrecoverable"]
     required_core_behavior_beat_ids: list[str] = Field(default_factory=list)
     covered_core_behavior_beat_ids: list[str] = Field(default_factory=list)
     validly_omitted_core_behavior_beat_ids: list[str] = Field(default_factory=list)
@@ -337,6 +371,8 @@ class DirectorActionCoverageReview(BaseModel):
     missing_execution_detail_moment_ids: list[str] = Field(default_factory=list)
     missing_return_moment_ids: list[str] = Field(default_factory=list)
     correction_requirements: list[str] = Field(default_factory=list)
+    structured_corrections: list[DirectorActionCorrection] = Field(default_factory=list)
+    unrecoverable_reasons: list[str] = Field(default_factory=list)
 
 
 class DirectorSignatureMoment(BaseModel):

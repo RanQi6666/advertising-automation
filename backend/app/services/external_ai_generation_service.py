@@ -470,6 +470,11 @@ class ExternalAIGenerationService:
                 task,
                 director_action_coverage_review=director_review.model_dump(mode="json"),
             )
+            if director_review.status == "unrecoverable":
+                raise ProviderError(
+                    "Director plan is unrecoverable before storyboard generation because "
+                    "required signature/source linkage is missing."
+                )
 
             async with llm_text_rate_limiter():
                 storyboard = await llm.generate_frame_anchored_video_storyboard(
@@ -478,7 +483,7 @@ class ExternalAIGenerationService:
                     frame_analysis=frame_analysis,
                     duration_seconds=payload.duration_seconds,
                     aspect_ratio=payload.aspect_ratio,
-                    director_correction_requirements=director_review.correction_requirements,
+                    director_corrections=director_review.structured_corrections,
                 )
             await _store_frame_anchored_private_metadata(
                 session,
@@ -888,9 +893,34 @@ async def _store_frame_anchored_private_metadata(
     await session.refresh(task)
 
 
+def _private_storyboard_ids(storyboard: FrameAnchoredStoryboard) -> tuple[str, ...]:
+    private_ids: set[str] = set()
+    for scene in storyboard.scenes:
+        private_ids.update(scene.signature_moment_ids)
+        private_ids.update(scene.source_behavior_beat_ids)
+        private_ids.update(scene.cinematic_beats)
+        if scene.cinematic_beat:
+            private_ids.add(scene.cinematic_beat)
+    return tuple(sorted((item for item in private_ids if item), key=len, reverse=True))
+
+
+def _scrub_private_storyboard_ids(value: str | None, private_ids: tuple[str, ...]) -> str:
+    text = value or ""
+    for private_id in private_ids:
+        if not any(not character.isalpha() for character in private_id):
+            continue
+        text = text.replace(private_id, "linked item")
+    return text
+
+
 def _format_frame_anchored_storyboard_text(
     storyboard: FrameAnchoredStoryboard,
 ) -> str:
+    private_ids = _private_storyboard_ids(storyboard)
+
+    def clean(value: str | None) -> str:
+        return _scrub_private_storyboard_ids(value, private_ids)
+
     blocks = [
         f"Duration: {storyboard.duration_seconds}s",
         f"Aspect ratio: {storyboard.aspect_ratio}",
@@ -901,47 +931,47 @@ def _format_frame_anchored_storyboard_text(
         lines = [
             f"Scene {scene_index} ({timing})",
             f"Anchor: {scene.frame_anchor}",
-            f"Visual: {scene.visual}",
-            f"Tension stage: {scene.tension_stage or '-'}",
-            f"Camera and motion: {scene.motion or '-'}",
-            f"Camera instruction: {scene.camera_instruction or '-'}",
-            f"Transition goal: {scene.transition_goal or '-'}",
-            f"Action-result requirement: {scene.action_result_requirement or '-'}",
-            f"Effect timing: {scene.effect_timing or '-'}",
+            f"Visual: {clean(scene.visual)}",
+            f"Tension stage: {clean(scene.tension_stage) or '-'}",
+            f"Camera and motion: {clean(scene.motion) or '-'}",
+            f"Camera instruction: {clean(scene.camera_instruction) or '-'}",
+            f"Transition goal: {clean(scene.transition_goal) or '-'}",
+            f"Action-result requirement: {clean(scene.action_result_requirement) or '-'}",
+            f"Effect timing: {clean(scene.effect_timing) or '-'}",
             (
                 "Subject motion intensity: "
                 f"{_format_optional_intensity(scene.subject_motion_intensity)}"
             ),
             f"Camera intensity: {_format_optional_intensity(scene.camera_intensity)}",
             f"Effect intensity: {_format_optional_intensity(scene.effect_intensity)}",
-            f"Return to final anchor: {scene.anchor_return_instruction or '-'}",
-            f"Anti-flattening requirement: {scene.anti_flattening_requirement or '-'}",
-            f"Subtitle: {scene.subtitle or '-'}",
-            f"Voiceover: {scene.voiceover or '-'}",
-            f"Sound effects: {', '.join(scene.sound_effects) or '-'}",
+            f"Return to final anchor: {clean(scene.anchor_return_instruction) or '-'}",
+            f"Anti-flattening requirement: {clean(scene.anti_flattening_requirement) or '-'}",
+            f"Subtitle: {clean(scene.subtitle) or '-'}",
+            f"Voiceover: {clean(scene.voiceover) or '-'}",
+            f"Sound effects: {', '.join(clean(item) for item in scene.sound_effects) or '-'}",
         ]
         if scene.overlay_instruction is not None:
             overlay = scene.overlay_instruction
             if isinstance(overlay, str):
-                lines.append(f"Overlay lifecycle: {overlay}")
+                lines.append(f"Overlay lifecycle: {clean(overlay)}")
             else:
                 lines.append(
                     "Overlay lifecycle: "
-                    f"{overlay.reference_element} -> {overlay.strategy}; "
-                    f"timing: {overlay.timing_instruction}; "
-                    f"final frame: {overlay.final_frame_requirement}"
+                    f"{clean(overlay.reference_element)} -> {overlay.strategy}; "
+                    f"timing: {clean(overlay.timing_instruction)}; "
+                    f"final frame: {clean(overlay.final_frame_requirement)}"
                 )
         if scene.notes:
-            lines.append(f"Notes: {scene.notes}")
+            lines.append(f"Notes: {clean(scene.notes)}")
         blocks.append("\n".join(lines))
     blocks.extend(
         [
-            f"Music: {storyboard.sound_design.music or '-'}",
-            f"Ambience: {storyboard.sound_design.ambience or '-'}",
+            f"Music: {clean(storyboard.sound_design.music) or '-'}",
+            f"Ambience: {clean(storyboard.sound_design.ambience) or '-'}",
         ]
     )
     if storyboard.rationale:
-        blocks.append(f"Overall direction: {storyboard.rationale}")
+        blocks.append(f"Overall direction: {clean(storyboard.rationale)}")
     return "\n\n".join(blocks)
 
 

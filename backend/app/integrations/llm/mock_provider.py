@@ -10,6 +10,7 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCorrection,
     DirectorBeat,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
@@ -43,6 +44,91 @@ def _mock_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[Any]:
     ]
 
 
+def _evidence_category_score(texts: list[str], categories: tuple[tuple[str, ...], ...]) -> int:
+    normalized = " ".join(text.casefold() for text in texts if text and text.strip())
+    return sum(any(term in normalized for term in category) for category in categories)
+
+
+def _mock_allocation_evidence(
+    frame_analysis: FrameAnalysis, core_beats: list[Any]
+) -> dict[str, int]:
+    transition = frame_analysis.transition_brief
+    transition_texts = [
+        transition.visual_transition,
+        transition.narrative_arc,
+        *transition.continuity_requirements,
+    ]
+    divergence = _evidence_category_score(
+        transition_texts,
+        (
+            ("temporary", "diverge", "depart"),
+            ("pose", "orientation", "turn"),
+            ("screen position", "position", "translate"),
+            ("composition", "framing", "shot scale", "scale"),
+        ),
+    )
+    payoff_readability = _evidence_category_score(
+        [item for beat in core_beats for item in beat.visible_evidence],
+        (
+            ("consequence", "result", "payoff", "resulting"),
+            ("readable", "clearly", "visible after"),
+            ("persist", "remain", "stable", "stabilized"),
+            ("layered", "multiple", "state transition"),
+        ),
+    )
+
+    first = frame_analysis.first_frame
+    last = frame_analysis.last_frame
+    endpoint_difference = sum(
+        first_value != last_value
+        for first_value, last_value in (
+            (first.composition.strip().casefold(), last.composition.strip().casefold()),
+            (
+                first.camera_perspective.strip().casefold(),
+                last.camera_perspective.strip().casefold(),
+            ),
+            (
+                tuple(item.strip().casefold() for item in first.visible_subjects),
+                tuple(item.strip().casefold() for item in last.visible_subjects),
+            ),
+        )
+    )
+
+    camera_travel = 0
+    effect_readability = 0
+    reference = frame_analysis.reference_video_analysis
+    if reference is not None:
+        intensity_scores = {"low": 0, "medium": 1, "high": 2}
+        for segment in reference.segments:
+            movement = segment.camera.movement.casefold()
+            movement_score = _evidence_category_score(
+                [movement],
+                (
+                    ("pan", "tilt", "push", "pull", "track"),
+                    ("orbit", "dolly", "travel", "crane", "sweep"),
+                ),
+            )
+            camera_travel += movement_score + intensity_scores.get(
+                segment.camera.intensity.casefold(), 0
+            )
+            effect_readability += _evidence_category_score(
+                segment.effects,
+                (
+                    ("layer", "multiple", "stack"),
+                    ("persist", "sustain", "linger"),
+                    ("readable", "reveal", "payoff", "result"),
+                ),
+            )
+
+    return {
+        "divergence": divergence,
+        "payoff_readability": payoff_readability,
+        "endpoint_difference": endpoint_difference,
+        "camera_travel": camera_travel,
+        "effect_readability": effect_readability,
+    }
+
+
 def _mock_phase_durations(
     frame_analysis: FrameAnalysis,
     core_beats: list[Any],
@@ -58,6 +144,7 @@ def _mock_phase_durations(
         + bool(transition.visual_transition.strip())
         + bool(transition.narrative_arc.strip())
     )
+    allocation = _mock_allocation_evidence(frame_analysis, core_beats)
     readable_execution = sum(
         max(0.25, beat.minimum_readable_duration_seconds)
         * (1.0 if beat.behavior_type == "action" else 0.85)
@@ -65,9 +152,26 @@ def _mock_phase_durations(
     )
     desired = {
         "preparation": 0.3 + 0.08 * len(core_beats) + 0.06 * state_count,
-        "action": readable_execution + 0.12 * action_count,
-        "payoff": 0.3 + 0.12 * len(core_beats) + 0.04 * evidence_items,
-        "return": 0.4 + 0.05 * endpoint_evidence + 0.06 * state_count,
+        "action": (
+            readable_execution
+            + 0.12 * action_count
+            + 0.10 * allocation["divergence"]
+            + 0.06 * allocation["camera_travel"]
+        ),
+        "payoff": (
+            0.3
+            + 0.12 * len(core_beats)
+            + 0.04 * evidence_items
+            + 0.08 * allocation["payoff_readability"]
+            + 0.07 * allocation["effect_readability"]
+        ),
+        "return": (
+            0.4
+            + 0.05 * endpoint_evidence
+            + 0.06 * state_count
+            + 0.12 * allocation["endpoint_difference"]
+            + 0.03 * allocation["divergence"]
+        ),
         "final_lock": 0.3 + 0.04 * len(transition.continuity_requirements),
     }
     minimums = {
@@ -97,9 +201,25 @@ def _mock_phase_durations(
     surplus = budget - desired_total
     expansion_weights = {
         "preparation": len(core_beats) + state_count + 1,
-        "action": action_count + state_count,
-        "payoff": evidence_items + len(core_beats) + 1,
-        "return": endpoint_evidence + state_count + 1,
+        "action": (
+            action_count
+            + state_count
+            + allocation["divergence"]
+            + allocation["camera_travel"]
+        ),
+        "payoff": (
+            evidence_items
+            + len(core_beats)
+            + 1
+            + allocation["payoff_readability"]
+            + allocation["effect_readability"]
+        ),
+        "return": (
+            endpoint_evidence
+            + state_count
+            + 1
+            + 2 * allocation["endpoint_difference"]
+        ),
         "final_lock": len(transition.continuity_requirements) + 1,
     }
     expansion_total = sum(expansion_weights.values())
@@ -167,6 +287,20 @@ def _mock_phase_boundary(
     window = next(window for window in plan.action_arc_windows if window.phase == phase)
     ratio = window.start_ratio if use_start else window.end_ratio
     return round(duration_seconds * ratio, 6)
+
+
+def _mock_requires_phase_compression(
+    frame_analysis: FrameAnalysis,
+    source_ids: set[str],
+    duration_seconds: int,
+) -> bool:
+    beats = {beat.beat_id: beat for beat in _mock_core_behavior_beats(frame_analysis)}
+    execution_readability = sum(
+        max(0.08, beats[beat_id].minimum_readable_duration_seconds)
+        for beat_id in source_ids
+        if beat_id in beats
+    )
+    return duration_seconds <= execution_readability + 4 * 0.8
 
 
 class MockLLMProvider:
@@ -304,7 +438,8 @@ class MockLLMProvider:
                         "camera_support": "Reframe continuously around execution and payoff.",
                         "effect_support": "Support the consequence only after motion reads.",
                         "visible_payoff": (
-                            f"Show the visible payoff for core behavior {behavior.beat_id}."
+                            "Show the visible target-compatible result after the linked "
+                            "behavior reads."
                         ),
                         "return_strategy": (
                             "Return continuously from the payoff into the exact final anchor."
@@ -366,7 +501,7 @@ class MockLLMProvider:
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
-        director_correction_requirements: list[str] | None = None,
+        director_corrections: list[DirectorActionCorrection] | None = None,
     ) -> FrameAnchoredStoryboard:
         del first_frame_image_url, last_frame_image_url
         director_plan = frame_analysis.director_plan
@@ -383,11 +518,19 @@ class MockLLMProvider:
             for moment in signature_moments
             if moment.assigned_beat_id in beats_by_id
         ]
-        correction_note = " ".join(
-            requirement.strip()
-            for requirement in (director_correction_requirements or [])
-            if requirement.strip()
-        )
+        signature_id_set = {moment.moment_id for moment in signature_moments}
+        source_id_set = {
+            source_id
+            for moment in signature_moments
+            for source_id in moment.source_behavior_beat_ids
+        }
+        applicable_corrections = [
+            correction
+            for correction in (director_corrections or [])
+            if signature_id_set.intersection(correction.signature_moment_ids)
+            and source_id_set.intersection(correction.source_behavior_beat_ids)
+        ]
+        correction_types = {correction.correction_type for correction in applicable_corrections}
 
         if signature_moments and assigned_beats and director_plan is not None:
             signature_ids = [moment.moment_id for moment in signature_moments]
@@ -406,9 +549,16 @@ class MockLLMProvider:
                 )
             )
             motion = " ".join(moment.adapted_action for moment in signature_moments)
+            if "execution" in correction_types:
+                motion = (
+                    f"{motion} Execute the linked subject/state action as independent readable "
+                    "motion."
+                ).strip()
             payoff = " ".join(moment.visible_payoff for moment in signature_moments)
-            if correction_note:
-                payoff = f"{payoff} Corrections: {correction_note}"
+            if correction_types.intersection({"execution", "payoff"}):
+                payoff = (
+                    f"{payoff} Make the linked visible consequence readable after execution."
+                ).strip()
             camera_instruction = " ".join(
                 dict.fromkeys(
                     moment.camera_support or beats_by_id[moment.assigned_beat_id].camera_instruction
@@ -433,7 +583,13 @@ class MockLLMProvider:
                 )
                 or director_plan.final_anchor_return
             )
+            if "return" in correction_types:
+                return_instruction = (
+                    f"{return_instruction} Return the linked result continuously before the "
+                    "final hold."
+                ).strip()
             preparation_end = _mock_phase_boundary(director_plan, "preparation", duration_seconds)
+            action_end = _mock_phase_boundary(director_plan, "action", duration_seconds)
             payoff_end = _mock_phase_boundary(director_plan, "payoff", duration_seconds)
             final_lock_start = _mock_phase_boundary(
                 director_plan, "final_lock", duration_seconds, use_start=True
@@ -455,10 +611,91 @@ class MockLLMProvider:
                     "Keep preparation, subject/state execution, payoff, return, and final hold "
                     "distinct and readable."
                 ),
-                "notes": correction_note or None,
+                "notes": None,
             }
 
-            if duration_seconds >= 4:
+            compression_required = _mock_requires_phase_compression(
+                frame_analysis, set(source_ids), duration_seconds
+            )
+            if not compression_required:
+                action_fields = dict(common_execution)
+                action_fields["action_result_requirement"] = None
+                action_fields["effect_timing"] = (
+                    "Keep support subordinate until the linked subject/state execution reads."
+                )
+                action_fields["effect_intensity"] = 0.45
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=0,
+                        end_second=preparation_end,
+                        frame_anchor="first_frame",
+                        visual="Hold the opening anchor while preparing every linked behavior.",
+                        motion="Prepare each linked subject/state action before execution.",
+                        transition_goal="Preparation leads continuously into linked execution.",
+                        sound_effects=["Soft preparation ambience."],
+                        source_behavior_beat_ids=source_ids,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=preparation_end,
+                        end_second=action_end,
+                        frame_anchor="transition",
+                        visual=(
+                            "Execute every linked core behavior as readable subject/state motion."
+                        ),
+                        transition_goal=(
+                            "Allow temporary divergence while every linked behavior executes."
+                        ),
+                        sound_effects=["Execution rise."],
+                        **action_fields,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=3,
+                        start_second=action_end,
+                        end_second=payoff_end,
+                        frame_anchor="transition",
+                        visual="Show every linked visible consequence after its execution.",
+                        motion="The linked consequences become readable before the return begins.",
+                        transition_goal="Hold the results long enough to read without a cut.",
+                        sound_effects=["Payoff accent."],
+                        signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
+                        camera_instruction=camera_instruction,
+                        tension_stage="resolution",
+                        action_result_requirement=payoff,
+                        effect_timing=effect_timing,
+                        subject_motion_intensity=0.55,
+                        camera_intensity=0.5,
+                        effect_intensity=0.8,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=4,
+                        start_second=payoff_end,
+                        end_second=final_lock_start,
+                        frame_anchor="transition",
+                        visual="Return continuously from the payoff to the ending composition.",
+                        motion=(
+                            "Settle subject/state motion toward the exact supplied ending state."
+                        ),
+                        transition_goal="Restore ending pose, framing, and camera in-shot.",
+                        sound_effects=["Return sweep."],
+                        signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
+                        anchor_return_instruction=return_instruction,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=5,
+                        start_second=final_lock_start,
+                        end_second=duration_seconds,
+                        frame_anchor="last_frame",
+                        visual="Hold and lock the exact supplied last-frame visual state.",
+                        motion="Stabilize and hold the supplied final composition.",
+                        transition_goal="Maintain the final hold without an end card or cut.",
+                        sound_effects=["Ending ambience."],
+                    ),
+                ]
+            elif duration_seconds >= 4:
                 scenes = [
                     FrameAnchoredStoryboardScene(
                         scene_index=1,
@@ -473,6 +710,7 @@ class MockLLMProvider:
                         ),
                         transition_goal="Preparation leads continuously into execution.",
                         sound_effects=["Soft preparation ambience."],
+                        source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -499,6 +737,7 @@ class MockLLMProvider:
                         transition_goal="Restore ending pose, framing, and camera in-shot.",
                         sound_effects=["Return sweep."],
                         signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
                         anchor_return_instruction=return_instruction,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -523,6 +762,7 @@ class MockLLMProvider:
                         motion="Prepare subject/state motion and depart from the opening hold.",
                         transition_goal="Preparation leads directly into execution.",
                         sound_effects=["Soft preparation ambience."],
+                        source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -547,6 +787,7 @@ class MockLLMProvider:
                         transition_goal="Share return and final hold without a cut.",
                         sound_effects=["Return sweep.", "Ending ambience."],
                         signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
                         anchor_return_instruction=return_instruction,
                     ),
                 ]
@@ -561,6 +802,7 @@ class MockLLMProvider:
                         motion="Prepare subject/state motion and depart from the opening hold.",
                         transition_goal="Preparation leads directly into shared execution.",
                         sound_effects=["Soft preparation ambience."],
+                        source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -615,7 +857,6 @@ class MockLLMProvider:
                         motion="Camera and observed state continuity progress toward the ending.",
                         transition_goal="Maintain evidence-backed visual continuity.",
                         sound_effects=["Transition ambience."],
-                        notes=correction_note or None,
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=3,
@@ -649,7 +890,6 @@ class MockLLMProvider:
                         motion="Complete the transition and stabilize the final composition.",
                         transition_goal="Share bridge and final hold without a cut.",
                         sound_effects=["Transition ambience.", "Ending ambience."],
-                        notes=correction_note or None,
                     ),
                 ]
             rationale = "Mock storyboard bridges only the supplied target-frame evidence."

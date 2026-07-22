@@ -21,6 +21,7 @@ from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCorrection,
     DirectorActionCoverageReview,
     DirectorBeat,
     FrameAnalysis,
@@ -449,12 +450,12 @@ class FakeExternalAILLM:
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
-        director_correction_requirements: list[str] | None = None,
+        director_corrections: list[DirectorActionCorrection] | None = None,
     ) -> FrameAnchoredStoryboard:
         self.calls.append("generate_frame_anchored_video_storyboard")
         self.call_details.append(
             {
-                "director_correction_requirements": director_correction_requirements,
+                "director_corrections": director_corrections,
             }
         )
         assert first_frame_image_url.endswith("first.png")
@@ -475,7 +476,7 @@ class FakeExternalAILLM:
                 FrameAnchoredStoryboardScene(
                     scene_index=1,
                     start_second=0,
-                    end_second=3,
+                    end_second=2.4,
                     frame_anchor="first_frame",
                     visual="Prepare from the supplied opening state.",
                     motion="Prepare the subject for the continuous causal action.",
@@ -484,31 +485,78 @@ class FakeExternalAILLM:
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=2,
-                    start_second=3,
-                    end_second=9,
+                    start_second=2.4,
+                    end_second=6.6,
                     frame_anchor="transition",
-                    visual="Move through the observed visual change.",
-                    motion="Follow the movement.",
-                    transition_goal="Bridge the supplied frames.",
+                    visual="Execute the observed target-compatible visual change.",
+                    motion="The subject performs the linked causal action.",
+                    transition_goal="Temporarily depart while executing the linked action.",
                     voiceover="Optional narration.",
                     sound_effects=["movement swish"],
                     cinematic_beat="causal_peak",
-                    cinematic_beats=["causal_peak"],
-                    signature_moment_ids=["signature_action"],
-                    source_behavior_beat_ids=["approach"],
+                    cinematic_beats=["causal_peak", "custom_director_beat"],
+                    signature_moment_ids=["signature_action", "custom_signature_id"],
+                    source_behavior_beat_ids=[
+                        "approach",
+                        "core_behavior",
+                        "core_state_change",
+                        "custom_behavior_beat",
+                    ],
                     camera_instruction="Use an in-shot push and reframing at impact.",
                     tension_stage="climax",
-                    action_result_requirement="Show the action before its visible result.",
-                    effect_timing="Peak the observed effect at the visible impact.",
+                    effect_timing="Keep effects subordinate until the action reads.",
                     subject_motion_intensity=0.9,
                     camera_intensity=0.6,
-                    effect_intensity=0.7,
-                    anchor_return_instruction="Return continuously to the supplied last frame.",
-                    anti_flattening_requirement="Keep impact distinct from the final resolution.",
+                    effect_intensity=0.4,
+                    anti_flattening_requirement="Keep action distinct from its result.",
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=3,
-                    start_second=9,
+                    start_second=6.6,
+                    end_second=8.64,
+                    frame_anchor="transition",
+                    visual="Show the visible result after the linked action.",
+                    motion="The visible consequence reads before the return.",
+                    transition_goal="Hold the payoff clearly without a cut.",
+                    cinematic_beat="causal_peak",
+                    cinematic_beats=["causal_peak", "custom_director_beat"],
+                    signature_moment_ids=["signature_action", "custom_signature_id"],
+                    source_behavior_beat_ids=[
+                        "approach",
+                        "core_behavior",
+                        "core_state_change",
+                        "custom_behavior_beat",
+                    ],
+                    camera_instruction="Reframe gently around the visible result.",
+                    action_result_requirement=(
+                        "Show core_behavior, core_state_change, custom_behavior_beat, "
+                        "signature_action, custom_signature_id, causal_peak, and "
+                        "custom_director_beat only through their visible results."
+                    ),
+                    effect_timing="Peak the observed effect at the visible impact.",
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=4,
+                    start_second=8.64,
+                    end_second=10.56,
+                    frame_anchor="transition",
+                    visual="Return continuously toward the ending composition.",
+                    motion="Settle the subject toward the supplied ending state.",
+                    transition_goal="Restore the final anchor in the same shot.",
+                    signature_moment_ids=["signature_action", "custom_signature_id"],
+                    source_behavior_beat_ids=[
+                        "approach",
+                        "core_behavior",
+                        "core_state_change",
+                        "custom_behavior_beat",
+                    ],
+                    anchor_return_instruction=(
+                        "Return continuously to the supplied last frame."
+                    ),
+                ),
+                FrameAnchoredStoryboardScene(
+                    scene_index=5,
+                    start_second=10.56,
                     end_second=12,
                     frame_anchor="last_frame",
                     visual="Arrive, hold, and lock the supplied ending state.",
@@ -981,6 +1029,16 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         "Return to final anchor: Return continuously to the supplied last frame."
         in data["storyboard_text"]
     )
+    for private_id in (
+        "core_behavior",
+        "core_state_change",
+        "custom_behavior_beat",
+        "signature_action",
+        "custom_signature_id",
+        "causal_peak",
+        "custom_director_beat",
+    ):
+        assert private_id not in data["storyboard_text"]
     for private_field in (
         "frame_analysis",
         "director_plan",
@@ -1216,7 +1274,7 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_
         ]
         assert CountingReferenceVideoService.prepare_calls == 1
         assert CountingReferenceVideoService.cleanup_calls == 1
-        assert fake_llm.call_details[-1]["director_correction_requirements"] == []
+        assert fake_llm.call_details[-1]["director_corrections"] == []
 
     await engine.dispose()
 
@@ -1292,8 +1350,18 @@ async def test_storyboard_v2_stores_review_and_forwards_corrections(
             required_core_behavior_beat_ids=["core_behavior"],
             uncovered_core_behavior_beat_ids=["core_behavior"],
             correction_requirements=[
-                "Execute uncovered core behavior beat core_behavior in subject/state motion "
-                "and show its visible payoff."
+                "Provide executable subject/state action and visible payoff for the linked moment."
+            ],
+            structured_corrections=[
+                DirectorActionCorrection(
+                    correction_type="execution",
+                    signature_moment_ids=["signature_action"],
+                    source_behavior_beat_ids=["core_behavior"],
+                    instruction=(
+                        "Provide executable subject/state action and visible payoff for the "
+                        "linked moment."
+                    ),
+                )
             ],
         ),
     )
@@ -1320,10 +1388,59 @@ async def test_storyboard_v2_stores_review_and_forwards_corrections(
         await session.refresh(task)
         assert result["storyboard_text"]
         assert task.metadata_json["director_action_coverage_review"]["status"] == "corrective"
-        assert fake_llm.call_details[-1]["director_correction_requirements"] == [
-            "Execute uncovered core behavior beat core_behavior in subject/state motion "
-            "and show its visible payoff."
+        forwarded = fake_llm.call_details[-1]["director_corrections"]
+        assert len(forwarded) == 1
+        assert forwarded[0].signature_moment_ids == ["signature_action"]
+        assert forwarded[0].source_behavior_beat_ids == ["core_behavior"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_unrecoverable_linkage_stops_before_call3(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "review_director_action_coverage",
+        lambda frame_analysis, director_plan: DirectorActionCoverageReview.model_construct(
+            status="unrecoverable",
+            required_core_behavior_beat_ids=["core_behavior"],
+            uncovered_core_behavior_beat_ids=["core_behavior"],
+            correction_requirements=[],
+            structured_corrections=[],
+            unrecoverable_reasons=[
+                "Core behavior beat core_behavior has no signature/source linkage."
+            ],
+        ),
+    )
+    engine, session_factory = await _session_factory(
+        tmp_path, "storyboard-v2-unrecoverable-review.db"
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-unrecoverable-review",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(ProviderError, match="signature/source linkage"):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
         ]
+
     await engine.dispose()
 
 
@@ -1910,3 +2027,56 @@ def test_frame_anchored_storyboard_formats_freeform_overlay_instruction() -> Non
         "Overlay lifecycle: Keep the selected overlay readable through the ending."
         in text
     )
+
+def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> None:
+    private_ids = (
+        "core_behavior",
+        "core_state_change",
+        "custom_behavior_beat",
+        "custom_signature_id",
+        "custom_director_beat",
+    )
+    leaked = " ".join(private_ids)
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=4,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=1,
+                frame_anchor="first_frame",
+                visual="Opening anchor.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=1,
+                end_second=4,
+                frame_anchor="last_frame",
+                visual=leaked,
+                motion=leaked,
+                transition_goal=leaked,
+                camera_instruction=leaked,
+                action_result_requirement=leaked,
+                effect_timing=leaked,
+                anchor_return_instruction=leaked,
+                notes=leaked,
+                sound_effects=[leaked],
+                cinematic_beat="custom_director_beat",
+                cinematic_beats=["custom_director_beat"],
+                signature_moment_ids=["custom_signature_id"],
+                source_behavior_beat_ids=[
+                    "core_behavior",
+                    "core_state_change",
+                    "custom_behavior_beat",
+                ],
+            )
+        ],
+        sound_design=StoryboardSoundDesign(music=leaked, ambience=leaked),
+        rationale=leaked,
+    )
+
+    text = _format_frame_anchored_storyboard_text(storyboard)
+
+    for private_id in private_ids:
+        assert private_id not in text

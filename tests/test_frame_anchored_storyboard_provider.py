@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 
 import httpx
@@ -10,6 +10,7 @@ from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
     DirectorActionArcWindow,
+    DirectorActionCorrection,
     DirectorBeat,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
@@ -1492,7 +1493,7 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
 
 
 @pytest.mark.asyncio
-async def test_storyboard_call_receives_compact_corrections() -> None:
+async def test_storyboard_call_receives_structured_corrections() -> None:
     provider, captured = _gateway_provider_with_responses(_action_storyboard_response())
     analysis = _analysis().model_copy(
         update={"director_plan": FrameAnchoredDirectorPlan.model_validate(_director_plan_payload())}
@@ -1504,14 +1505,18 @@ async def test_storyboard_call_receives_compact_corrections() -> None:
         analysis,
         12,
         "9:16",
-        director_correction_requirements=[
-            "Execute uncovered core behavior beat core_behavior in subject/state motion "
-            "and show its visible payoff."
+        director_corrections=[
+            DirectorActionCorrection(
+                correction_type="execution",
+                signature_moment_ids=["signature_001"],
+                source_behavior_beat_ids=["core_behavior"],
+                instruction="Execute the linked subject/state action and show its payoff.",
+            )
         ],
     )
 
     payload = captured[0]["input"][1]["content"][0]["text"]
-    assert "director_correction_requirements" in payload
+    assert "director_corrections" in payload
     assert "core_behavior" in payload
     assert payload.count("frame_analysis") == 1
 
@@ -1566,9 +1571,13 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
         analysis.model_copy(update={"director_plan": director_plan}),
         duration_seconds,
         "9:16",
-        director_correction_requirements=[
-            "Execute uncovered core behavior beat core_behavior in subject/state motion "
-            "and show its visible payoff."
+        director_corrections=[
+            DirectorActionCorrection(
+                correction_type="execution",
+                signature_moment_ids=[director_plan.signature_moment_plan[0].moment_id],
+                source_behavior_beat_ids=["core_behavior"],
+                instruction="Execute the linked subject/state action and show its payoff.",
+            )
         ],
     )
 
@@ -1580,7 +1589,8 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
     ]
     assert execution_scene.source_behavior_beat_ids == ["core_behavior"]
     assert execution_scene.action_result_requirement is not None
-    assert "Corrections:" in execution_scene.action_result_requirement
+    assert "Corrections:" not in execution_scene.action_result_requirement
+    assert "linked subject/state action" in execution_scene.motion.lower()
     assert execution_scene.subject_motion_intensity == 0.9
 
     return_scene = next(scene for scene in storyboard.scenes if scene.anchor_return_instruction)
@@ -1661,7 +1671,12 @@ async def test_mock_director_and_storyboard_cover_every_core_behavior() -> None:
         "core_state_change",
     }
     assert execution.motion
-    assert execution.action_result_requirement
+    payoff = next(
+        scene
+        for scene in storyboard.scenes
+        if scene.action_result_requirement and scene.scene_index > execution.scene_index
+    )
+    assert set(payoff.signature_moment_ids) == set(execution.signature_moment_ids)
     validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 
@@ -2239,3 +2254,210 @@ async def test_gateway_director_plan_normalizes_semantically_valid_object_shapes
         "Keep cause, action, impact, and result distinct. "
         "Application: Peak the effect only at impact."
     ]
+
+def _phase_seconds(plan: FrameAnchoredDirectorPlan, phase: str, duration_seconds: int) -> float:
+    window = next(window for window in plan.action_arc_windows if window.phase == phase)
+    return (window.end_ratio - window.start_ratio) * duration_seconds
+
+
+@pytest.mark.asyncio
+async def test_mock_action_budget_changes_with_temporary_divergence_evidence() -> None:
+    provider = MockLLMProvider()
+    base = _analysis_with_mock_core_behavior()
+    divergent = base.model_copy(
+        update={
+            "transition_brief": base.transition_brief.model_copy(
+                update={
+                    "visual_transition": (
+                        "Temporarily diverge in pose, orientation, and screen position "
+                        "before return."
+                    )
+                }
+            )
+        }
+    )
+
+    base_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, base, 12, "9:16"
+    )
+    divergent_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, divergent, 12, "9:16"
+    )
+
+    assert _phase_seconds(divergent_plan, "action", 12) != pytest.approx(
+        _phase_seconds(base_plan, "action", 12)
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_payoff_budget_changes_with_payoff_readability_evidence() -> None:
+    provider = MockLLMProvider()
+    base = _analysis_with_mock_core_behavior()
+    reference = base.reference_video_analysis
+    assert reference is not None and reference.behavior_graph is not None
+    beat = reference.behavior_graph.beats[0]
+    readable_beat = beat.model_copy(
+        update={
+            "visible_evidence": [
+                "A layered visible consequence must remain readable after execution.",
+                "The resulting target state persists clearly before the return.",
+            ]
+        }
+    )
+    readable = base.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "behavior_graph": reference.behavior_graph.model_copy(
+                        update={"beats": [readable_beat]}
+                    )
+                }
+            )
+        }
+    )
+
+    base_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, base, 12, "9:16"
+    )
+    readable_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, readable, 12, "9:16"
+    )
+
+    assert _phase_seconds(readable_plan, "payoff", 12) != pytest.approx(
+        _phase_seconds(base_plan, "payoff", 12)
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_return_budget_changes_with_endpoint_difference() -> None:
+    provider = MockLLMProvider()
+    base = _analysis_with_mock_core_behavior()
+    aligned = base.model_copy(
+        update={
+            "last_frame": base.last_frame.model_copy(
+                update={
+                    "composition": base.first_frame.composition,
+                    "camera_perspective": base.first_frame.camera_perspective,
+                    "visible_subjects": base.first_frame.visible_subjects,
+                }
+            )
+        }
+    )
+    divergent = aligned.model_copy(
+        update={
+            "last_frame": aligned.last_frame.model_copy(
+                update={
+                    "composition": "A substantially different off-axis ending composition.",
+                    "camera_perspective": "A substantially different elevated perspective.",
+                    "visible_subjects": ["A visibly different ending subject arrangement."],
+                }
+            )
+        }
+    )
+
+    aligned_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, aligned, 12, "9:16"
+    )
+    divergent_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, divergent, 12, "9:16"
+    )
+
+    assert _phase_seconds(divergent_plan, "return", 12) != pytest.approx(
+        _phase_seconds(aligned_plan, "return", 12)
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_action_budget_changes_with_camera_travel_evidence() -> None:
+    provider = MockLLMProvider()
+    base = _analysis_with_mock_core_behavior()
+    reference = base.reference_video_analysis
+    assert reference is not None
+    quiet_segments = [
+        segment.model_copy(
+            update={
+                "camera": segment.camera.model_copy(
+                    update={"movement": "locked", "intensity": "low"}
+                )
+            }
+        )
+        for segment in reference.segments
+    ]
+    travel_segments = [
+        segment.model_copy(
+            update={
+                "camera": segment.camera.model_copy(
+                    update={"movement": "long orbit and dolly travel", "intensity": "high"}
+                )
+            }
+        )
+        for segment in reference.segments
+    ]
+    quiet = base.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"segments": quiet_segments}
+            )
+        }
+    )
+    travel = base.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"segments": travel_segments}
+            )
+        }
+    )
+
+    quiet_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, quiet, 12, "9:16"
+    )
+    travel_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, travel, 12, "9:16"
+    )
+
+    assert _phase_seconds(travel_plan, "action", 12) != pytest.approx(
+        _phase_seconds(quiet_plan, "action", 12)
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_payoff_budget_changes_with_effect_readability_evidence() -> None:
+    provider = MockLLMProvider()
+    base = _analysis_with_mock_core_behavior()
+    reference = base.reference_video_analysis
+    assert reference is not None
+    subtle_segments = [
+        segment.model_copy(update={"effects": ["subtle transient accent"]})
+        for segment in reference.segments
+    ]
+    readable_segments = [
+        segment.model_copy(
+            update={"effects": ["layered persistent effect requiring a readable payoff window"]}
+        )
+        for segment in reference.segments
+    ]
+    subtle = base.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"segments": subtle_segments}
+            )
+        }
+    )
+    readable = base.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"segments": readable_segments}
+            )
+        }
+    )
+
+    subtle_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, subtle, 12, "9:16"
+    )
+    readable_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, readable, 12, "9:16"
+    )
+
+    assert _phase_seconds(readable_plan, "payoff", 12) != pytest.approx(
+        _phase_seconds(subtle_plan, "payoff", 12)
+    )

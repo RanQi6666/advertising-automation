@@ -7,6 +7,7 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCorrection,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
@@ -113,7 +114,7 @@ class LLMProvider(Protocol):
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
-        director_correction_requirements: list[str] | None = None,
+        director_corrections: list[DirectorActionCorrection] | None = None,
     ) -> FrameAnchoredStoryboard:
         """Create an anchored storyboard using the same first and last frames."""
 

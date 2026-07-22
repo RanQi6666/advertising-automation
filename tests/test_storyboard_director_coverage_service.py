@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from backend.app.schemas.ai import (
     DirectorActionCoverageReview,
@@ -345,14 +346,29 @@ def _valid_short_final_inputs() -> tuple[
     return short_storyboard, analysis, review
 
 
-def test_review_marks_unlinked_core_behavior_for_correction() -> None:
+def test_review_marks_unlinked_core_behavior_as_unrecoverable() -> None:
     review = review_director_action_coverage(_analysis(), _plan(source_ids=[]))
-    assert review.status == "corrective"
+    assert review.status == "unrecoverable"
     assert review.uncovered_core_behavior_beat_ids == ["core_behavior"]
-    assert review.correction_requirements == [
-        "Execute uncovered core behavior beat core_behavior in subject/state motion "
-        "and show its visible payoff."
+    assert review.structured_corrections == []
+    assert review.unrecoverable_reasons == [
+        "Core behavior beat core_behavior has no signature/source linkage."
     ]
+
+
+def test_review_binds_linked_return_correction_to_private_ids() -> None:
+    plan = _plan(source_ids=["core_behavior"])
+    moment = plan.signature_moment_plan[0].model_copy(update={"return_strategy": ""})
+    plan = plan.model_copy(update={"signature_moment_plan": [moment]})
+
+    review = review_director_action_coverage(_analysis(), plan)
+
+    assert review.status == "corrective"
+    assert len(review.structured_corrections) == 1
+    correction = review.structured_corrections[0]
+    assert correction.correction_type == "return"
+    assert correction.signature_moment_ids == ["signature_action"]
+    assert correction.source_behavior_beat_ids == ["core_behavior"]
 
 
 def test_review_passes_valid_adapted_action() -> None:
@@ -735,5 +751,274 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
     shared.transition_goal = "Preparation, execution, payoff, and return remain readable in-shot."
     shared.anchor_return_instruction = "Return continuously after payoff."
     storyboard.scenes[-1].visual = "Hold and lock the exact supplied last frame."
+
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+@pytest.mark.parametrize(
+    "motion",
+    [
+        "The subject holds perfectly still.",
+        "The final state remains unchanged.",
+        "Camera circles the subject while the subject remains static.",
+        "The camera moves around the subject.",
+        "The particles move around the product.",
+        "The effect transforms around the material.",
+    ],
+)
+def test_final_validation_rejects_static_or_camera_only_execution_text(
+    motion: str,
+) -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].motion = motion
+
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_signature_schema_rejects_endpoint_only_omit_wrapped_as_infeasible() -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action has a distinct endpoint."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Literal execution is infeasible because it cannot match the final pose."
+        ),
+        "equivalent_replacement_failure": (
+            "An equivalent is infeasible because it cannot preserve the ending composition."
+        ),
+    }
+
+    with pytest.raises(ValidationError, match="endpoint mismatch"):
+        moment_type.model_validate(payload)
+
+
+def test_signature_schema_rejects_when_only_equivalent_reason_is_endpoint_mismatch() -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action has a distinct endpoint."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "No controllable target-compatible entity exists for literal or adapted execution."
+        ),
+        "equivalent_replacement_failure": (
+            "An equivalent cannot preserve the final framing."
+        ),
+    }
+
+    with pytest.raises(ValidationError, match="endpoint mismatch"):
+        moment_type.model_validate(payload)
+
+
+def test_review_rejects_endpoint_only_omit_wrapped_as_infeasible() -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": (
+                "Literal execution is infeasible because it cannot match the final pose."
+            ),
+            "equivalent_replacement_failure": (
+                "An equivalent is infeasible because it cannot preserve the ending composition."
+            ),
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "corrective"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+def test_final_validation_rejects_execution_before_linked_preparation() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[0].visual = (
+        "Temporarily diverge and execute the linked causal action immediately."
+    )
+    storyboard.scenes[0].motion = "The subject changes state immediately."
+    storyboard.scenes[0].transition_goal = None
+    storyboard.scenes[0].signature_moment_ids = ["signature_action"]
+    storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+    storyboard.scenes[1].visual = "Prepare after the action has already started."
+    storyboard.scenes[1].motion = "Prepare the subject after execution begins."
+
+    with pytest.raises(ValueError, match="phase order"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_payoff_before_execution() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[0].visual = "Prepare while showing the result too early."
+    storyboard.scenes[0].motion = None
+    storyboard.scenes[0].action_result_requirement = "Show the payoff before execution."
+    storyboard.scenes[0].signature_moment_ids = ["signature_action"]
+    storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+
+    with pytest.raises(ValueError, match="phase order"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_return_before_execution() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[0].signature_moment_ids = ["signature_action"]
+    storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+    storyboard.scenes[0].anchor_return_instruction = "Return before execution begins."
+    storyboard.scenes[2].anchor_return_instruction = None
+
+    with pytest.raises(ValueError, match="phase order"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_does_not_borrow_second_beat_preparation() -> None:
+    analysis = _analysis_with_core_beats(behavior_types=["action", "state"])
+    first_moment = _plan(source_ids=["core_behavior_1"]).signature_moment_plan[0]
+    second_moment = first_moment.model_copy(
+        update={
+            "moment_id": "signature_state",
+            "source_behavior_beat_ids": ["core_behavior_2"],
+            "adapted_action": "Execute the second linked state change.",
+            "visible_payoff": "Show the second linked result.",
+        }
+    )
+    plan = _plan(source_ids=["core_behavior_1"]).model_copy(
+        update={"signature_moment_plan": [first_moment, second_moment]}
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    storyboard = FrameAnchoredStoryboard.model_validate(
+        {
+            "duration_seconds": 10,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 1,
+                    "frame_anchor": "first_frame",
+                    "visual": "Prepare only the second linked state change.",
+                    "motion": "Prepare the second subject state.",
+                    "signature_moment_ids": ["signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior_2"],
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 1,
+                    "end_second": 4,
+                    "frame_anchor": "transition",
+                    "visual": "Execute the first linked action.",
+                    "motion": "The subject performs the first state-changing action.",
+                    "action_result_requirement": "Show the first linked result.",
+                    "signature_moment_ids": ["signature_action"],
+                    "source_behavior_beat_ids": ["core_behavior_1"],
+                    "camera_instruction": "Support the first action.",
+                    "effect_timing": "Support its result.",
+                },
+                {
+                    "scene_index": 3,
+                    "start_second": 4,
+                    "end_second": 7,
+                    "frame_anchor": "transition",
+                    "visual": "Execute the second linked state change.",
+                    "motion": "The subject performs the second visible state change.",
+                    "action_result_requirement": "Show the second linked result.",
+                    "signature_moment_ids": ["signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior_2"],
+                    "camera_instruction": "Support the second action.",
+                    "effect_timing": "Support its result.",
+                },
+                {
+                    "scene_index": 4,
+                    "start_second": 7,
+                    "end_second": 9,
+                    "frame_anchor": "transition",
+                    "visual": "Return both linked moments to the final anchor.",
+                    "anchor_return_instruction": "Return continuously after both payoffs.",
+                    "signature_moment_ids": ["signature_action", "signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior_1", "core_behavior_2"],
+                },
+                {
+                    "scene_index": 5,
+                    "start_second": 9,
+                    "end_second": 10,
+                    "frame_anchor": "last_frame",
+                    "visual": "Hold and lock the exact supplied last frame.",
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="preparation"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_long_storyboard_rejects_all_action_phases_in_one_scene() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes = [
+        storyboard.scenes[0].model_copy(
+            update={
+                "end_second": 1,
+                "visual": "Hold the exact supplied opening anchor.",
+                "motion": None,
+                "transition_goal": None,
+            }
+        ),
+        storyboard.scenes[1].model_copy(
+            update={
+                "scene_index": 2,
+                "start_second": 1,
+                "end_second": 9,
+                "visual": "Prepare, execute, show payoff, then return continuously.",
+                "transition_goal": (
+                    "Preparation, execution, payoff, and return all share this scene."
+                ),
+                "anchor_return_instruction": "Return continuously after the payoff.",
+            }
+        ),
+        storyboard.scenes[-1].model_copy(
+            update={"scene_index": 3, "start_second": 9, "end_second": 10}
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="phase sharing"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+def test_long_storyboard_allows_return_and_final_hold_scene_when_director_windows_overlap() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    plan = analysis.director_plan
+    assert plan is not None
+    overlapping_windows = [
+        window.model_copy(update={"end_ratio": 0.95})
+        if window.phase == "return"
+        else window.model_copy(update={"start_ratio": 0.9})
+        if window.phase == "final_lock"
+        else window
+        for window in plan.action_arc_windows
+    ]
+    plan = plan.model_copy(update={"action_arc_windows": overlapping_windows})
+    analysis = analysis.model_copy(update={"director_plan": plan})
+
+    storyboard.scenes[2].anchor_return_instruction = None
+    storyboard.scenes[-1].signature_moment_ids = ["signature_action"]
+    storyboard.scenes[-1].source_behavior_beat_ids = ["core_behavior"]
+    storyboard.scenes[-1].anchor_return_instruction = (
+        "Return continuously, then hold and lock the exact supplied final frame."
+    )
 
     validate_final_storyboard_action_coverage(storyboard, analysis, review)

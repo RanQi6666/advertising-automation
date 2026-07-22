@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import re
+
 from backend.app.schemas.ai import (
+    DirectorActionCorrection,
     DirectorActionCoverageReview,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     ReferenceBehaviorBeat,
+    _endpoint_mismatch_only,
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
@@ -76,6 +80,39 @@ _INFEASIBILITY_TERMS = (
     "unavailable",
     "absent",
 )
+_STATIC_EXECUTION_TERMS = (
+    "hold",
+    "still",
+    "static",
+    "unchanged",
+    "remain",
+    "stabilize",
+    "lock",
+    "freeze",
+)
+_SUBJECT_EXECUTION_PATTERNS = (
+    r"\bexecut(?:e|es|ed|ing)\b",
+    r"\bperform(?:s|ed|ing)?\b",
+    r"\bcomplet(?:e|es|ed|ing)\b",
+    r"\bchang(?:e|es|ed|ing)\b",
+    r"\btransform(?:s|ed|ing)?\b",
+    r"\bmov(?:e|es|ed|ing)\b",
+    r"\badvanc(?:e|es|ed|ing)\b",
+    r"\bretreat(?:s|ed|ing)?\b",
+    r"\bturn(?:s|ed|ing)?\b",
+    r"\brotat(?:e|es|ed|ing)\b",
+    r"\brais(?:e|es|ed|ing)\b",
+    r"\blower(?:s|ed|ing)?\b",
+    r"\breach(?:es|ed|ing)?\b",
+    r"\bstep(?:s|ped|ping)?\b",
+    r"\bopen(?:s|ed|ing)?\b",
+    r"\bclos(?:e|es|ed|ing)\b",
+    r"\bexpand(?:s|ed|ing)?\b",
+    r"\bcontract(?:s|ed|ing)?\b",
+    r"\bdeform(?:s|ed|ing)?\b",
+    r"\bshift(?:s|ed|ing)?\b",
+)
+
 
 
 def _required_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[ReferenceBehaviorBeat]:
@@ -136,17 +173,6 @@ def _has_execution_detail(moment: object) -> bool:
     return assigned_core_beat and bool(adapted_action) and bool(visible_payoff)
 
 
-def _endpoint_mismatch_only(*reasons: str) -> bool:
-    text = " ".join(reason.casefold() for reason in reasons if reason)
-    endpoint = any(term in text for term in ("final", "last frame", "endpoint", "ending"))
-    mismatch = any(
-        term in text
-        for term in ("pose", "position", "orientation", "framing", "composition", "scale")
-    )
-    infeasible = any(term in text for term in _INFEASIBILITY_TERMS)
-    return endpoint and mismatch and not infeasible
-
-
 def _valid_omission(moment: object) -> bool:
     omission_reason = str(getattr(moment, "omission_reason", "") or "").strip()
     replacement_failure = str(getattr(moment, "equivalent_replacement_failure", "") or "").strip()
@@ -168,6 +194,24 @@ def review_director_action_coverage(
     if not required_ids:
         return DirectorActionCoverageReview(status="pass")
 
+    linked_required_ids = {
+        source_id
+        for moment in director_plan.signature_moment_plan
+        for source_id in moment.source_behavior_beat_ids
+        if source_id in required_ids
+    }
+    unlinked_ids = [beat_id for beat_id in required_ids if beat_id not in linked_required_ids]
+    if unlinked_ids:
+        return DirectorActionCoverageReview(
+            status="unrecoverable",
+            required_core_behavior_beat_ids=required_ids,
+            uncovered_core_behavior_beat_ids=unlinked_ids,
+            unrecoverable_reasons=[
+                f"Core behavior beat {beat_id} has no signature/source linkage."
+                for beat_id in unlinked_ids
+            ],
+        )
+
     plan_core_beat_ids = {
         beat.beat_id for beat in director_plan.climax_beats if beat.importance == "core"
     }
@@ -177,6 +221,25 @@ def review_director_action_coverage(
     missing_execution_ids: list[str] = []
     missing_return_ids: list[str] = []
     corrections: list[str] = []
+    structured_corrections: list[DirectorActionCorrection] = []
+
+    def add_structured_correction(
+        *,
+        correction_type: str,
+        moment_ids: list[str],
+        source_ids: list[str],
+        instruction: str,
+    ) -> None:
+        if not moment_ids or not source_ids:
+            return
+        correction = DirectorActionCorrection(
+            correction_type=correction_type,
+            signature_moment_ids=list(dict.fromkeys(moment_ids)),
+            source_behavior_beat_ids=list(dict.fromkeys(source_ids)),
+            instruction=instruction,
+        )
+        if correction not in structured_corrections:
+            structured_corrections.append(correction)
 
     for moment in director_plan.signature_moment_plan:
         referenced_ids = [
@@ -189,16 +252,27 @@ def review_director_action_coverage(
                 validly_omitted_id_set.update(referenced_ids)
             else:
                 invalid_omission_ids.append(moment.moment_id)
+                instruction = (
+                    "Replace the invalid omission with preserve, adapt, or an equivalent target "
+                    "action, or prove both execution and equivalent replacement are infeasible."
+                )
                 corrections.append(
                     f"Replace invalid omission {moment.moment_id} with preserve, adapt, or "
                     "an equivalent target action, or prove both execution and equivalent "
                     "replacement are infeasible."
                 )
+                add_structured_correction(
+                    correction_type="execution",
+                    moment_ids=[moment.moment_id],
+                    source_ids=referenced_ids,
+                    instruction=instruction,
+                )
             continue
 
-        has_execution = (
-            _has_execution_detail(moment) and (moment.assigned_beat_id or "") in plan_core_beat_ids
-        )
+        assigned_core_beat = (moment.assigned_beat_id or "") in plan_core_beat_ids
+        has_action = bool(moment.adapted_action.strip()) and assigned_core_beat
+        has_payoff = bool(moment.visible_payoff.strip())
+        has_execution = has_action and has_payoff
         has_return = bool(moment.return_strategy.strip())
 
         if not has_execution:
@@ -207,11 +281,28 @@ def review_director_action_coverage(
                 "Provide executable subject/state action, assigned core beat, and visible payoff "
                 f"for signature moment {moment.moment_id}."
             )
+            correction_type = "payoff" if has_action and not has_payoff else "execution"
+            add_structured_correction(
+                correction_type=correction_type,
+                moment_ids=[moment.moment_id],
+                source_ids=referenced_ids,
+                instruction=(
+                    "Provide a visible payoff after the linked action executes."
+                    if correction_type == "payoff"
+                    else "Provide executable subject/state action with an assigned core beat."
+                ),
+            )
         if not has_return:
             missing_return_ids.append(moment.moment_id)
             corrections.append(
                 f"State how signature moment {moment.moment_id} returns continuously to "
                 "the exact last anchor."
+            )
+            add_structured_correction(
+                correction_type="return",
+                moment_ids=[moment.moment_id],
+                source_ids=referenced_ids,
+                instruction="Return continuously from the linked payoff to the exact last anchor.",
             )
         if has_execution and has_return:
             covered_id_set.update(referenced_ids)
@@ -223,28 +314,57 @@ def review_director_action_coverage(
         for beat_id in required_ids
         if beat_id not in covered_id_set and beat_id not in validly_omitted_id_set
     ]
-    for beat_id in uncovered_ids:
-        corrections.append(
-            f"Execute uncovered core behavior beat {beat_id} in subject/state motion and "
-            "show its visible payoff."
-        )
 
     has_executable_required = bool(set(required_ids) - validly_omitted_id_set)
+    correction_moments = [
+        moment
+        for moment in director_plan.signature_moment_plan
+        if set(moment.source_behavior_beat_ids).intersection(required_ids)
+        and not (moment.strategy == "omit" and _valid_omission(moment))
+    ]
+    correction_moment_ids = [moment.moment_id for moment in correction_moments]
+    correction_source_ids = [
+        source_id
+        for moment in correction_moments
+        for source_id in moment.source_behavior_beat_ids
+        if source_id in required_ids
+    ]
     if has_executable_required and not _has_required_arc(director_plan):
-        corrections.append(
+        instruction = (
             "Provide dynamically ordered preparation, action, payoff, return, and final_lock "
             "windows ending at ratio 1.0."
         )
+        corrections.append(instruction)
+        add_structured_correction(
+            correction_type="action_arc",
+            moment_ids=correction_moment_ids,
+            source_ids=correction_source_ids,
+            instruction=instruction,
+        )
     if has_executable_required and not director_plan.final_anchor_return.strip():
-        corrections.append("State the continuous final-anchor return before the final lock.")
+        instruction = "State the continuous final-anchor return before the final lock."
+        corrections.append(instruction)
+        add_structured_correction(
+            correction_type="return",
+            moment_ids=correction_moment_ids,
+            source_ids=correction_source_ids,
+            instruction=instruction,
+        )
     if has_executable_required and _support_only_flattened(core_beats, director_plan):
-        corrections.append(
+        instruction = (
             "Increase subject/state motion for the core action; camera or effects alone "
             "cannot execute it."
         )
+        corrections.append(instruction)
+        add_structured_correction(
+            correction_type="execution",
+            moment_ids=correction_moment_ids,
+            source_ids=correction_source_ids,
+            instruction=instruction,
+        )
 
     return DirectorActionCoverageReview(
-        status="corrective" if corrections else "pass",
+        status="corrective" if corrections or structured_corrections else "pass",
         required_core_behavior_beat_ids=required_ids,
         covered_core_behavior_beat_ids=covered_ids,
         validly_omitted_core_behavior_beat_ids=omitted_ids,
@@ -253,6 +373,7 @@ def review_director_action_coverage(
         missing_execution_detail_moment_ids=missing_execution_ids,
         missing_return_moment_ids=missing_return_ids,
         correction_requirements=list(dict.fromkeys(corrections)),
+        structured_corrections=structured_corrections,
     )
 
 
@@ -260,10 +381,35 @@ def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
     motion = (scene.motion or "").strip().casefold()
     if not motion:
         return False
-    has_support_only_cue = any(term in motion for term in _SUPPORT_ONLY_MOTION_TERMS)
-    if not has_support_only_cue:
-        return True
-    return any(term in motion for term in _SUBJECT_STATE_MOTION_TERMS)
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[.;]|\b(?:while|whereas|as)\b", motion)
+        if clause.strip()
+    ]
+    for clause in clauses:
+        has_support_cue = any(term in clause for term in _SUPPORT_ONLY_MOTION_TERMS)
+        has_subject_cue = any(term in clause for term in _SUBJECT_STATE_MOTION_TERMS)
+        has_static_cue = any(term in clause for term in _STATIC_EXECUTION_TERMS)
+        execution_matches = [
+            match
+            for pattern in _SUBJECT_EXECUTION_PATTERNS
+            if (match := re.search(pattern, clause)) is not None
+        ]
+        if has_support_cue and not execution_matches:
+            continue
+        if has_static_cue and not execution_matches:
+            continue
+        for match in execution_matches:
+            prefix = clause[: match.start()]
+            subject_precedes_execution = any(
+                re.search(rf"\b{re.escape(term)}\b", prefix)
+                for term in _SUBJECT_STATE_MOTION_TERMS
+            )
+            if subject_precedes_execution or not has_support_cue:
+                return True
+            if not has_subject_cue:
+                continue
+    return False
 
 
 def _scene_text(scene: FrameAnchoredStoryboardScene) -> str:
@@ -297,6 +443,117 @@ def _scene_has_temporary_divergence(scene: FrameAnchoredStoryboardScene) -> bool
         return True
     text = _scene_text(scene)
     return any(term in text for term in _DIVERGENCE_TERMS)
+
+
+def _scene_links_moment(
+    scene: FrameAnchoredStoryboardScene,
+    moment_id: str,
+    source_ids: set[str],
+) -> bool:
+    return moment_id in scene.signature_moment_ids or bool(
+        source_ids.intersection(scene.source_behavior_beat_ids)
+    )
+
+
+def _phase_compression_required(
+    storyboard: FrameAnchoredStoryboard,
+    source_ids: set[str],
+    frame_analysis: FrameAnalysis,
+) -> bool:
+    beats = {beat.beat_id: beat for beat in _required_core_behavior_beats(frame_analysis)}
+    execution_readability = sum(
+        max(0.08, beats[beat_id].minimum_readable_duration_seconds)
+        for beat_id in source_ids
+        if beat_id in beats
+    )
+    required_readability = execution_readability + 4 * 0.8
+    return storyboard.duration_seconds <= required_readability + _TIMELINE_TOLERANCE_SECONDS
+
+
+def _director_phases_overlap(plan: FrameAnchoredDirectorPlan, left: str, right: str) -> bool:
+    left_windows = [window for window in plan.action_arc_windows if window.phase == left]
+    right_windows = [window for window in plan.action_arc_windows if window.phase == right]
+    return any(
+        right_window.start_ratio < left_window.end_ratio
+        for left_window in left_windows
+        for right_window in right_windows
+    )
+
+
+def _validate_moment_phase_order(
+    *,
+    storyboard: FrameAnchoredStoryboard,
+    frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
+    moment_id: str,
+    source_ids: set[str],
+    linked_scene_indexes: list[int],
+    execution_scene_indexes: list[int],
+    final_hold_index: int,
+    allow_global_preparation: bool,
+) -> None:
+    preparation_indexes = [
+        index
+        for index, scene in enumerate(storyboard.scenes)
+        if _scene_has_preparation(scene)
+        and (
+            _scene_links_moment(scene, moment_id, source_ids)
+            or (allow_global_preparation and not scene.signature_moment_ids)
+        )
+    ]
+    payoff_indexes = [
+        index
+        for index in linked_scene_indexes
+        if (storyboard.scenes[index].action_result_requirement or "").strip()
+    ]
+    return_indexes = [
+        index
+        for index in linked_scene_indexes
+        if (storyboard.scenes[index].anchor_return_instruction or "").strip()
+    ]
+    if not preparation_indexes:
+        raise ValueError(
+            f"storyboard is missing preparation evidence for signature moment {moment_id}"
+        )
+    if not payoff_indexes:
+        raise ValueError(f"signature moment {moment_id} lacks visible payoff")
+    if not return_indexes:
+        raise ValueError(f"signature moment {moment_id} lacks linked anchor return")
+
+    phase_indexes = (
+        min(preparation_indexes),
+        min(execution_scene_indexes),
+        min(payoff_indexes),
+        min(return_indexes),
+    )
+    if not (
+        phase_indexes[0] <= phase_indexes[1] <= phase_indexes[2] <= phase_indexes[3]
+    ):
+        raise ValueError(f"signature moment {moment_id} has invalid phase order")
+
+    compression_required = _phase_compression_required(
+        storyboard, source_ids, frame_analysis
+    )
+    phase_names = ("preparation", "action", "payoff", "return")
+    for index, (left_index, right_index) in enumerate(
+        zip(phase_indexes, phase_indexes[1:], strict=False)
+    ):
+        if left_index != right_index:
+            continue
+        if compression_required or _director_phases_overlap(
+            plan, phase_names[index], phase_names[index + 1]
+        ):
+            continue
+        raise ValueError(
+            f"signature moment {moment_id} uses unsupported same-scene phase sharing"
+        )
+    return_and_hold_may_share = compression_required or _director_phases_overlap(
+        plan, "return", "final_lock"
+    )
+    if phase_indexes[3] > final_hold_index or (
+        phase_indexes[3] == final_hold_index and not return_and_hold_may_share
+    ):
+        raise ValueError(f"signature moment {moment_id} return must precede final hold")
 
 
 def _validate_timeline(storyboard: FrameAnchoredStoryboard) -> None:
@@ -358,6 +615,10 @@ def validate_final_storyboard_action_coverage(
 
     executed_source_ids: set[str] = set()
     execution_scene_indexes: list[int] = []
+    executable_moments = [
+        moment for moment in plan.signature_moment_plan if moment.strategy != "omit"
+    ]
+    final_hold_index = len(storyboard.scenes) - 1
     for moment in plan.signature_moment_plan:
         if moment.strategy == "omit":
             continue
@@ -366,6 +627,11 @@ def validate_final_storyboard_action_coverage(
             raise ValueError(f"storyboard is missing required signature moment: {moment.moment_id}")
 
         referenced_required_ids = required_id_set.intersection(moment.source_behavior_beat_ids)
+        linked_scene_indexes = [
+            index
+            for index, scene in enumerate(storyboard.scenes)
+            if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
+        ]
         if referenced_required_ids:
             execution_scenes = [
                 scene
@@ -382,6 +648,7 @@ def validate_final_storyboard_action_coverage(
         }
         if requires_execution and not execution_scenes:
             raise ValueError(f"signature moment {moment.moment_id} lacks subject/state execution")
+        moment_execution_indexes = [storyboard.scenes.index(scene) for scene in execution_scenes]
         for scene in execution_scenes:
             execution_scene_indexes.append(storyboard.scenes.index(scene))
             if moment.temporary_divergence.strip() and not _scene_has_temporary_divergence(scene):
@@ -398,15 +665,23 @@ def validate_final_storyboard_action_coverage(
             (scene.effect_timing or "").strip() for scene in scenes
         ):
             raise ValueError(f"signature moment {moment.moment_id} lacks effect support")
-        if not any((scene.action_result_requirement or "").strip() for scene in scenes):
-            raise ValueError(f"signature moment {moment.moment_id} lacks visible payoff")
         if moment.temporary_divergence.strip() and not any(
             _scene_has_temporary_divergence(scene) for scene in scenes
         ):
             raise ValueError(f"signature moment {moment.moment_id} lacks temporary divergence")
 
-        if not any((scene.anchor_return_instruction or "").strip() for scene in scenes):
-            raise ValueError(f"signature moment {moment.moment_id} lacks linked anchor return")
+        if requires_execution:
+            _validate_moment_phase_order(
+                storyboard=storyboard,
+                frame_analysis=frame_analysis,
+                plan=plan,
+                moment_id=moment.moment_id,
+                source_ids=referenced_required_ids,
+                linked_scene_indexes=linked_scene_indexes,
+                execution_scene_indexes=moment_execution_indexes,
+                final_hold_index=final_hold_index,
+                allow_global_preparation=len(executable_moments) == 1,
+            )
 
     missing_source_ids = executable_required_ids - executed_source_ids
     if missing_source_ids:

@@ -23,6 +23,7 @@ from backend.app.integrations.llm.language import (
 from backend.app.schemas.ad_performance import AdPerformanceOptimizationWorkOrder
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCorrection,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
@@ -557,7 +558,7 @@ class OpenAILLMProvider:
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
-        director_correction_requirements: list[str] | None = None,
+        director_corrections: list[DirectorActionCorrection] | None = None,
     ) -> FrameAnchoredStoryboard:
         data = await self._vision_json_completion(
             system=_frame_anchored_storyboard_system_prompt(),
@@ -568,7 +569,10 @@ class OpenAILLMProvider:
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
                     "frame_analysis": frame_analysis.model_dump(mode="json"),
-                    "director_correction_requirements": director_correction_requirements or [],
+                    "director_corrections": [
+                        correction.model_dump(mode="json")
+                        for correction in (director_corrections or [])
+                    ],
                 },
             ),
         )
@@ -2004,8 +2008,11 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "source behavior IDs into source_behavior_beat_ids. One continuous scene may carry "
         "multiple "
         "IDs when duration is short. The final last_frame scene must end exactly at "
-        "duration_seconds. If director_correction_requirements contains items, satisfy each one in "
-        "the returned scenes without repeating frame_analysis or inventing new source evidence. "
+        "duration_seconds. If director_corrections contains items, use each correction_type "
+        "and its exact signature_moment_ids and source_behavior_beat_ids to update only the "
+        "linked scene fields. Satisfy it in the returned scenes without repeating frame_analysis "
+        "or inventing new source "
+        "evidence. "
         "Reference characters, appearance, props, products, brands, text, rewards, UI, settings, "
         "camera, transitions, and effects may be preserved when their visual_identity_mappings "
         "permit it. Follow every mapping: preserve keeps the reference element; "
