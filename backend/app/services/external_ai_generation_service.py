@@ -862,12 +862,15 @@ def _format_frame_anchored_storyboard_text(
         ]
         if scene.overlay_instruction is not None:
             overlay = scene.overlay_instruction
-            lines.append(
-                "Overlay lifecycle: "
-                f"{overlay.reference_element} -> {overlay.strategy}; "
-                f"timing: {overlay.timing_instruction}; "
-                f"final frame: {overlay.final_frame_requirement}"
-            )
+            if isinstance(overlay, str):
+                lines.append(f"Overlay lifecycle: {overlay}")
+            else:
+                lines.append(
+                    "Overlay lifecycle: "
+                    f"{overlay.reference_element} -> {overlay.strategy}; "
+                    f"timing: {overlay.timing_instruction}; "
+                    f"final frame: {overlay.final_frame_requirement}"
+                )
         if scene.notes:
             lines.append(f"Notes: {scene.notes}")
         blocks.append("\n".join(lines))
