@@ -53,6 +53,7 @@ from backend.app.services import external_ai_generation_service as external_ai_s
 from backend.app.services.external_ai_generation_service import (
     ExternalAIGenerationService,
     _format_frame_anchored_storyboard_text,
+    _format_optional_intensity,
 )
 from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
@@ -890,17 +891,27 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     assert create_response.status_code == 202
     assert poll_response.status_code == 200
     assert poll_body["code"] == 0
-    assert poll_body["data"]["status"] == "succeeded"
-    assert poll_body["data"]["request_id"] == "external-ai-storyboard-v2-1"
-    assert poll_body["data"]["duration_seconds"] == 12
-    assert poll_body["data"]["aspect_ratio"] == "9:16"
-    assert "Scene 1" in poll_body["data"]["storyboard_text"]
-    assert "Cinematic beat:" not in poll_body["data"]["storyboard_text"]
-    assert "Cinematic beats:" not in poll_body["data"]["storyboard_text"]
-    assert "Return to final anchor: Return continuously to the supplied last frame." in poll_body["data"]["storyboard_text"]
-    assert "frame_analysis" not in poll_body["data"]
-    assert "director_plan" not in poll_body["data"]
-    assert "storyboard" not in poll_body["data"]
+    data = poll_body["data"]
+    assert data["status"] == "succeeded"
+    assert data["request_id"] == "external-ai-storyboard-v2-1"
+    assert data["storyboard_text"]
+    assert data["duration_seconds"] == 12
+    assert data["aspect_ratio"] == "9:16"
+    assert "Scene 1" in data["storyboard_text"]
+    assert "Cinematic beat:" not in data["storyboard_text"]
+    assert "Cinematic beats:" not in data["storyboard_text"]
+    assert "Return to final anchor: Return continuously to the supplied last frame." in data["storyboard_text"]
+    for private_field in (
+        "frame_analysis",
+        "director_plan",
+        "director_action_coverage_review",
+        "frame_anchored_storyboard_candidate",
+        "frame_anchored_storyboard",
+        "signature_moment_ids",
+        "source_behavior_beat_ids",
+        "storyboard",
+    ):
+        assert private_field not in data
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
         "direct_frame_anchored_video_storyboard",
@@ -1264,6 +1275,13 @@ async def test_storyboard_v2_uncached_success_uses_exactly_three_llm_calls(
             "generate_frame_anchored_video_storyboard",
         ]
     await engine.dispose()
+
+
+def test_format_optional_intensity_compacts_none_zero_and_fractional_values() -> None:
+    assert _format_optional_intensity(None) == "-"
+    assert _format_optional_intensity(0.0) == "0"
+    assert _format_optional_intensity(0.25) == "0.25"
+    assert _format_optional_intensity(0.05) == "0.05"
 
 
 def test_frame_anchored_formatter_hides_private_ids() -> None:

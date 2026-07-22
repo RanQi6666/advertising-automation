@@ -5,6 +5,7 @@ from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
+    validate_director_coverage,
 )
 from backend.app.services.storyboard_director_coverage_service import (
     review_director_action_coverage,
@@ -365,6 +366,16 @@ def test_review_does_not_force_action_without_reference_core_behavior() -> None:
     assert review_director_action_coverage(analysis, plan).status == "pass"
 
 
+def test_low_motion_reference_does_not_invent_core_action() -> None:
+    analysis = _analysis(behavior_type="overlay")
+    plan = _plan(source_ids=[]).model_copy(
+        update={"signature_moment_plan": [], "action_arc_windows": [], "final_anchor_return": ""}
+    )
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+    assert review.correction_requirements == []
+
+
 def test_final_validation_rejects_missing_signature_id() -> None:
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[1].signature_moment_ids = []
@@ -457,6 +468,12 @@ def test_final_validation_rejects_scene_timing_out_of_order() -> None:
 
 def test_final_validation_accepts_valid_storyboard() -> None:
     storyboard, analysis, review = _valid_final_inputs()
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_short_duration_may_share_action_payoff_and_return_scene() -> None:
+    storyboard, analysis, review = _valid_short_final_inputs()
+    validate_director_coverage(storyboard, analysis.director_plan)
     validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 
