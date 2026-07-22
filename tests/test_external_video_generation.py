@@ -572,9 +572,26 @@ async def test_external_video_generation_start_task_then_polling_returns_url(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("images", "expected_source_image_count", "request_id"),
+    [
+        ([], 0, "external-video-passthrough-text"),
+        (
+            [
+                ONE_PIXEL_PNG_BASE64,
+                f"data:image/png;base64,{ONE_PIXEL_PNG_BASE64}",
+            ],
+            2,
+            "external-video-passthrough-frames",
+        ),
+    ],
+)
 async def test_external_video_start_passes_storyboard_text_without_backend_augmentation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    images: list[str],
+    expected_source_image_count: int,
+    request_id: str,
 ) -> None:
     monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
     get_settings.cache_clear()
@@ -629,8 +646,8 @@ Continue the exact first-frame action, then resolve into the supplied last frame
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
             json=_video_payload(
-                external_request_id="external-video-passthrough",
-                images=[],
+                external_request_id=request_id,
+                images=images,
                 storyboard_text=storyboard_text,
             ),
         )
@@ -657,7 +674,10 @@ Continue the exact first-frame action, then resolve into the supplied last frame
         client.close()
 
     assert response.status_code == 202
-    assert captured_source_images == [[]]
+    assert len(captured_source_images) == 1
+    assert len(captured_source_images[0]) == expected_source_image_count
+    if expected_source_image_count == 0:
+        assert captured_source_images == [[]]
     assert captured_prompts == [storyboard_text.strip()]
     assert len(captured_metadata) == 1
     assert "creative_strategy" not in captured_metadata[0]
@@ -1196,9 +1216,151 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_images", "second_images", "expected_mode", "expected_asset_count"),
+    [
+        (
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            [],
+            EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+            2,
+        ),
+        (
+            [],
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+            0,
+        ),
+    ],
+)
+async def test_external_video_generation_same_id_keeps_original_mode(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_images: list[str],
+    second_images: list[str],
+    expected_mode: str,
+    expected_asset_count: int,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, _ = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    request_id = f"same-id-{expected_mode}"
+    try:
+        first = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id=request_id,
+                images=first_images,
+            ),
+        )
+        second = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id=request_id,
+                images=second_images,
+            ),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["data"]["job_id"] == second.json()["data"]["job_id"]
+    assert "generation_mode" not in first.json()["data"]
+    assert "generation_mode" not in second.json()["data"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert len(assets) == expected_asset_count
+    assert len(videos) == 1
+    assert videos[0].metadata_json["generation_mode"] == expected_mode
+    assert len(tasks) == 1
+    assert tasks[0].metadata_json["generation_mode"] == expected_mode
+    assert len(enqueued) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_invalid_frame_does_not_fallback_to_text(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app, _ = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id="invalid-frame-no-fallback",
+                images=[ONE_PIXEL_PNG_BASE64, "not-valid-base64"],
+            ),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert "valid base64" in response.json()["message"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert assets == []
+    assert videos == []
+    assert tasks == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_images", "second_images", "expected_mode"),
+    [
+        (
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+        ),
+        (
+            [],
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+        ),
+    ],
+)
 async def test_external_video_generation_requeues_retryable_failed_duplicate_request(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    first_images: list[str],
+    second_images: list[str],
+    expected_mode: str,
 ) -> None:
     monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
     get_settings.cache_clear()
@@ -1222,12 +1384,19 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
         monkeypatch,
         token="video-token",
     )
-    payload = _video_payload(external_request_id="external-video-requeue")
+    first_payload = _video_payload(
+        external_request_id=f"external-video-requeue-{expected_mode}",
+        images=first_images,
+    )
+    second_payload = _video_payload(
+        external_request_id=f"external-video-requeue-{expected_mode}",
+        images=second_images,
+    )
     try:
         first = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=payload,
+            json=first_payload,
         )
         first_job_id = first.json()["data"]["job_id"]
         assert len(enqueued) == 1
@@ -1261,7 +1430,7 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
         second = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=payload,
+            json=second_payload,
         )
     finally:
         app.dependency_overrides.clear()
@@ -1296,9 +1465,11 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
     assert video.metadata_json["previous_provider_start_error"] == (
         "Volcengine video API request failed: request failed before response"
     )
+    assert video.metadata_json["generation_mode"] == expected_mode
     assert len(tasks) == 2
     assert tasks[-1].status == "queued"
     assert tasks[-1].task_type == "external_video_start"
+    assert tasks[-1].metadata_json["generation_mode"] == expected_mode
     await engine.dispose()
 
 
