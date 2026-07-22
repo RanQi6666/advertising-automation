@@ -304,6 +304,51 @@ DirectorOmissionInfeasibilityCategory = Literal[
 ]
 
 
+_OMISSION_CATEGORY_TEXT_REQUIREMENTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "target_capability_unavailable": (
+        ("target", "subject", "state", "entity", "object", "asset"),
+        ("unavailable", "no ", "cannot", "lack", "without", "absent", "controll"),
+    ),
+    "mechanism_unavailable": (
+        ("mechanism", "articulat", "actuator", "component", "movable part"),
+        ("unavailable", "no ", "cannot", "lack", "without", "absent", "impossible"),
+    ),
+    "identity_semantics_conflict": (
+        ("identity", "semantic", "brand", "logo", "text", "meaning"),
+        ("conflict", "incompat", "cannot transfer", "not permitted", "would change"),
+    ),
+    "causal_equivalent_unavailable": (
+        ("equivalent", "alternative", "replacement"),
+        ("causal", "same role", "same effect", "same intensity", "required role"),
+        ("unavailable", "no ", "cannot", "lack", "without", "absent", "impossible"),
+    ),
+}
+
+
+def omission_infeasibility_matches_category(
+    category: DirectorOmissionInfeasibilityCategory | None,
+    reason: str | None,
+    evidence: str | None,
+    *,
+    literal: bool,
+) -> bool:
+    if category is None or category == "endpoint_constraint_only":
+        return False
+    if literal and category == "causal_equivalent_unavailable":
+        return False
+    requirements = _OMISSION_CATEGORY_TEXT_REQUIREMENTS.get(category)
+    if requirements is None:
+        return False
+    for value in (reason, evidence):
+        normalized = (value or "").strip().casefold()
+        if not normalized or not all(
+            any(term in normalized for term in alternatives)
+            for alternatives in requirements
+        ):
+            return False
+    return True
+
+
 class DirectorActionArcWindow(BaseModel):
     window_id: str = Field(min_length=1)
     phase: DirectorActionArcPhase
@@ -428,13 +473,25 @@ class DirectorSignatureMoment(BaseModel):
                     "omitted signature moment requires structured equivalent infeasibility; "
                     "endpoint mismatch is insufficient"
                 )
-            if self.literal_infeasibility_category == "endpoint_constraint_only":
+            if not omission_infeasibility_matches_category(
+                self.literal_infeasibility_category,
+                self.omission_reason,
+                self.literal_infeasibility_evidence,
+                literal=True,
+            ):
                 raise ValueError(
-                    "literal omission infeasibility cannot be endpoint mismatch only"
+                    "literal infeasibility category does not match its reason and evidence; "
+                    "endpoint mismatch is insufficient"
                 )
-            if self.equivalent_infeasibility_category == "endpoint_constraint_only":
+            if not omission_infeasibility_matches_category(
+                self.equivalent_infeasibility_category,
+                self.equivalent_replacement_failure,
+                self.equivalent_infeasibility_evidence,
+                literal=False,
+            ):
                 raise ValueError(
-                    "equivalent omission infeasibility cannot be endpoint mismatch only"
+                    "equivalent infeasibility category does not match its reason and evidence; "
+                    "endpoint mismatch is insufficient"
                 )
         return self
 

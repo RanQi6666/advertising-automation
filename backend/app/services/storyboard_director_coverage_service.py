@@ -10,6 +10,7 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     ReferenceBehaviorBeat,
+    omission_infeasibility_matches_category,
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
@@ -53,30 +54,6 @@ _SUPPORT_ONLY_MOTION_TERMS = (
     "vfx",
     "flare",
     "bloom",
-)
-_SUBJECT_STATE_MOTION_TERMS = (
-    "subject",
-    "state",
-    "object",
-    "entity",
-    "character",
-    "body",
-    "hand",
-    "arm",
-    "product",
-    "target",
-    "material",
-    "surface",
-)
-_STATIC_EXECUTION_TERMS = (
-    "hold",
-    "still",
-    "static",
-    "unchanged",
-    "remain",
-    "stabilize",
-    "lock",
-    "freeze",
 )
 _NEGATED_EXECUTION_PATTERN = re.compile(
     r"\b(?:no|not|never|nothing|neither|nor|without)\b|n['?]t\b"
@@ -176,14 +153,18 @@ def _valid_omission(moment: object) -> bool:
         getattr(moment, "equivalent_infeasibility_evidence", "") or ""
     ).strip()
     return bool(
-        omission_reason
-        and replacement_failure
-        and literal_category
-        and literal_category != "endpoint_constraint_only"
-        and literal_evidence
-        and equivalent_category
-        and equivalent_category != "endpoint_constraint_only"
-        and equivalent_evidence
+        omission_infeasibility_matches_category(
+            literal_category,
+            omission_reason,
+            literal_evidence,
+            literal=True,
+        )
+        and omission_infeasibility_matches_category(
+            equivalent_category,
+            replacement_failure,
+            equivalent_evidence,
+            literal=False,
+        )
     )
 
 
@@ -392,12 +373,71 @@ def review_director_action_coverage(
     )
 
 
-def _cue_positions(text: str, terms: tuple[str, ...], before: int) -> list[int]:
-    return [
-        match.start()
-        for term in terms
-        for match in re.finditer(rf"\b{re.escape(term)}\b", text[:before])
+_ACTOR_AUXILIARY_PATTERN = re.compile(
+    r"\b(?:do|does|did|is|are|was|were|has|have|had|will|would|shall|should|"
+    r"can|could|may|might|must)\b"
+)
+_PREDICATE_NEGATION_RESET_PATTERN = re.compile(r"\b(?:and|but|then)\b")
+_NON_ACTOR_TOKENS = {
+    "a",
+    "an",
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "my",
+    "our",
+    "your",
+    "his",
+    "her",
+    "its",
+    "their",
+    "no",
+    "not",
+    "never",
+    "nothing",
+    "neither",
+    "nor",
+    "without",
+    "still",
+}
+_SUPPORT_ONLY_ACTOR_TERMS = set(_SUPPORT_ONLY_MOTION_TERMS) | {
+    "composition",
+    "frame",
+    "shot",
+    "background",
+    "lighting",
+}
+
+
+def _predicate_is_locally_negated(clause: str, predicate_start: int) -> bool:
+    scope_start = 0
+    for boundary in _PREDICATE_NEGATION_RESET_PATTERN.finditer(clause[:predicate_start]):
+        scope_start = boundary.end()
+    return _NEGATED_EXECUTION_PATTERN.search(clause[scope_start:predicate_start]) is not None
+
+
+def _actor_head_before_first_predicate(clause: str, predicate_start: int) -> str | None:
+    actor_scope = clause[:predicate_start].strip()
+    if not actor_scope:
+        return None
+    auxiliary = _ACTOR_AUXILIARY_PATTERN.search(actor_scope)
+    if auxiliary is not None:
+        actor_scope = actor_scope[: auxiliary.start()].strip()
+    tokens = re.findall(r"[a-z][a-z'-]*", actor_scope)
+    candidates = [
+        token
+        for token in tokens
+        if token not in _NON_ACTOR_TOKENS and not token.endswith("ly")
     ]
+    return candidates[-1] if candidates else None
+
+
+def _is_support_only_actor(actor_head: str) -> bool:
+    if actor_head in _SUPPORT_ONLY_ACTOR_TERMS:
+        return True
+    return actor_head.endswith("s") and actor_head[:-1] in _SUPPORT_ONLY_ACTOR_TERMS
 
 
 def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
@@ -410,30 +450,24 @@ def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
         if clause.strip()
     ]
     for clause in clauses:
-        execution_matches = [
-            match
-            for pattern in _SUBJECT_EXECUTION_PATTERNS
-            if (match := re.search(pattern, clause)) is not None
-        ]
+        execution_matches = sorted(
+            (
+                match
+                for pattern in _SUBJECT_EXECUTION_PATTERNS
+                for match in re.finditer(pattern, clause)
+            ),
+            key=lambda match: match.start(),
+        )
+        if not execution_matches:
+            continue
+        actor_head = _actor_head_before_first_predicate(
+            clause, execution_matches[0].start()
+        )
+        if actor_head is None or _is_support_only_actor(actor_head):
+            continue
         for match in execution_matches:
-            subject_positions = _cue_positions(
-                clause, _SUBJECT_STATE_MOTION_TERMS, match.start()
-            )
-            if not subject_positions:
-                continue
-            subject_position = max(subject_positions)
-            support_positions = _cue_positions(
-                clause, _SUPPORT_ONLY_MOTION_TERMS, match.start()
-            )
-            if support_positions and max(support_positions) > subject_position:
-                continue
-            execution_scope = clause[: match.start()]
-            if _NEGATED_EXECUTION_PATTERN.search(execution_scope):
-                continue
-            actor_scope = clause[subject_position : match.start()]
-            if any(term in actor_scope for term in _STATIC_EXECUTION_TERMS):
-                continue
-            return True
+            if not _predicate_is_locally_negated(clause, match.start()):
+                return True
     return False
 
 

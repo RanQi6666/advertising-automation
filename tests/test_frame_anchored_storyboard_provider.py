@@ -638,7 +638,24 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "generic endpoint lock" in system_prompt
     assert "omit only when" in system_prompt
     assert "structured infeasibility category and evidence fields" in system_prompt
-    assert "endpoint_constraint_only" in system_prompt
+    for category in (
+        "target_capability_unavailable",
+        "mechanism_unavailable",
+        "identity_semantics_conflict",
+        "causal_equivalent_unavailable",
+        "endpoint_constraint_only",
+    ):
+        assert category in system_prompt
+    assert (
+        "literal_infeasibility_category allows only target_capability_unavailable, "
+        "mechanism_unavailable, or identity_semantics_conflict"
+    ) in system_prompt
+    assert (
+        "equivalent_infeasibility_category allows only target_capability_unavailable, "
+        "mechanism_unavailable, identity_semantics_conflict, or "
+        "causal_equivalent_unavailable"
+    ) in system_prompt
+    assert "endpoint_constraint_only is forbidden for omit" in system_prompt
     assert "assigned core beat" in system_prompt
 
 

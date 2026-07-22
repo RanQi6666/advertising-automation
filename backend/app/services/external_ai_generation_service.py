@@ -15,6 +15,7 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCoverageReview,
     FrameAnalysis,
     FrameAnchoredStoryboard,
     TopicCandidate,
@@ -444,6 +445,7 @@ class ExternalAIGenerationService:
                     frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
 
+            director_plan_added = False
             if frame_analysis.director_plan is None:
                 async with llm_text_rate_limiter():
                     director_plan = await llm.direct_frame_anchored_video_storyboard(
@@ -456,6 +458,11 @@ class ExternalAIGenerationService:
                 frame_analysis = frame_analysis.model_copy(
                     update={"director_plan": director_plan}
                 )
+                director_plan_added = True
+
+            normalized_frame_analysis = _normalize_private_storyboard_namespace(frame_analysis)
+            if director_plan_added or normalized_frame_analysis != frame_analysis:
+                frame_analysis = normalized_frame_analysis
                 await _store_frame_anchored_private_metadata(
                     session,
                     task,
@@ -474,7 +481,7 @@ class ExternalAIGenerationService:
             if director_review.status == "unrecoverable":
                 raise ProviderError(
                     "Director plan is unrecoverable before storyboard generation because "
-                    "required signature/source linkage is missing."
+                    f"{_public_unrecoverable_director_reason(director_review)}."
                 )
 
             async with llm_text_rate_limiter():
@@ -906,6 +913,180 @@ async def _store_frame_anchored_private_metadata(
     await session.refresh(task)
 
 
+_SAFE_PRIVATE_ID_PATTERN = re.compile(
+    r"^(?:__sbv2_(?:behavior|beat|window|moment)_\d{3}__|"
+    r"[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
+)
+
+
+def _private_namespace_map(values: list[str], namespace: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    next_index = 1
+    for value in values:
+        clean = value.strip()
+        if not clean or clean in mapping:
+            continue
+        if clean.isalpha():
+            mapping[clean] = f"__sbv2_{namespace}_{next_index:03d}__"
+            next_index += 1
+        else:
+            mapping[clean] = clean
+    return mapping
+
+
+def _mapped_private_id(value: str | None, mapping: dict[str, str]) -> str | None:
+    if value is None:
+        return None
+    return mapping.get(value, value)
+
+
+def _normalize_private_storyboard_namespace(frame_analysis: FrameAnalysis) -> FrameAnalysis:
+    reference = frame_analysis.reference_video_analysis
+    reference_graph = reference.behavior_graph if reference is not None else None
+    timeline = frame_analysis.timeline_adaptation_plan
+    plan = frame_analysis.director_plan
+
+    behavior_values: list[str] = []
+    if reference_graph is not None:
+        for beat in reference_graph.beats:
+            behavior_values.extend([beat.beat_id, *beat.depends_on])
+    if timeline is not None:
+        for beat in timeline.beats:
+            behavior_values.extend([beat.beat_id, *beat.depends_on])
+    if plan is not None:
+        for moment in plan.signature_moment_plan:
+            behavior_values.extend(moment.source_behavior_beat_ids)
+    behavior_map = _private_namespace_map(behavior_values, "behavior")
+
+    director_values: list[str] = []
+    window_values: list[str] = []
+    moment_values: list[str] = []
+    if plan is not None:
+        for beat in plan.climax_beats:
+            director_values.extend([beat.beat_id, *beat.depends_on])
+        for window in plan.action_arc_windows:
+            window_values.extend([window.window_id, *window.depends_on])
+        for moment in plan.signature_moment_plan:
+            moment_values.append(moment.moment_id)
+            if moment.assigned_beat_id:
+                director_values.append(moment.assigned_beat_id)
+    director_map = _private_namespace_map(director_values, "beat")
+    window_map = _private_namespace_map(window_values, "window")
+    moment_map = _private_namespace_map(moment_values, "moment")
+
+    normalized_reference = reference
+    if reference is not None and reference_graph is not None:
+        normalized_reference = reference.model_copy(
+            update={
+                "behavior_graph": reference_graph.model_copy(
+                    update={
+                        "beats": [
+                            beat.model_copy(
+                                update={
+                                    "beat_id": _mapped_private_id(
+                                        beat.beat_id, behavior_map
+                                    ),
+                                    "depends_on": [
+                                        _mapped_private_id(dependency, behavior_map)
+                                        for dependency in beat.depends_on
+                                    ],
+                                }
+                            )
+                            for beat in reference_graph.beats
+                        ]
+                    }
+                )
+            }
+        )
+
+    normalized_timeline = timeline
+    if timeline is not None:
+        normalized_timeline = timeline.model_copy(
+            update={
+                "beats": [
+                    beat.model_copy(
+                        update={
+                            "beat_id": _mapped_private_id(beat.beat_id, behavior_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, behavior_map)
+                                for dependency in beat.depends_on
+                            ],
+                        }
+                    )
+                    for beat in timeline.beats
+                ]
+            }
+        )
+
+    normalized_plan = plan
+    if plan is not None:
+        normalized_plan = plan.model_copy(
+            update={
+                "climax_beats": [
+                    beat.model_copy(
+                        update={
+                            "beat_id": _mapped_private_id(beat.beat_id, director_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, director_map)
+                                for dependency in beat.depends_on
+                            ],
+                        }
+                    )
+                    for beat in plan.climax_beats
+                ],
+                "action_arc_windows": [
+                    window.model_copy(
+                        update={
+                            "window_id": _mapped_private_id(window.window_id, window_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, window_map)
+                                for dependency in window.depends_on
+                            ],
+                        }
+                    )
+                    for window in plan.action_arc_windows
+                ],
+                "signature_moment_plan": [
+                    moment.model_copy(
+                        update={
+                            "moment_id": _mapped_private_id(moment.moment_id, moment_map),
+                            "source_behavior_beat_ids": [
+                                _mapped_private_id(beat_id, behavior_map)
+                                for beat_id in moment.source_behavior_beat_ids
+                            ],
+                            "assigned_beat_id": _mapped_private_id(
+                                moment.assigned_beat_id, director_map
+                            ),
+                        }
+                    )
+                    for moment in plan.signature_moment_plan
+                ],
+            }
+        )
+
+    normalized = frame_analysis.model_copy(
+        update={
+            "reference_video_analysis": normalized_reference,
+            "timeline_adaptation_plan": normalized_timeline,
+            "director_plan": normalized_plan,
+        }
+    )
+    return normalized
+
+
+def _public_unrecoverable_director_reason(
+    review: DirectorActionCoverageReview,
+) -> str:
+    normalized_reasons = [reason.casefold() for reason in review.unrecoverable_reasons]
+    if review.invalid_omission_moment_ids or any(
+        "invalid omission contract" in reason for reason in normalized_reasons
+    ):
+        return "invalid omission contract"
+    if any("signature/source linkage" in reason for reason in normalized_reasons):
+        return "required signature/source linkage is missing"
+    return "director action coverage contract is invalid"
+
+
 def _private_id_values(value: Any, *, field_name: str | None = None) -> set[str]:
     private_ids: set[str] = set()
     if isinstance(value, dict):
@@ -936,10 +1117,14 @@ def _private_storyboard_ids(
     private_ids = {
         private_id
         for private_id in _private_id_values(storyboard.model_dump(mode="json"))
-        if not private_id.isalpha()
+        if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
     }
     for source in private_sources:
-        private_ids.update(_private_id_values(source))
+        private_ids.update(
+            private_id
+            for private_id in _private_id_values(source)
+            if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
+        )
     return tuple(sorted(private_ids, key=len, reverse=True))
 
 

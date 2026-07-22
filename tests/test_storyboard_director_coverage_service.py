@@ -770,6 +770,23 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
 @pytest.mark.parametrize(
     "motion",
     [
+        "Alex turns and advances.",
+        "She moves forward.",
+        "The warrior turns and advances.",
+        "The package rotates and moves forward.",
+        "The subject does not remain still and moves forward.",
+    ],
+)
+def test_final_validation_accepts_general_subject_execution_text(motion: str) -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].motion = motion
+
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+@pytest.mark.parametrize(
+    "motion",
+    [
         "No subject moves.",
         "Nothing changes.",
         "The subject remains still while the composition shifts.",
@@ -779,6 +796,9 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
         "The camera moves around the subject.",
         "The particles move around the product.",
         "The effect transforms around the material.",
+        "The warrior does not advance.",
+        "The package never rotates.",
+        "The subject does not move or turn.",
     ],
 )
 def test_final_validation_rejects_static_or_camera_only_execution_text(
@@ -833,6 +853,91 @@ def test_signature_schema_rejects_endpoint_keyword_injection_without_structured_
 
     with pytest.raises(ValidationError, match="structured literal infeasibility"):
         moment_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_updates", "message"),
+    [
+        (
+            {
+                "omission_reason": "Literal execution differs only at the final pose.",
+                "literal_infeasibility_category": "mechanism_unavailable",
+                "literal_infeasibility_evidence": "Only the final pose differs.",
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "equivalent_replacement_failure": (
+                    "The equivalent differs only in the ending framing."
+                ),
+                "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+                "equivalent_infeasibility_evidence": "Only the ending framing differs.",
+            },
+            "equivalent infeasibility category does not match",
+        ),
+    ],
+)
+def test_signature_schema_rejects_endpoint_only_text_under_non_endpoint_category(
+    field_updates: dict[str, str],
+    message: str,
+) -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action requires articulated target motion."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Execution is impossible because the target mechanism has no articulated parts."
+        ),
+        "equivalent_replacement_failure": (
+            "No equivalent causal mechanism exists in the target evidence."
+        ),
+        "literal_infeasibility_category": "mechanism_unavailable",
+        "literal_infeasibility_evidence": "Target evidence shows no articulated mechanism.",
+        "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+        "equivalent_infeasibility_evidence": (
+            "Target evidence shows no alternative mechanism with the same causal role."
+        ),
+        **field_updates,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        moment_type.model_validate(payload)
+
+
+def test_review_rejects_endpoint_only_text_under_non_endpoint_category() -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": "Literal execution differs only at the final pose.",
+            "equivalent_replacement_failure": (
+                "The equivalent differs only in the ending framing."
+            ),
+            "literal_infeasibility_category": "mechanism_unavailable",
+            "literal_infeasibility_evidence": "Only the final pose differs.",
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": "Only the ending framing differs.",
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "unrecoverable"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
 
 
 def test_signature_schema_accepts_separate_mechanism_infeasibility_causes() -> None:

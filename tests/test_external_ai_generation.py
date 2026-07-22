@@ -462,6 +462,23 @@ class FakeExternalAILLM:
         assert last_frame_image_url.endswith("last.png")
         assert frame_analysis.first_frame.visible_text == ["START"]
         assert frame_analysis.director_plan is not None
+        director_plan = frame_analysis.director_plan
+        signature_moment = director_plan.signature_moment_plan[0]
+        signature_moment_ids = list(
+            dict.fromkeys([signature_moment.moment_id, "custom_signature_id"])
+        )
+        source_behavior_beat_ids = list(
+            dict.fromkeys(
+                [
+                    *signature_moment.source_behavior_beat_ids,
+                    "core_behavior",
+                    "core_state_change",
+                    "custom_behavior_beat",
+                ]
+            )
+        )
+        assigned_beat_id = signature_moment.assigned_beat_id
+        assert assigned_beat_id is not None
         if frame_analysis.reference_video_analysis is not None:
             assert (
                 frame_analysis.reference_video_analysis.adapted_constraints.subject_presence.strength
@@ -482,13 +499,8 @@ class FakeExternalAILLM:
                     motion="Prepare the subject for the continuous causal action.",
                     transition_goal="Preparation begins at the supplied first frame.",
                     sound_effects=["soft room tone"],
-                    signature_moment_ids=["signature_action", "custom_signature_id"],
-                    source_behavior_beat_ids=[
-                        "approach",
-                        "core_behavior",
-                        "core_state_change",
-                        "custom_behavior_beat",
-                    ],
+                    signature_moment_ids=signature_moment_ids,
+                    source_behavior_beat_ids=source_behavior_beat_ids,
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=2,
@@ -500,15 +512,10 @@ class FakeExternalAILLM:
                     transition_goal="Temporarily depart while executing the linked action.",
                     voiceover="Optional narration.",
                     sound_effects=["movement swish"],
-                    cinematic_beat="causal_peak",
-                    cinematic_beats=["causal_peak", "custom_director_beat"],
-                    signature_moment_ids=["signature_action", "custom_signature_id"],
-                    source_behavior_beat_ids=[
-                        "approach",
-                        "core_behavior",
-                        "core_state_change",
-                        "custom_behavior_beat",
-                    ],
+                    cinematic_beat=assigned_beat_id,
+                    cinematic_beats=[assigned_beat_id, "custom_director_beat"],
+                    signature_moment_ids=signature_moment_ids,
+                    source_behavior_beat_ids=source_behavior_beat_ids,
                     camera_instruction="Use an in-shot push and reframing at impact.",
                     tension_stage="climax",
                     effect_timing="Keep effects subordinate until the action reads.",
@@ -525,20 +532,22 @@ class FakeExternalAILLM:
                     visual="Show the visible result after the linked action.",
                     motion="The visible consequence reads before the return.",
                     transition_goal="Hold the payoff clearly without a cut.",
-                    cinematic_beat="causal_peak",
-                    cinematic_beats=["causal_peak", "custom_director_beat"],
-                    signature_moment_ids=["signature_action", "custom_signature_id"],
-                    source_behavior_beat_ids=[
-                        "approach",
-                        "core_behavior",
-                        "core_state_change",
-                        "custom_behavior_beat",
-                    ],
+                    cinematic_beat=assigned_beat_id,
+                    cinematic_beats=[assigned_beat_id, "custom_director_beat"],
+                    signature_moment_ids=signature_moment_ids,
+                    source_behavior_beat_ids=source_behavior_beat_ids,
                     camera_instruction="Reframe gently around the visible result.",
                     action_result_requirement=(
-                        "Show core_behavior, core_state_change, custom_behavior_beat, "
-                        "signature_action, custom_signature_id, causal_peak, and "
-                        "custom_director_beat only through their visible results."
+                        "Show "
+                        + ", ".join(
+                            [
+                                *source_behavior_beat_ids,
+                                *signature_moment_ids,
+                                assigned_beat_id,
+                                "custom_director_beat",
+                            ]
+                        )
+                        + " only through their visible results."
                     ),
                     effect_timing="Peak the observed effect at the visible impact.",
                 ),
@@ -550,13 +559,8 @@ class FakeExternalAILLM:
                     visual="Return continuously toward the ending composition.",
                     motion="Settle the subject toward the supplied ending state.",
                     transition_goal="Restore the final anchor in the same shot.",
-                    signature_moment_ids=["signature_action", "custom_signature_id"],
-                    source_behavior_beat_ids=[
-                        "approach",
-                        "core_behavior",
-                        "core_state_change",
-                        "custom_behavior_beat",
-                    ],
+                    signature_moment_ids=signature_moment_ids,
+                    source_behavior_beat_ids=source_behavior_beat_ids,
                     anchor_return_instruction=(
                         "Return continuously to the supplied last frame."
                     ),
@@ -1440,9 +1444,13 @@ async def test_storyboard_v2_unrecoverable_linkage_stops_before_call3(
         await session.commit()
         await session.refresh(task)
 
-        with pytest.raises(ProviderError, match="signature/source linkage"):
+        with pytest.raises(ProviderError) as excinfo:
             await service.execute_frame_anchored_video_storyboard(session, task)
 
+        message = str(excinfo.value)
+        assert "required signature/source linkage is missing" in message
+        assert "invalid omission contract" not in message
+        assert "core_behavior" not in message
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
             "direct_frame_anchored_video_storyboard",
@@ -2164,9 +2172,14 @@ async def test_storyboard_v2_invalid_omit_stops_after_call2(
         await session.commit()
         await session.refresh(task)
 
-        with pytest.raises(ProviderError, match="unrecoverable before storyboard generation"):
+        with pytest.raises(ProviderError) as excinfo:
             await service.execute_frame_anchored_video_storyboard(session, task)
 
+        message = str(excinfo.value)
+        assert "invalid omission contract" in message
+        assert "signature/source linkage" not in message
+        assert "signature_action" not in message
+        assert "core_behavior" not in message
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
             "direct_frame_anchored_video_storyboard",
@@ -2175,8 +2188,14 @@ async def test_storyboard_v2_invalid_omit_stops_after_call2(
     await engine.dispose()
 
 
-def test_formatter_scrubs_full_private_namespace_and_preserves_other_language() -> None:
-    private_ids = ("analysisid", "directorid", "reviewid", "correctionid", "candidateid")
+def test_formatter_scrubs_only_safe_private_ids_and_preserves_natural_language() -> None:
+    private_ids = (
+        "__sbv2_behavior_001__",
+        "__sbv2_beat_001__",
+        "__sbv2_window_001__",
+        "__sbv2_moment_001__",
+    )
+    natural_sentence = "The camera follows the action while the subject moves."
     storyboard = FrameAnchoredStoryboard(
         duration_seconds=4,
         aspect_ratio="9:16",
@@ -2193,68 +2212,118 @@ def test_formatter_scrubs_full_private_namespace_and_preserves_other_language() 
                 start_second=1,
                 end_second=4,
                 frame_anchor="last_frame",
-                visual=(
-                    "analysisid directorid reviewid correctionid candidateid; "
-                    "ordinary subject motion remains visible."
-                ),
+                visual=f"{' '.join(private_ids)}; {natural_sentence}",
             ),
         ],
     )
 
-    text = _format_frame_anchored_storyboard_text(
+    rendered = _format_frame_anchored_storyboard_text(
         storyboard,
         private_sources=(
-            {"behavior_graph": {"beats": [{"beat_id": "analysisid"}]}},
-            {"action_arc_windows": [{"window_id": "directorid"}]},
-            {"required_core_behavior_beat_ids": ["reviewid"]},
-            {"structured_corrections": [{"signature_moment_ids": ["correctionid"]}]},
-            {"scenes": [{"cinematic_beats": ["candidateid"]}]},
+            {"behavior_graph": {"beats": [{"beat_id": private_ids[0]}]}},
+            {"climax_beats": [{"beat_id": private_ids[1]}]},
+            {"action_arc_windows": [{"window_id": private_ids[2]}]},
+            {"signature_moment_plan": [{"moment_id": private_ids[3]}]},
+            {"ordinary_ids": ["camera", "action", "subject"]},
         ),
     )
 
     for private_id in private_ids:
-        assert private_id not in text
-    assert "ordinary subject motion remains visible" in text
+        assert private_id not in rendered
+    assert natural_sentence in rendered
+
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_polling_scrubs_prose_only_pure_alpha_private_id(
+async def test_storyboard_v2_normalizes_alpha_private_ids_without_scrubbing_prose(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
     original_direct = fake_llm.direct_frame_anchored_video_storyboard
     original_generate = fake_llm.generate_frame_anchored_video_storyboard
+    observed_call3_ids: dict[str, str] = {}
 
-    async def private_namespace_director(*args, **kwargs):
+    async def alpha_private_namespace_director(*args, **kwargs):
         plan = await original_direct(*args, **kwargs)
-        old_id = plan.action_arc_windows[0].window_id
-        renamed = [
+        old_beat_id = plan.climax_beats[0].beat_id
+        old_window_id = plan.action_arc_windows[0].window_id
+        old_moment_id = plan.signature_moment_plan[0].moment_id
+        climax_beats = [
+            beat.model_copy(
+                update={
+                    "beat_id": "action" if beat.beat_id == old_beat_id else beat.beat_id,
+                    "depends_on": [
+                        "action" if dependency == old_beat_id else dependency
+                        for dependency in beat.depends_on
+                    ],
+                }
+            )
+            for beat in plan.climax_beats
+        ]
+        action_arc_windows = [
             window.model_copy(
                 update={
                     "window_id": (
-                        "privatewindow" if window.window_id == old_id else window.window_id
+                        "camera" if window.window_id == old_window_id else window.window_id
                     ),
                     "depends_on": [
-                        "privatewindow" if dependency == old_id else dependency
+                        "camera" if dependency == old_window_id else dependency
                         for dependency in window.depends_on
                     ],
                 }
             )
             for window in plan.action_arc_windows
         ]
-        return plan.model_copy(update={"action_arc_windows": renamed})
-
-    async def prose_only_candidate(*args, **kwargs):
-        storyboard = await original_generate(*args, **kwargs)
-        scene = storyboard.scenes[1]
-        scene.visual = (
-            f"{scene.visual} privatewindow; ordinary subject motion remains visible."
+        signature_moment_plan = [
+            moment.model_copy(
+                update={
+                    "moment_id": (
+                        "subject" if moment.moment_id == old_moment_id else moment.moment_id
+                    ),
+                    "assigned_beat_id": (
+                        "action"
+                        if moment.assigned_beat_id == old_beat_id
+                        else moment.assigned_beat_id
+                    ),
+                }
+            )
+            for moment in plan.signature_moment_plan
+        ]
+        return plan.model_copy(
+            update={
+                "climax_beats": climax_beats,
+                "action_arc_windows": action_arc_windows,
+                "signature_moment_plan": signature_moment_plan,
+            }
         )
+
+    async def natural_language_candidate(*args, **kwargs):
+        frame_analysis = kwargs["frame_analysis"]
+        plan = frame_analysis.director_plan
+        assert plan is not None
+        beat_id = plan.climax_beats[0].beat_id
+        window_id = plan.action_arc_windows[0].window_id
+        moment_id = plan.signature_moment_plan[0].moment_id
+        observed_call3_ids.update(beat=beat_id, window=window_id, moment=moment_id)
+        storyboard = await original_generate(*args, **kwargs)
+        natural_sentence = "The camera follows the action while the subject moves."
+        for scene in storyboard.scenes:
+            scene.cinematic_beats = [
+                beat_id if value == "causal_peak" else value for value in scene.cinematic_beats
+            ]
+            if scene.cinematic_beat == "causal_peak":
+                scene.cinematic_beat = beat_id
+            scene.signature_moment_ids = [
+                moment_id if value == "signature_action" else value
+                for value in scene.signature_moment_ids
+            ]
+        storyboard.scenes[1].visual = f"{moment_id}; {natural_sentence}"
+        storyboard.scenes[1].motion = natural_sentence
         return storyboard
 
-    fake_llm.direct_frame_anchored_video_storyboard = private_namespace_director
-    fake_llm.generate_frame_anchored_video_storyboard = prose_only_candidate
+    fake_llm.direct_frame_anchored_video_storyboard = alpha_private_namespace_director
+    fake_llm.generate_frame_anchored_video_storyboard = natural_language_candidate
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     client, engine, app = await _client_with_db(
         tmp_path,
@@ -2267,8 +2336,9 @@ async def test_storyboard_v2_polling_scrubs_prose_only_pure_alpha_private_id(
             headers=_authorized_headers(),
             json=_storyboard_v2_payload(),
         ).json()
+        job_id = created["data"]["job_id"]
         polled = client.get(
-            f"/api/v1/integrations/ai/jobs/{created['data']['job_id']}",
+            f"/api/v1/integrations/ai/jobs/{job_id}",
             headers=_authorized_headers(),
         ).json()["data"]
     finally:
@@ -2276,6 +2346,26 @@ async def test_storyboard_v2_polling_scrubs_prose_only_pure_alpha_private_id(
         client.close()
 
     assert polled["status"] == "succeeded"
-    assert "privatewindow" not in polled["storyboard_text"]
-    assert "ordinary subject motion remains visible" in polled["storyboard_text"]
+    assert "The camera follows the action while the subject moves." in polled["storyboard_text"]
+    assert "__sbv2_" not in polled["storyboard_text"]
+    assert fake_llm.calls == [
+        "analyze_video_frame_pair",
+        "direct_frame_anchored_video_storyboard",
+        "generate_frame_anchored_video_storyboard",
+    ]
+    assert observed_call3_ids["beat"].startswith("__sbv2_beat_")
+    assert observed_call3_ids["window"].startswith("__sbv2_window_")
+    assert observed_call3_ids["moment"].startswith("__sbv2_moment_")
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        task = await session.get(GenerationTask, job_id)
+        assert task is not None
+        director_plan = task.metadata_json["frame_analysis"]["director_plan"]
+        assert director_plan["climax_beats"][0]["beat_id"] == observed_call3_ids["beat"]
+        assert director_plan["action_arc_windows"][0]["window_id"] == observed_call3_ids["window"]
+        assert (
+            director_plan["signature_moment_plan"][0]["moment_id"]
+            == observed_call3_ids["moment"]
+        )
+
     await engine.dispose()
