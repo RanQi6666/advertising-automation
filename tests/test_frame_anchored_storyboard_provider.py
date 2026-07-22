@@ -24,6 +24,45 @@ FIRST_FRAME_URL = "https://cdn.example.test/first.png"
 LAST_FRAME_URL = "https://cdn.example.test/last.png"
 
 
+def _director_plan_payload(
+    *,
+    beat_importance: str = "core",
+    signature_strategy: str = "adapt",
+    assigned_beat_id: str | None = "impact",
+    omission_reason: str | None = None,
+) -> dict:
+    return {
+        "narrative_objective": "Build to an evidence-backed signature impact.",
+        "attention_path": ["subject", "signature moment", "result"],
+        "tension_curve": ["setup", "climax", "resolution"],
+        "climax_beats": [
+            {
+                "beat_id": "impact",
+                "stage": "climax",
+                "source_evidence": ["The reference contains a distinctive impact moment."],
+                "importance": beat_importance,
+            }
+        ],
+        "signature_moment_plan": [
+            {
+                "moment_id": "signature_001",
+                "moment_type": "combined",
+                "source_evidence": [
+                    "The reference combines a camera emphasis, visible action, and effect peak."
+                ],
+                "strategy": signature_strategy,
+                "target_adaptation": (
+                    "Recreate the observed camera-action-effect relationship with target assets."
+                ),
+                "assigned_beat_id": assigned_beat_id,
+                "omission_reason": omission_reason,
+            }
+        ],
+        "anchor_adaptation_plan": ["End in the supplied last frame."],
+        "anti_flattening_constraints": ["Do not flatten the signature impact."],
+    }
+
+
 def test_director_plan_rejects_climax_without_causal_evidence() -> None:
     with pytest.raises(ValidationError, match="climax beat requires source evidence"):
         FrameAnchoredDirectorPlan.model_validate(
@@ -42,6 +81,31 @@ def test_director_plan_rejects_climax_without_causal_evidence() -> None:
                 "anti_flattening_constraints": ["Do not merge impact and result."],
             }
         )
+
+
+def test_director_plan_rejects_signature_assignment_to_unknown_beat() -> None:
+    payload = _director_plan_payload(assigned_beat_id="missing_beat")
+
+    with pytest.raises(ValidationError, match="signature moment.*existing director beat"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_director_plan_rejects_signature_assignment_to_non_core_beat() -> None:
+    payload = _director_plan_payload(beat_importance="supporting")
+
+    with pytest.raises(ValidationError, match="signature moment.*core director beat"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_director_plan_requires_reason_when_signature_moment_is_omitted() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason=None,
+    )
+
+    with pytest.raises(ValidationError, match="omitted signature moment requires a reason"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
 
 
 def test_director_coverage_requires_frame_anchored_storyboard_to_represent_climax() -> None:
@@ -242,6 +306,22 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
                 }
             ],
             "overlay_lifecycle_plan": [],
+            "signature_moment_plan": [
+                {
+                    "moment_id": "signature_001",
+                    "moment_type": "combined",
+                    "source_evidence": [
+                        "The reference camera emphasis, action, and effect peak form "
+                        "one signature moment."
+                    ],
+                    "strategy": "adapt",
+                    "target_adaptation": (
+                        "Execute the observed camera-action-effect relationship with target assets."
+                    ),
+                    "assigned_beat_id": "decisive_result",
+                    "omission_reason": None,
+                }
+            ],
             "anchor_adaptation_plan": ["Resolve to the exact supplied last-frame composition."],
             "anti_flattening_constraints": [
                 "Do not collapse trigger, action, impact, and resolution into one flat move."
@@ -258,6 +338,8 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     )
 
     assert plan.climax_beats[0].beat_id == "decisive_result"
+    assert plan.signature_moment_plan[0].assigned_beat_id == "decisive_result"
+    assert plan.signature_moment_plan[0].strategy == "adapt"
     content = captured[0]["input"][1]["content"]
     assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
     assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
@@ -273,6 +355,13 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "merge adjacent causal roles" in system_prompt
     assert "minimum readable time" in system_prompt
     assert "does not need its own beat" in system_prompt
+    assert "signature_moment_plan" in system_prompt
+    assert "camera, action, effect, result, or a combination" in system_prompt
+    assert "at least one" in system_prompt
+    assert "preserve or adapt" in system_prompt
+    assert "generic endpoint lock" in system_prompt
+    assert "omit only when" in system_prompt
+    assert "assigned core beat" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -1057,7 +1146,13 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
             "rationale": "Bridge the supplied frames.",
         }
     )
-    analysis = _analysis()
+    analysis = _analysis().model_copy(
+        update={
+            "director_plan": FrameAnchoredDirectorPlan.model_validate(
+                _director_plan_payload()
+            )
+        }
+    )
 
     storyboard = await provider.generate_frame_anchored_video_storyboard(
         FIRST_FRAME_URL,
@@ -1073,6 +1168,8 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
     assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
     assert '"frame_analysis"' in content[0]["text"]
+    assert '"signature_moment_plan"' in content[0]["text"]
+    assert '"assigned_beat_id": "impact"' in content[0]["text"]
     assert "first frame facts" in content[0]["text"]
     system_prompt = captured[0]["input"][0]["content"]
     _assert_no_legacy_content(system_prompt)
@@ -1088,6 +1185,11 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "cinematic_beats" in system_prompt
     assert "one continuous scene may carry multiple" in system_prompt.lower()
     assert "exact beat_id" in system_prompt
+    assert "signature_moment_plan" in system_prompt
+    assert "preserve or adapt" in system_prompt.lower()
+    assert "must be executed" in system_prompt.lower()
+    assert "not merely label" in system_prompt.lower()
+    assert "one continuous shot" in system_prompt.lower()
     assert "overlay_instruction must be null or an object" in system_prompt
     assert (
         "Do not alter or translate text that is visibly supplied by either target image"

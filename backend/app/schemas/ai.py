@@ -271,12 +271,42 @@ class DirectorOverlayInstruction(BaseModel):
     final_frame_requirement: str = Field(min_length=1)
 
 
+class DirectorSignatureMoment(BaseModel):
+    moment_id: str = Field(min_length=1)
+    moment_type: Literal["camera", "action", "effect", "result", "combined"]
+    source_evidence: list[str] = Field(min_length=1)
+    strategy: Literal["preserve", "adapt", "omit"]
+    target_adaptation: str = ""
+    assigned_beat_id: str | None = None
+    omission_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_signature_moment(self) -> "DirectorSignatureMoment":
+        if any(not evidence.strip() for evidence in self.source_evidence):
+            raise ValueError("signature moment source evidence must not be blank")
+        if self.strategy in {"preserve", "adapt"}:
+            if not self.assigned_beat_id or not self.assigned_beat_id.strip():
+                raise ValueError(
+                    "preserved or adapted signature moment requires an assigned beat"
+                )
+            if not self.target_adaptation.strip():
+                raise ValueError(
+                    "preserved or adapted signature moment requires a target adaptation"
+                )
+        if self.strategy == "omit" and (
+            self.omission_reason is None or not self.omission_reason.strip()
+        ):
+            raise ValueError("omitted signature moment requires a reason")
+        return self
+
+
 class FrameAnchoredDirectorPlan(BaseModel):
     narrative_objective: str = Field(min_length=1)
     attention_path: list[str] = Field(min_length=1)
     tension_curve: list[DirectorTensionStage] = Field(min_length=1)
     climax_beats: list[DirectorBeat] = Field(min_length=1)
     overlay_lifecycle_plan: list[DirectorOverlayInstruction] = Field(default_factory=list)
+    signature_moment_plan: list[DirectorSignatureMoment] = Field(default_factory=list)
     anchor_adaptation_plan: list[str] = Field(min_length=1)
     anti_flattening_constraints: list[str] = Field(min_length=1)
 
@@ -294,11 +324,28 @@ class FrameAnchoredDirectorPlan(BaseModel):
             raise ValueError("director tension stages must be in ascending order")
         if "climax" not in self.tension_curve:
             raise ValueError("director tension curve requires a climax stage")
+        beats_by_id = {beat.beat_id: beat for beat in self.climax_beats}
         for beat in self.climax_beats:
             if beat.stage != "climax":
                 raise ValueError("director climax beats must use climax stage")
             if not beat.source_evidence:
                 raise ValueError("climax beat requires source evidence")
+        signature_ids: set[str] = set()
+        for moment in self.signature_moment_plan:
+            if moment.moment_id in signature_ids:
+                raise ValueError("director signature moment ids must be unique")
+            signature_ids.add(moment.moment_id)
+            if moment.strategy not in {"preserve", "adapt"}:
+                continue
+            assigned_beat = beats_by_id.get(moment.assigned_beat_id or "")
+            if assigned_beat is None:
+                raise ValueError(
+                    "signature moment must reference an existing director beat"
+                )
+            if assigned_beat.importance != "core":
+                raise ValueError(
+                    "signature moment must be assigned to a core director beat"
+                )
         if any(not constraint.strip() for constraint in self.anti_flattening_constraints):
             raise ValueError("director anti-flattening constraints must not be blank")
         return self

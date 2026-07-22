@@ -16,7 +16,6 @@ from backend.app.schemas.ai import (
     CopyDraftCandidate,
     FrameAnalysis,
     FrameAnchoredStoryboard,
-    TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
     validate_director_coverage,
@@ -484,10 +483,7 @@ class ExternalAIGenerationService:
             )
             return {
                 "request_id": _request_id(payload.external_request_id, task.id),
-                "storyboard_text": _format_frame_anchored_storyboard_text(
-                    storyboard,
-                    timeline_adaptation_plan=frame_analysis.timeline_adaptation_plan,
-                ),
+                "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
                 "duration_seconds": payload.duration_seconds,
                 "aspect_ratio": payload.aspect_ratio,
             }
@@ -867,8 +863,6 @@ async def _store_frame_anchored_private_metadata(
 
 def _format_frame_anchored_storyboard_text(
     storyboard: FrameAnchoredStoryboard,
-    *,
-    timeline_adaptation_plan: TimelineAdaptationPlan | None = None,
 ) -> str:
     blocks = [
         f"Duration: {storyboard.duration_seconds}s",
@@ -919,25 +913,6 @@ def _format_frame_anchored_storyboard_text(
     )
     if storyboard.rationale:
         blocks.append(f"Overall direction: {storyboard.rationale}")
-    if timeline_adaptation_plan is not None and timeline_adaptation_plan.beats:
-        timeline_lines = [
-            "Target timeline adaptation (reference seconds are not generation seconds):"
-        ]
-        for beat in timeline_adaptation_plan.beats:
-            persistence = (
-                "; required final overlay on the target last-frame base layer"
-                if beat.must_remain_visible_until_final
-                else ""
-            )
-            timeline_lines.append(
-                f"- {beat.beat_id} ({beat.target_start_second:.2f}-{beat.target_end_second:.2f}s): "
-                f"{beat.description}. {beat.adaptation_instruction}{persistence}"
-            )
-        if timeline_adaptation_plan.adaptation_risks:
-            timeline_lines.append(
-                "Timing review: " + " ".join(timeline_adaptation_plan.adaptation_risks)
-            )
-        blocks.append("\n".join(timeline_lines))
     return "\n\n".join(blocks)
 
 

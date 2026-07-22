@@ -41,8 +41,6 @@ from backend.app.schemas.ai import (
     ReferenceVideoSegment,
     ReferenceVisualIdentityMapping,
     StoryboardSoundDesign,
-    TimelineAdaptationBeat,
-    TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
     VideoStoryboardScene,
@@ -981,10 +979,10 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     assert created.status_code == 202
     assert polled.status_code == 200
     assert poll_data["status"] == "succeeded"
-    assert "Target timeline adaptation" in poll_data["storyboard_text"]
+    assert "Target timeline adaptation" not in poll_data["storyboard_text"]
     assert (
         "required final overlay on the target last-frame base layer"
-        in poll_data["storyboard_text"]
+        not in poll_data["storyboard_text"]
     )
     assert "reference_video_analysis" not in poll_data
     assert "reference_frames" not in poll_data
@@ -1586,7 +1584,7 @@ async def test_external_ai_polling_reads_terminal_result_from_cache_when_db_miss
     assert body["data"]["copywritings"]
 
 
-def test_frame_anchored_storyboard_does_not_export_machine_readable_final_text_lock() -> None:
+def test_frame_anchored_storyboard_uses_final_storyboard_as_only_public_execution_plan() -> None:
     storyboard = FrameAnchoredStoryboard(
         duration_seconds=10,
         aspect_ratio="9:16",
@@ -1603,33 +1601,24 @@ def test_frame_anchored_storyboard_does_not_export_machine_readable_final_text_l
                 start_second=9.35,
                 end_second=10,
                 frame_anchor="last_frame",
-                visual="Arrive at the provided final frame.",
+                visual=(
+                    "Arrive at the provided final frame and remove the inherited reward "
+                    "overlay before the ending anchor."
+                ),
+                notes="The final-frame base layer is the sole visible ending state.",
             ),
         ],
     )
-    plan = TimelineAdaptationPlan(
-        reference_duration_seconds=10,
-        target_duration_seconds=10,
-        beats=[
-            TimelineAdaptationBeat(
-                beat_id="final_reward",
-                description="The reward text holds through the final frame.",
-                target_start_second=9.35,
-                target_end_second=10,
-                must_remain_visible_until_final=True,
-                locked_text="x200,000",
-                adaptation_instruction="Keep the overlay through the final frame.",
-            )
-        ],
-    )
-
-    text = external_ai_service_module._format_frame_anchored_storyboard_text(
-        storyboard,
-        timeline_adaptation_plan=plan,
-    )
+    text = external_ai_service_module._format_frame_anchored_storyboard_text(storyboard)
 
     assert "[FINAL_TEXT_OVERLAY_LOCKS]" not in text
     assert "[/FINAL_TEXT_OVERLAY_LOCKS]" not in text
+    assert "remove the inherited reward overlay" in text
+    assert "The final-frame base layer is the sole visible ending state." in text
+    assert "Target timeline adaptation" not in text
+    assert "required final overlay" not in text
+    assert "x200,000" not in text
+    assert "Keep the overlay through the final frame." not in text
 
 
 def test_frame_anchored_storyboard_formats_freeform_overlay_instruction() -> None:
