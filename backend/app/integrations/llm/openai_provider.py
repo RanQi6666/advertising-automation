@@ -557,6 +557,7 @@ class OpenAILLMProvider:
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
+        director_correction_requirements: list[str] | None = None,
     ) -> FrameAnchoredStoryboard:
         data = await self._vision_json_completion(
             system=_frame_anchored_storyboard_system_prompt(),
@@ -567,6 +568,7 @@ class OpenAILLMProvider:
                     "duration_seconds": duration_seconds,
                     "aspect_ratio": aspect_ratio,
                     "frame_analysis": frame_analysis.model_dump(mode="json"),
+                    "director_correction_requirements": director_correction_requirements or [],
                 },
             ),
         )
@@ -1871,66 +1873,81 @@ def _frame_anchored_director_system_prompt() -> str:
         "You are the director of a high-end game cinematic and commercial film. Create a private "
         "evidence-backed director plan for one frame-anchored generated video. Return valid JSON "
         "only with narrative_objective, attention_path, tension_curve, climax_beats, "
-        "overlay_lifecycle_plan, signature_moment_plan, anchor_adaptation_plan, and "
-        "anti_flattening_constraints. "
+        "action_arc_windows, overlay_lifecycle_plan, signature_moment_plan, "
+        "final_anchor_return, anchor_adaptation_plan, and anti_flattening_constraints. "
         "Use the exact primitive field shapes: narrative_objective must be a plain string; "
         "attention_path must be a list of plain strings, not objects; tension_curve must be a "
         "list using only setup, trigger, escalation, climax, and resolution; every climax_beats "
-        "item must use stage=climax, source_evidence as a list of plain strings, importance as "
-        "core, supporting, or decorative, and depends_on as a list of beat ids. Each "
-        "overlay_lifecycle_plan item must use reference_element, strategy, timing_instruction, "
-        "and final_frame_requirement. Each signature_moment_plan item must use moment_id, "
-        "moment_type, source_evidence, strategy, target_adaptation, assigned_beat_id, and "
-        "omission_reason. moment_type must be camera, action, effect, result, or a combination "
-        "represented by combined; strategy must be preserve, adapt, or omit. "
-        "anchor_adaptation_plan must be a list of plain strings, "
-        "and anti_flattening_constraints must be a list of plain strings. Do not substitute "
-        "nested objects for any of those fields. "
+        "item must use beat_id, stage=climax, source_evidence as a list of plain strings, "
+        "start_ratio, end_ratio, attention_objective, camera_instruction, action_requirement, "
+        "effect_requirement, importance as core, supporting, or decorative, and depends_on as a "
+        "list of beat ids. Every action_arc_windows item must use window_id, phase, start_ratio, "
+        "end_ratio, objective, subject_motion_intensity, camera_intensity, effect_intensity, and "
+        "depends_on. Each overlay_lifecycle_plan item must use reference_element, strategy, "
+        "timing_instruction, and final_frame_requirement. Each signature_moment_plan item must "
+        "use moment_id, moment_type, source_evidence, source_behavior_beat_ids, transfer_role, "
+        "strategy, target_adaptation, adapted_action, temporary_divergence, camera_support, "
+        "effect_support, visible_payoff, return_strategy, assigned_beat_id, omission_reason, and "
+        "equivalent_replacement_failure. moment_type must be camera, action, effect, result, or a "
+        "combination represented by combined; strategy must be preserve, adapt, "
+        "replace_with_equivalent, or omit. final_anchor_return must be a plain string. "
+        "anchor_adaptation_plan must be a list of plain strings, and "
+        "anti_flattening_constraints must be a list of plain strings. Do not substitute nested "
+        "objects for any of those fields. "
         "First distinguish observed evidence from director inference: source_evidence for every "
         "climax beat must describe visible facts from the supplied target frames or the supplied "
         "reference-video analysis; all camera, timing, performance, and effects proposals are "
         "director inference grounded in that evidence. Do not present an unsupported inference as "
         "an observed fact. The supplied first frame is the exact opening visual anchor and the "
         "supplied last frame is the exact final visual anchor, including its visible composition, "
-        "text, brand, product, reward, character appearance, and setting. Reference-video analysis "
+        "text, brand, product, reward, character appearance, and setting. Treat the supplied "
+        "first and last frames as exact endpoints, not constraints on every intermediate frame. "
+        "During the free middle interval, pose, orientation, screen position, composition, shot "
+        "scale, and camera placement may diverge significantly. A final-pose mismatch means plan "
+        "a continuous return; it is not a reason to omit a core action. Reference-video analysis "
         "can transfer observed action, action-result causality, entry or staging, camera language, "
         "timing, effects timing, and overlay lifecycle. Do not copy a reference-specific identity, "
         "brand, logo, product, character, text, reward, or setting unless its equivalent is "
-        "visibly "
-        "provided by a target frame or the existing visual identity mapping explicitly permits it. "
-        "Plan the experience as one generated clip: camera changes, reframing, push-ins, reveals, "
-        "or viewpoint changes must happen in-shot. Do not require post-production editing, multi-"
-        "segment generation, stitching, or external compositing. Build a tension_curve in "
-        "ascending "
-        "setup, trigger, escalation, climax, resolution order. Return the executable final "
-        "core beat set for the supplied target duration, not an unlimited list of candidate "
-        "moments. Include one or more evidence-backed climax_beats. Each climax beat must have "
-        "a stable beat_id, a 0-to-1 start_ratio and end_ratio, source_evidence, "
-        "attention_objective, camera_instruction, action_requirement, effect_requirement, "
-        "importance, and dependency ids when needed. Adapt the number and width of core beats "
-        "to both the observed reference duration and the requested target duration. When time "
-        "is short, merge adjacent causal roles into one executable beat and downgrade repeated "
-        "or decorative moments before weakening the causal climax. Cause, action, impact, and "
-        "visible result must remain readable as a causal chain, but each role does not need its "
-        "own beat. Do not create a core beat set whose combined minimum readable time exceeds "
-        "target duration. When reference_video_analysis exists, dynamically identify the one or "
-        "few signature moments with the strongest recognizability and commercial impact. A "
-        "signature moment may be camera, action, effect, result, or a combination, but it must be "
-        "grounded in source_evidence rather than a fixed action template. A generic endpoint lock, "
-        "ordinary static pose, or routine camera drift does not count unless it is genuinely the "
-        "reference video's most distinctive moment. Include at least one signature_moment_plan "
-        "item using preserve or adapt unless every evidence-backed candidate is infeasible with "
-        "the supplied target identity, objects, physical continuity, or endpoint anchors. Omit "
-        "only when that incompatibility is concrete, and then provide a "
-        "specific omission_reason. Every preserve or adapt item must name an assigned core beat "
-        "and explain in target_adaptation how its observed camera, action, effect, or result will "
-        "be executed with the available target assets. For each observed overlay or UI element, "
-        "decide dynamically whether to "
-        "inherit it, replace it with the target equivalent, persist it to the final frame, or omit "
-        "it; state the final-frame requirement without inventing a fixed overlay rule. Provide "
-        "non-empty anti_flattening_constraints that preserve causal readability, the effect peak, "
-        "and the ending anchor."
+        "visibly provided by a target frame or the existing visual identity mapping explicitly "
+        "permits it. For each core action or state change, choose preserve, then adapt, then "
+        "replace_with_equivalent, and omit only when literal/adapted and equivalent-intensity "
+        "execution are infeasible. Generic glow, particles, passive posing, or camera drift cannot "
+        "replace physical or state-changing action. Plan subject motion, camera motion, and effect "
+        "intensity independently. Select action_arc_windows dynamically from target duration, "
+        "action complexity, endpoint difference, camera travel, effect readability, and final-frame "
+        "readability; do not use fixed seconds or fixed percentages. Plan the experience as one "
+        "generated clip: camera changes, reframing, push-ins, reveals, or viewpoint changes must "
+        "happen in-shot. Produce one continuous shot without editing or stitching. Do not require "
+        "post-production editing, multi-segment generation, stitching, or external compositing. "
+        "Build a tension_curve in ascending setup, trigger, escalation, climax, resolution order. "
+        "Return the executable final core beat set for the supplied target duration, not an "
+        "unlimited list of candidate moments. Include one or more evidence-backed climax_beats. "
+        "Each climax beat must have a stable beat_id, a 0-to-1 start_ratio and end_ratio, "
+        "source_evidence, attention_objective, camera_instruction, action_requirement, "
+        "effect_requirement, importance, and dependency ids when needed. Adapt the number and "
+        "width of core beats to both the observed reference duration and the requested target "
+        "duration. When time is short, merge adjacent causal roles into one executable beat and "
+        "downgrade repeated or decorative moments before weakening the causal climax. Cause, "
+        "action, impact, and visible result must remain readable as a causal chain, but each role "
+        "does not need its own beat. Do not create a core beat set whose combined minimum readable "
+        "time exceeds target duration. When reference_video_analysis exists, dynamically identify "
+        "the one or few signature moments with the strongest recognizability and commercial impact. "
+        "A signature moment may be camera, action, effect, result, or a combination, but it must "
+        "be grounded in source_evidence rather than a fixed action template. A generic endpoint "
+        "lock, ordinary static pose, or routine camera drift does not count unless it is genuinely "
+        "the reference video's most distinctive moment. Include at least one signature_moment_plan "
+        "item using preserve or adapt before replace_with_equivalent unless every evidence-backed "
+        "candidate is infeasible with the supplied target identity, objects, physical continuity, "
+        "or endpoint anchors. Omit only when that incompatibility is concrete, and then provide a "
+        "specific omission_reason. Every non-omitted item must name an assigned core beat and "
+        "explain in target_adaptation how its observed camera, action, effect, or result will be "
+        "executed with the available target assets. For each observed overlay or UI element, decide "
+        "dynamically whether to inherit it, replace it with the target equivalent, persist it to "
+        "the final frame, or omit it; state the final-frame requirement without inventing a fixed "
+        "overlay rule. Provide non-empty anti_flattening_constraints that preserve causal "
+        "readability, the effect peak, and the ending anchor."
     )
+
 
 
 def _frame_anchored_storyboard_system_prompt() -> str:
@@ -1940,58 +1957,64 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
-        "cinematic_beats, camera_instruction, tension_stage, action_result_requirement, "
-        "effect_timing, "
-        "overlay_instruction, and anti_flattening_requirement. overlay_instruction must be "
-        "null or an object with reference_element, strategy, timing_instruction, and "
-        "final_frame_requirement; strategy must be exactly inherit, replace_with_target, "
-        "persist_to_final, or omit. Do not return overlay_instruction as a plain string. "
-        "The first scene "
-        "must use frame_anchor first_frame and begin from the actual supplied first-frame "
-        "base layer. Every middle scene must use frame_anchor transition. The final scene "
-        "must use frame_anchor last_frame and arrive at the actual supplied last-frame base "
-        "layer. Do not alter or translate text that is visibly supplied by either target image. "
-        "Use the supplied duration_seconds and aspect_ratio exactly. Scene start_second and "
-        "end_second values are target-generation seconds and may use decimals when needed "
-        "for a readable adapted beat; do not round them merely to copy reference timing. "
-        "When reference_video_analysis exists, use its behavior_graph and its target "
-        "timeline_adaptation_plan together: reference seconds explain observed behavior only; "
-        "the target plan defines the target scene windows. Do not mechanically copy reference "
-        "seconds or linearly scale them. Preserve the dependency order and allocate readable "
-        "time to core causal beats; compress repeated or decorative material first and extend "
-        "readability or the final state when the target duration is longer. "
-        "For each core behavior beat, describe the actual available actors, objects, action, "
-        "interaction, causal change, and visible result from the analysis. When frame_analysis "
-        "contains a director_plan, every core climax beat must be assigned verbatim using either "
-        "cinematic_beat for a legacy single id or cinematic_beats for a list of exact beat_id "
-        "values. One continuous scene may carry multiple core beat ids when its target time "
-        "window performs those roles without a cut. When director_plan.signature_moment_plan "
-        "exists, every item whose strategy is preserve or adapt must be executed inside its "
-        "assigned core beat. Convert its source_evidence and target_adaptation into actual camera "
-        "behavior, subject performance, effect timing, and visible result as applicable; do not "
-        "merely label the beat or summarize the signature moment. Realize the adapted signature "
-        "inside the one continuous shot without editing, stitching, or post-production assembly. "
-        "Use neither a stage name nor a new freeform label. Do not replace a "
-        "specific observed causal action with a generic effect, passive pose, or static result. "
+        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, "
+        "camera_instruction, tension_stage, action_result_requirement, effect_timing, "
+        "subject_motion_intensity, camera_intensity, effect_intensity, "
+        "anchor_return_instruction, overlay_instruction, and anti_flattening_requirement. "
+        "overlay_instruction must be null or an object with reference_element, strategy, "
+        "timing_instruction, and final_frame_requirement; strategy must be exactly inherit, "
+        "replace_with_target, persist_to_final, or omit. Do not return overlay_instruction "
+        "as a plain string. The first scene must use frame_anchor first_frame and begin from "
+        "the actual supplied first-frame base layer. Every middle scene must use frame_anchor "
+        "transition. The final scene must use frame_anchor last_frame and arrive at the actual "
+        "supplied last-frame base layer. Do not alter or translate text that is visibly supplied "
+        "by either target image. Use the supplied duration_seconds and aspect_ratio exactly. "
+        "Scene start_second and end_second values are target-generation seconds and may use "
+        "decimals when needed for a readable adapted beat; do not round them merely to copy "
+        "reference timing. When reference_video_analysis exists, use its behavior_graph and its "
+        "timeline_adaptation_plan together: reference seconds explain observed behavior only; the "
+        "target plan defines the target scene windows. Do not mechanically copy reference seconds "
+        "or linearly scale them. Preserve the dependency order and allocate readable time to core "
+        "causal beats; compress repeated or decorative material first and extend readability or the "
+        "final state when the target duration is longer. For each core behavior beat, describe the "
+        "actual available actors, objects, action, interaction, causal change, and visible result "
+        "from the analysis. When frame_analysis contains a director_plan, every core climax beat "
+        "must be assigned verbatim using either cinematic_beat for a legacy single id or "
+        "cinematic_beats for a list of exact beat_id values. One continuous scene may carry "
+        "multiple core beat ids when its target time window performs those roles without a cut. "
+        "When director_plan.signature_moment_plan exists, every item whose strategy is preserve or adapt or replace_with_equivalent must be executed inside its assigned core beat. Convert "
+        "its source_evidence and target_adaptation into actual camera behavior, subject "
+        "performance, effect timing, and visible result as applicable; do not merely label the beat "
+        "or summarize the signature moment. Realize the adapted signature inside the one continuous "
+        "shot without editing, stitching, or post-production assembly. Use neither a stage name nor "
+        "a new freeform label. Do not replace a specific observed causal action with a generic "
+        "effect, passive pose, or static result. For every non-omitted signature moment, copy its "
+        "exact moment_id into signature_moment_ids, execute its action in motion and/or "
+        "action_result_requirement, include camera and effect support in matching fields, show the "
+        "visible payoff, and state anchor_return_instruction before final lock. Copy relevant "
+        "source behavior IDs into source_behavior_beat_ids. One continuous scene may carry multiple "
+        "IDs when duration is short. The final last_frame scene must end exactly at "
+        "duration_seconds. If director_correction_requirements contains items, satisfy each one in "
+        "the returned scenes without repeating frame_analysis or inventing new source evidence. "
         "Reference characters, appearance, props, products, brands, text, rewards, UI, settings, "
         "camera, transitions, and effects may be preserved when their visual_identity_mappings "
-        "permit it. Follow every mapping: preserve keeps the reference element; "
-        "replace_with_target keeps its presentation while substituting the exact visible "
-        "target-frame equivalent; morph_to_target transforms it before the ending; endpoint_only "
-        "reserves it for the applicable endpoint; preserve_through_last_anchor introduces the "
-        "reference element at its target window and keeps it readable through the final frame. "
-        "For preserve_through_last_anchor, the target last frame is the final base layer and the "
-        "reference element is a required final overlay. It may be scaled or repositioned to "
-        "avoid obscuring a target subject, product, or brand, but it must not be omitted merely "
-        "because the target last frame has no equivalent. State this requirement explicitly in "
-        "the final scene visual or notes. Include optional per-scene sound_effects plus overall "
-        "music and ambience directions in sound_design. Do not invent visual identities absent "
-        "from both supplied target frames and reference analysis. Apply this priority order: "
-        "(1) target-frame base-layer truth and continuity, (2) required mapped reference "
-        "lifecycle and causal behavior, including final overlays, (3) the advertising objective "
-        "where it does not contradict supplied images, and (4) preferred reference camera, "
-        "transitions, and effects."
+        "permit it. Follow every mapping: preserve keeps the reference element; replace_with_target "
+        "keeps its presentation while substituting the exact visible target-frame equivalent; "
+        "morph_to_target transforms it before the ending; endpoint_only reserves it for the "
+        "applicable endpoint; preserve_through_last_anchor introduces the reference element at its "
+        "target window and keeps it readable through the final frame. For preserve_through_last_"
+        "anchor, the target last frame is the final base layer and the reference element is a "
+        "required final overlay. It may be scaled or repositioned to avoid obscuring a target "
+        "subject, product, or brand, but it must not be omitted merely because the target last "
+        "frame has no equivalent. State this requirement explicitly in the final scene visual or "
+        "notes. Include optional per-scene sound_effects plus overall music and ambience directions "
+        "in sound_design. Do not invent visual identities absent from both supplied target frames "
+        "and reference analysis. Apply this priority order: (1) target-frame base-layer truth and "
+        "continuity, (2) required mapped reference lifecycle and causal behavior, including final "
+        "overlays, (3) the advertising objective where it does not contradict supplied images, and "
+        "(4) preferred reference camera, transitions, and effects."
     )
+
 
 
 def _frame_pair_user_content(
@@ -2625,6 +2648,57 @@ def _normalize_director_importance(value: Any) -> str:
     return "supporting"
 
 
+def _normalize_director_action_arc_windows(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in _director_items(value):
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "window_id": _director_first_text(item, "window_id", "id"),
+                "phase": _director_first_text(item, "phase", "role"),
+                "start_ratio": item.get("start_ratio"),
+                "end_ratio": item.get("end_ratio"),
+                "objective": _director_first_text(item, "objective", "instruction"),
+                "subject_motion_intensity": item.get("subject_motion_intensity"),
+                "camera_intensity": item.get("camera_intensity"),
+                "effect_intensity": item.get("effect_intensity"),
+                "depends_on": _frame_string_list(item.get("depends_on")),
+            }
+        )
+    return result
+
+
+def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
+    fields = (
+        "adapted_action",
+        "temporary_divergence",
+        "camera_support",
+        "effect_support",
+        "visible_payoff",
+        "return_strategy",
+        "omission_reason",
+        "equivalent_replacement_failure",
+    )
+    result: list[dict[str, Any]] = []
+    for item in _director_items(value):
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            "moment_id": _director_first_text(item, "moment_id", "id"),
+            "moment_type": _director_first_text(item, "moment_type", "type"),
+            "source_evidence": _director_text_list(item.get("source_evidence")),
+            "source_behavior_beat_ids": _frame_string_list(item.get("source_behavior_beat_ids")),
+            "transfer_role": _director_first_text(item, "transfer_role", "role"),
+            "strategy": _director_first_text(item, "strategy", "decision"),
+            "target_adaptation": _director_first_text(item, "target_adaptation", "adaptation"),
+            "assigned_beat_id": _director_first_text(item, "assigned_beat_id") or None,
+        }
+        normalized.update({field: _director_text(item.get(field)) or None for field in fields})
+        result.append(normalized)
+    return result
+
+
 def _normalize_director_climax_beats(value: Any) -> list[dict[str, Any]]:
     raw_beats = [item for item in _director_items(value) if isinstance(item, dict)]
     normalized: list[dict[str, Any]] = []
@@ -2796,9 +2870,16 @@ def _frame_anchored_director_plan_from_data(
     normalized["climax_beats"] = _normalize_director_climax_beats(
         data.get("climax_beats")
     )
+    normalized["action_arc_windows"] = _normalize_director_action_arc_windows(
+        data.get("action_arc_windows")
+    )
     normalized["overlay_lifecycle_plan"] = _normalize_director_overlay_lifecycle_plan(
         data.get("overlay_lifecycle_plan")
     )
+    normalized["signature_moment_plan"] = _normalize_director_signature_moments(
+        data.get("signature_moment_plan")
+    )
+    normalized["final_anchor_return"] = _director_text(data.get("final_anchor_return"))
     normalized["anchor_adaptation_plan"] = _flatten_director_anchor_plan(
         data.get("anchor_adaptation_plan")
     )
@@ -2841,6 +2922,12 @@ def _frame_anchored_storyboard_from_data(
                     }
                     if "cinematic_beats" in scene
                     else {}
+                ),
+                "signature_moment_ids": list(
+                    dict.fromkeys(_frame_string_list(scene.get("signature_moment_ids")))
+                ),
+                "source_behavior_beat_ids": list(
+                    dict.fromkeys(_frame_string_list(scene.get("source_behavior_beat_ids")))
                 ),
             }
             if isinstance(scene, dict)

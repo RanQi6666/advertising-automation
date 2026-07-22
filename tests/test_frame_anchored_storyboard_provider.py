@@ -83,7 +83,7 @@ def _director_plan_payload(
                 "moment_id": "signature_001",
                 "moment_type": "combined",
                 "source_evidence": ["The reference contains action, emphasis, and a consequence."],
-                "source_behavior_beat_ids": ["reference_action"],
+                "source_behavior_beat_ids": ["core_behavior"],
                 "transfer_role": "primary_action",
                 "strategy": signature_strategy,
                 "target_adaptation": "Legacy-compatible summary.",
@@ -105,6 +105,57 @@ def _director_plan_payload(
         "final_anchor_return": "Settle continuously into the supplied last frame.",
         "anchor_adaptation_plan": ["End in the supplied last frame."],
         "anti_flattening_constraints": ["Do not flatten the signature impact."],
+    }
+
+
+def _action_storyboard_response() -> dict[str, object]:
+    return {
+        "duration_seconds": 12,
+        "aspect_ratio": "9:16",
+        "scenes": [
+            {
+                "scene_index": 1,
+                "start_second": 0,
+                "end_second": 1,
+                "frame_anchor": "first_frame",
+                "visual": "Hold the exact supplied opening anchor.",
+            },
+            {
+                "scene_index": 2,
+                "start_second": 1,
+                "end_second": 7,
+                "frame_anchor": "transition",
+                "visual": "Execute the target-compatible causal action.",
+                "motion": "The subject completes readable state-changing motion.",
+                "cinematic_beats": ["impact"],
+                "camera_instruction": "Reframe continuously around execution.",
+                "action_result_requirement": "Show the visible target-state change.",
+                "effect_timing": "Peak after the subject motion reads.",
+                "signature_moment_ids": ["signature_action"],
+                "source_behavior_beat_ids": ["core_behavior"],
+                "subject_motion_intensity": 0.9,
+                "camera_intensity": 0.65,
+                "effect_intensity": 0.8,
+            },
+            {
+                "scene_index": 3,
+                "start_second": 7,
+                "end_second": 10,
+                "frame_anchor": "transition",
+                "visual": "Resolve the payoff and return to the ending composition.",
+                "motion": "Settle continuously toward the final state.",
+                "anchor_return_instruction": "Restore final pose, framing, and camera continuously.",
+            },
+            {
+                "scene_index": 4,
+                "start_second": 10,
+                "end_second": 12,
+                "frame_anchor": "last_frame",
+                "visual": "Lock the exact supplied last frame.",
+            },
+        ],
+        "sound_design": {"music": "continuous rise and resolve", "ambience": None},
+        "rationale": "Action, payoff, return, and final lock remain one continuous shot.",
     }
 
 
@@ -491,7 +542,7 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
                         "The reference camera emphasis, action, and effect peak form "
                         "one signature moment."
                     ],
-                    "source_behavior_beat_ids": ["reference_action"],
+                    "source_behavior_beat_ids": ["core_behavior"],
                     "transfer_role": "primary_action",
                     "strategy": "adapt",
                     "target_adaptation": (
@@ -548,6 +599,24 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "generic endpoint lock" in system_prompt
     assert "omit only when" in system_prompt
     assert "assigned core beat" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_director_prompt_allows_middle_divergence_and_dynamic_return() -> None:
+    provider, captured = _gateway_provider_with_responses(_director_plan_payload())
+
+    await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, _analysis(), 12, "9:16"
+    )
+
+    prompt = captured[0]["input"][0]["content"].casefold()
+    assert "endpoints, not constraints on every intermediate frame" in prompt
+    assert "final-pose mismatch" in prompt
+    assert "replace_with_equivalent" in prompt
+    assert "subject motion, camera motion, and effect intensity independently" in prompt
+    assert "one continuous" in prompt
+    for sample_noun in ("sword", "diamond", "eagle", "x200,000"):
+        assert sample_noun not in prompt
 
 
 @pytest.mark.asyncio
@@ -1381,6 +1450,48 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
         "Do not alter or translate text that is visibly supplied by either target image"
         in system_prompt
     )
+
+
+@pytest.mark.asyncio
+async def test_storyboard_call_receives_compact_corrections() -> None:
+    provider, captured = _gateway_provider_with_responses(_action_storyboard_response())
+    analysis = _analysis().model_copy(
+        update={"director_plan": FrameAnchoredDirectorPlan.model_validate(_director_plan_payload())}
+    )
+
+    await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis,
+        12,
+        "9:16",
+        director_correction_requirements=[
+            "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+        ],
+    )
+
+    payload = captured[0]["input"][1]["content"][0]["text"]
+    assert "director_correction_requirements" in payload
+    assert "core_behavior" in payload
+    assert payload.count("frame_analysis") == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_scene_execution_fields() -> None:
+    provider, _ = _gateway_provider_with_responses(_action_storyboard_response())
+    analysis = _analysis().model_copy(
+        update={"director_plan": FrameAnchoredDirectorPlan.model_validate(_director_plan_payload())}
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 12, "9:16"
+    )
+
+    action = storyboard.scenes[1]
+    assert action.signature_moment_ids == ["signature_action"]
+    assert action.source_behavior_beat_ids == ["core_behavior"]
+    assert action.subject_motion_intensity == 0.9
+    assert storyboard.scenes[-2].anchor_return_instruction
 
 
 @pytest.mark.asyncio

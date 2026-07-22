@@ -113,6 +113,7 @@ class LLMProvider(Protocol):
         frame_analysis: FrameAnalysis,
         duration_seconds: int,
         aspect_ratio: str,
+        director_correction_requirements: list[str] | None = None,
     ) -> FrameAnchoredStoryboard:
         """Create an anchored storyboard using the same first and last frames."""
 
