@@ -83,6 +83,57 @@ def test_director_coverage_requires_frame_anchored_storyboard_to_represent_clima
         validate_director_coverage(storyboard, director_plan)
 
 
+def test_director_coverage_assigns_a_missing_core_beat_to_its_timeline_scene() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Escalate to an evidence-backed visible impact.",
+        attention_path=["subject", "impact", "result"],
+        tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="impact_reveal",
+                stage="climax",
+                source_evidence=["The supplied frames establish an activation and result."],
+                start_ratio=0.35,
+                end_ratio=0.75,
+                importance="core",
+            )
+        ],
+        anchor_adaptation_plan=["Resolve in the supplied last frame."],
+        anti_flattening_constraints=["Keep the causal impact readable."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=3,
+                frame_anchor="first_frame",
+                visual="Open on the supplied first-frame composition.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=3,
+                end_second=8,
+                frame_anchor="transition",
+                visual="Show the adapted causal action and visible impact.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=3,
+                start_second=8,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last-frame composition.",
+            ),
+        ],
+    )
+
+    validate_director_coverage(storyboard, director_plan)
+
+    assert storyboard.scenes[1].cinematic_beat == "impact_reveal"
+
+
 @pytest.mark.asyncio
 async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() -> None:
     provider, captured = _gateway_provider_with_responses(
@@ -945,6 +996,8 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "subtitle" in system_prompt
     assert "voiceover" in system_prompt
     assert "sound_effects" in system_prompt
+    assert "cinematic_beat" in system_prompt
+    assert "exact beat_id" in system_prompt
     assert (
         "Do not alter or translate text that is visibly supplied by either target image"
         in system_prompt

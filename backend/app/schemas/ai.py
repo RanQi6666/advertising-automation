@@ -362,12 +362,62 @@ class FrameAnchoredStoryboard(BaseModel):
         return self
 
 
+def _assign_missing_director_beat_ids(
+    storyboard: FrameAnchoredStoryboard,
+    plan: FrameAnchoredDirectorPlan,
+) -> None:
+    """Link unlabeled scenes to core director beats without changing their creative content."""
+    available_scenes = [
+        scene for scene in storyboard.scenes if not (scene.cinematic_beat or "").strip()
+    ]
+    duration = float(storyboard.duration_seconds)
+    assigned_beat_ids = {
+        scene.cinematic_beat for scene in storyboard.scenes if scene.cinematic_beat
+    }
+
+    for beat in plan.climax_beats:
+        if beat.importance != "core" or beat.beat_id in assigned_beat_ids:
+            continue
+        if not available_scenes:
+            return
+
+        beat_start = beat.start_ratio * duration
+        beat_end = beat.end_ratio * duration
+        beat_midpoint = (beat_start + beat_end) / 2
+
+        def scene_score(
+            scene: FrameAnchoredStoryboardScene,
+            *,
+            _beat_start: float = beat_start,
+            _beat_end: float = beat_end,
+            _beat_midpoint: float = beat_midpoint,
+        ) -> tuple[float, float, int]:
+            scene_start = 0.0 if scene.start_second is None else scene.start_second
+            scene_end = duration if scene.end_second is None else scene.end_second
+            overlap = max(
+                0.0,
+                min(scene_end, _beat_end) - max(scene_start, _beat_start),
+            )
+            scene_midpoint = (scene_start + scene_end) / 2
+            return (
+                overlap,
+                -abs(scene_midpoint - _beat_midpoint),
+                1 if scene.frame_anchor == "transition" else 0,
+            )
+
+        scene = max(available_scenes, key=scene_score)
+        scene.cinematic_beat = beat.beat_id
+        assigned_beat_ids.add(beat.beat_id)
+        available_scenes.remove(scene)
+
+
 def validate_director_coverage(
     storyboard: FrameAnchoredStoryboard,
     plan: FrameAnchoredDirectorPlan | None,
 ) -> None:
     if plan is None:
         return
+    _assign_missing_director_beat_ids(storyboard, plan)
     for beat in plan.climax_beats:
         if beat.importance != "core":
             continue
