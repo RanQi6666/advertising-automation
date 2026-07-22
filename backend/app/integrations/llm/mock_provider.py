@@ -51,6 +51,12 @@ def _mock_storyboard_boundaries(duration_seconds: int) -> tuple[int, int, int]:
     return opening_end, action_end, final_lock_start
 
 
+def _mock_even_breakpoints(duration_seconds: int, scene_count: int) -> list[float]:
+    return [round(duration_seconds * index / scene_count, 4) for index in range(scene_count)] + [
+        float(duration_seconds)
+    ]
+
+
 class MockLLMProvider:
     """Deterministic provider for local development and tests."""
 
@@ -233,122 +239,267 @@ class MockLLMProvider:
             ),
             None,
         )
-        correction_note = " ".join(requirement.strip() for requirement in (director_correction_requirements or []) if requirement.strip())
-        opening_end, action_end, final_lock_start = _mock_storyboard_boundaries(duration_seconds)
+        correction_note = " ".join(
+            requirement.strip()
+            for requirement in (director_correction_requirements or [])
+            if requirement.strip()
+        )
 
         if signature_moment is not None and director_beat is not None:
             action_result_requirement = signature_moment.visible_payoff
             if correction_note:
                 action_result_requirement = f"{action_result_requirement} Corrections: {correction_note}"
-            scenes = [
-                FrameAnchoredStoryboardScene(
-                    scene_index=1,
-                    start_second=0,
-                    end_second=opening_end,
-                    frame_anchor="first_frame",
-                    visual="Hold the exact supplied opening anchor.",
-                    motion="Begin the continuous transition without changing target identity.",
-                    transition_goal="Leave the opening anchor and prepare the adapted action.",
-                    sound_effects=["Soft opening ambience."],
-                ),
-                FrameAnchoredStoryboardScene(
-                    scene_index=2,
-                    start_second=opening_end,
-                    end_second=action_end,
-                    frame_anchor="transition",
-                    visual="Execute the target-compatible causal action.",
-                    motion=signature_moment.adapted_action,
-                    transition_goal="Carry the core action and its payoff without a cut.",
-                    sound_effects=["Action rise."],
-                    cinematic_beat=director_beat.beat_id,
-                    cinematic_beats=[director_beat.beat_id],
-                    signature_moment_ids=[signature_moment.moment_id],
-                    source_behavior_beat_ids=list(signature_moment.source_behavior_beat_ids),
-                    camera_instruction=signature_moment.camera_support or director_beat.camera_instruction,
-                    tension_stage=director_beat.stage,
-                    action_result_requirement=action_result_requirement,
-                    effect_timing=signature_moment.effect_support or director_beat.effect_requirement,
-                    subject_motion_intensity=0.9,
-                    camera_intensity=0.65,
-                    effect_intensity=0.8,
-                    anti_flattening_requirement=(
-                        "Keep the subject action, visible payoff, and return distinct and readable."
+            action_camera_instruction = (
+                signature_moment.camera_support or director_beat.camera_instruction
+            )
+            action_effect_timing = (
+                signature_moment.effect_support or director_beat.effect_requirement
+            )
+            action_anti_flattening_requirement = (
+                "Keep the subject action, visible payoff, and return distinct and readable."
+            )
+            return_instruction = (
+                signature_moment.return_strategy
+                or director_plan.final_anchor_return
+                or "Return continuously into the exact supplied final anchor."
+            )
+            if duration_seconds >= 4:
+                opening_end, action_end, final_lock_start = _mock_storyboard_boundaries(
+                    duration_seconds
+                )
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=0,
+                        end_second=opening_end,
+                        frame_anchor="first_frame",
+                        visual="Hold the exact supplied opening anchor.",
+                        motion="Begin the continuous transition without changing target identity.",
+                        transition_goal="Leave the opening anchor and prepare the adapted action.",
+                        sound_effects=["Soft opening ambience."],
                     ),
-                    notes=correction_note or None,
-                ),
-                FrameAnchoredStoryboardScene(
-                    scene_index=3,
-                    start_second=action_end,
-                    end_second=final_lock_start,
-                    frame_anchor="transition",
-                    visual="Resolve the payoff and return to the ending composition.",
-                    motion="Settle continuously toward the final state.",
-                    transition_goal="Restore the supplied ending pose, framing, and setting in-shot.",
-                    sound_effects=["Resolve sweep."],
-                    anchor_return_instruction=(
-                        signature_moment.return_strategy
-                        or director_plan.final_anchor_return
-                        or "Return continuously into the exact supplied final anchor."
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=opening_end,
+                        end_second=action_end,
+                        frame_anchor="transition",
+                        visual="Execute the target-compatible causal action.",
+                        motion=signature_moment.adapted_action,
+                        transition_goal="Carry the core action and its payoff without a cut.",
+                        sound_effects=["Action rise."],
+                        cinematic_beat=director_beat.beat_id,
+                        cinematic_beats=[director_beat.beat_id],
+                        signature_moment_ids=[signature_moment.moment_id],
+                        source_behavior_beat_ids=list(signature_moment.source_behavior_beat_ids),
+                        camera_instruction=action_camera_instruction,
+                        tension_stage=director_beat.stage,
+                        action_result_requirement=action_result_requirement,
+                        effect_timing=action_effect_timing,
+                        subject_motion_intensity=0.9,
+                        camera_intensity=0.65,
+                        effect_intensity=0.8,
+                        anti_flattening_requirement=action_anti_flattening_requirement,
+                        notes=correction_note or None,
                     ),
-                ),
-                FrameAnchoredStoryboardScene(
-                    scene_index=4,
-                    start_second=final_lock_start,
-                    end_second=duration_seconds,
-                    frame_anchor="last_frame",
-                    visual="Lock the exact supplied last-frame visual state.",
-                    motion="Settle into the supplied final composition.",
-                    transition_goal="Preserve the ending frame without adding an end card.",
-                    sound_effects=["Ending ambience."],
-                ),
-            ]
-            rationale = "Mock frame-anchored storyboard preserves the action arc, payoff, return, and final lock in one continuous shot."
+                    FrameAnchoredStoryboardScene(
+                        scene_index=3,
+                        start_second=action_end,
+                        end_second=final_lock_start,
+                        frame_anchor="transition",
+                        visual="Resolve the payoff and return to the ending composition.",
+                        motion="Settle continuously toward the final state.",
+                        transition_goal="Restore the supplied ending pose, framing, and setting in-shot.",
+                        sound_effects=["Resolve sweep."],
+                        anchor_return_instruction=return_instruction,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=4,
+                        start_second=final_lock_start,
+                        end_second=duration_seconds,
+                        frame_anchor="last_frame",
+                        visual="Lock the exact supplied last-frame visual state.",
+                        motion="Settle into the supplied final composition.",
+                        transition_goal="Preserve the ending frame without adding an end card.",
+                        sound_effects=["Ending ambience."],
+                    ),
+                ]
+            elif duration_seconds == 3:
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=0,
+                        end_second=1,
+                        frame_anchor="first_frame",
+                        visual="Hold the exact supplied opening anchor.",
+                        motion="Begin the continuous transition without changing target identity.",
+                        transition_goal="Leave the opening anchor and prepare the adapted action.",
+                        sound_effects=["Soft opening ambience."],
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=1,
+                        end_second=2,
+                        frame_anchor="transition",
+                        visual="Execute the target-compatible causal action.",
+                        motion=signature_moment.adapted_action,
+                        transition_goal="Carry the core action and its payoff without a cut.",
+                        sound_effects=["Action rise."],
+                        cinematic_beat=director_beat.beat_id,
+                        cinematic_beats=[director_beat.beat_id],
+                        signature_moment_ids=[signature_moment.moment_id],
+                        source_behavior_beat_ids=list(signature_moment.source_behavior_beat_ids),
+                        camera_instruction=action_camera_instruction,
+                        tension_stage=director_beat.stage,
+                        action_result_requirement=action_result_requirement,
+                        effect_timing=action_effect_timing,
+                        subject_motion_intensity=0.9,
+                        camera_intensity=0.65,
+                        effect_intensity=0.8,
+                        anti_flattening_requirement=action_anti_flattening_requirement,
+                        notes=correction_note or None,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=3,
+                        start_second=2,
+                        end_second=duration_seconds,
+                        frame_anchor="last_frame",
+                        visual="Resolve the payoff and lock the exact supplied last-frame visual state.",
+                        motion="Settle into the supplied final composition.",
+                        transition_goal="Merge the return and final lock into the ending anchor without a cut.",
+                        sound_effects=["Resolve sweep.", "Ending ambience."],
+                        anchor_return_instruction=return_instruction,
+                    ),
+                ]
+            else:
+                first_start, first_end, final_end = _mock_even_breakpoints(duration_seconds, 2)
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=first_start,
+                        end_second=first_end,
+                        frame_anchor="first_frame",
+                        visual="Hold the exact supplied opening anchor.",
+                        motion="Begin the continuous transition without changing target identity.",
+                        transition_goal="Leave the opening anchor and prepare the adapted action.",
+                        sound_effects=["Soft opening ambience."],
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=first_end,
+                        end_second=final_end,
+                        frame_anchor="last_frame",
+                        visual="Execute the target-compatible causal action, show the payoff, and settle into the exact final anchor.",
+                        motion=signature_moment.adapted_action,
+                        transition_goal="Merge the action, return, and final lock into the ending anchor without a cut.",
+                        sound_effects=["Action rise.", "Resolve sweep.", "Ending ambience."],
+                        cinematic_beat=director_beat.beat_id,
+                        cinematic_beats=[director_beat.beat_id],
+                        signature_moment_ids=[signature_moment.moment_id],
+                        source_behavior_beat_ids=list(signature_moment.source_behavior_beat_ids),
+                        camera_instruction=action_camera_instruction,
+                        tension_stage=director_beat.stage,
+                        action_result_requirement=action_result_requirement,
+                        effect_timing=action_effect_timing,
+                        subject_motion_intensity=0.9,
+                        camera_intensity=0.65,
+                        effect_intensity=0.8,
+                        anchor_return_instruction=return_instruction,
+                        anti_flattening_requirement=action_anti_flattening_requirement,
+                        notes=correction_note or None,
+                    ),
+                ]
+            rationale = (
+                "Mock frame-anchored storyboard preserves the action arc, payoff, return, and "
+                "final lock in one continuous shot."
+            )
         else:
-            last_start = max(opening_end + 1, duration_seconds - max(1, duration_seconds // 4))
             action_result_requirement = director_beat.action_requirement if director_beat else None
             if action_result_requirement and correction_note:
                 action_result_requirement = f"{action_result_requirement} Corrections: {correction_note}"
-            scenes = [
-                FrameAnchoredStoryboardScene(
-                    scene_index=1,
-                    start_second=0,
-                    end_second=opening_end,
-                    frame_anchor="first_frame",
-                    visual="Begin from the exact supplied first-frame visual state.",
-                    motion="A subtle camera move begins the transition.",
-                    transition_goal="Leave the opening state without adding unseen elements.",
-                    sound_effects=["Soft opening ambience."],
-                ),
-                FrameAnchoredStoryboardScene(
-                    scene_index=2,
-                    start_second=opening_end,
-                    end_second=last_start,
-                    frame_anchor="transition",
-                    visual="Bridge the two supplied visual states through continuous action.",
-                    motion="Camera movement and lighting evolve toward the ending frame.",
-                    transition_goal="Maintain visual continuity while approaching the ending state.",
-                    sound_effects=["Transition whoosh."],
-                    cinematic_beat=director_beat.beat_id if director_beat else None,
-                    camera_instruction=director_beat.camera_instruction if director_beat else None,
-                    tension_stage=director_beat.stage if director_beat else None,
-                    action_result_requirement=action_result_requirement,
-                    effect_timing=director_beat.effect_requirement if director_beat else None,
-                    anti_flattening_requirement=(
-                        "Keep the action and its visible result as separate phases." if director_beat else None
+            if duration_seconds >= 3:
+                opening_end, _, _ = _mock_storyboard_boundaries(duration_seconds)
+                last_start = max(
+                    opening_end + 1,
+                    duration_seconds - max(1, duration_seconds // 4),
+                )
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=0,
+                        end_second=opening_end,
+                        frame_anchor="first_frame",
+                        visual="Begin from the exact supplied first-frame visual state.",
+                        motion="A subtle camera move begins the transition.",
+                        transition_goal="Leave the opening state without adding unseen elements.",
+                        sound_effects=["Soft opening ambience."],
                     ),
-                    notes=correction_note or None,
-                ),
-                FrameAnchoredStoryboardScene(
-                    scene_index=3,
-                    start_second=last_start,
-                    end_second=duration_seconds,
-                    frame_anchor="last_frame",
-                    visual="Arrive at the exact supplied last-frame visual state.",
-                    motion="Settle into the supplied final composition.",
-                    transition_goal="Preserve the ending frame without adding an end card.",
-                    sound_effects=["Ending ambience."],
-                ),
-            ]
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=opening_end,
+                        end_second=last_start,
+                        frame_anchor="transition",
+                        visual="Bridge the two supplied visual states through continuous action.",
+                        motion="Camera movement and lighting evolve toward the ending frame.",
+                        transition_goal="Maintain visual continuity while approaching the ending state.",
+                        sound_effects=["Transition whoosh."],
+                        cinematic_beat=director_beat.beat_id if director_beat else None,
+                        camera_instruction=director_beat.camera_instruction if director_beat else None,
+                        tension_stage=director_beat.stage if director_beat else None,
+                        action_result_requirement=action_result_requirement,
+                        effect_timing=director_beat.effect_requirement if director_beat else None,
+                        anti_flattening_requirement=(
+                            "Keep the action and its visible result as separate phases."
+                            if director_beat
+                            else None
+                        ),
+                        notes=correction_note or None,
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=3,
+                        start_second=last_start,
+                        end_second=duration_seconds,
+                        frame_anchor="last_frame",
+                        visual="Arrive at the exact supplied last-frame visual state.",
+                        motion="Settle into the supplied final composition.",
+                        transition_goal="Preserve the ending frame without adding an end card.",
+                        sound_effects=["Ending ambience."],
+                    ),
+                ]
+            else:
+                first_start, first_end, final_end = _mock_even_breakpoints(duration_seconds, 2)
+                scenes = [
+                    FrameAnchoredStoryboardScene(
+                        scene_index=1,
+                        start_second=first_start,
+                        end_second=first_end,
+                        frame_anchor="first_frame",
+                        visual="Begin from the exact supplied first-frame visual state.",
+                        motion="A subtle camera move begins the transition.",
+                        transition_goal="Leave the opening state without adding unseen elements.",
+                        sound_effects=["Soft opening ambience."],
+                    ),
+                    FrameAnchoredStoryboardScene(
+                        scene_index=2,
+                        start_second=first_end,
+                        end_second=final_end,
+                        frame_anchor="last_frame",
+                        visual="Bridge the remaining motion and arrive at the exact supplied last-frame visual state.",
+                        motion="Settle into the supplied final composition while completing the transition.",
+                        transition_goal="Preserve the ending frame without adding an end card.",
+                        sound_effects=["Transition whoosh.", "Ending ambience."],
+                        cinematic_beat=director_beat.beat_id if director_beat else None,
+                        camera_instruction=director_beat.camera_instruction if director_beat else None,
+                        tension_stage=director_beat.stage if director_beat else None,
+                        action_result_requirement=action_result_requirement,
+                        effect_timing=director_beat.effect_requirement if director_beat else None,
+                        anti_flattening_requirement=(
+                            "Keep the action and its visible result as separate phases."
+                            if director_beat
+                            else None
+                        ),
+                        notes=correction_note or None,
+                    ),
+                ]
             rationale = "Mock frame-anchored storyboard preserves both supplied frame endpoints."
 
         return FrameAnchoredStoryboard(

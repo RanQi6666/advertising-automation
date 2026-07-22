@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.core.errors import ProviderError
+from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
     DirectorActionArcWindow,
@@ -1495,6 +1496,96 @@ async def test_provider_normalizes_scene_execution_fields() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration_seconds", "expected_windows"),
+    [
+        (1, [("first_frame", 0, 0.5), ("last_frame", 0.5, 1)]),
+        (2, [("first_frame", 0, 1), ("last_frame", 1, 2)]),
+        (3, [("first_frame", 0, 1), ("transition", 1, 2), ("last_frame", 2, 3)]),
+    ],
+)
+async def test_mock_storyboard_merges_short_durations_with_core_evidence(
+    duration_seconds: int, expected_windows: list[tuple[str, float, float]]
+) -> None:
+    provider = MockLLMProvider()
+    analysis = _analysis_with_mock_core_behavior()
+
+    director_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis,
+        duration_seconds,
+        "9:16",
+    )
+
+    assert director_plan.action_arc_windows
+    assert director_plan.signature_moment_plan
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis.model_copy(update={"director_plan": director_plan}),
+        duration_seconds,
+        "9:16",
+        director_correction_requirements=[
+            "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+        ],
+    )
+
+    _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
+
+    execution_scene = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    assert execution_scene.signature_moment_ids == ["signature_action"]
+    assert execution_scene.source_behavior_beat_ids == ["core_behavior"]
+    assert execution_scene.action_result_requirement is not None
+    assert "Corrections:" in execution_scene.action_result_requirement
+    assert execution_scene.subject_motion_intensity == 0.9
+
+    return_scene = next(scene for scene in storyboard.scenes if scene.anchor_return_instruction)
+    assert return_scene.end_second == duration_seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration_seconds", "expected_windows"),
+    [
+        (1, [("first_frame", 0, 0.5), ("last_frame", 0.5, 1)]),
+        (2, [("first_frame", 0, 1), ("last_frame", 1, 2)]),
+        (3, [("first_frame", 0, 1), ("transition", 1, 2), ("last_frame", 2, 3)]),
+    ],
+)
+async def test_mock_storyboard_merges_short_durations_without_core_evidence(
+    duration_seconds: int, expected_windows: list[tuple[str, float, float]]
+) -> None:
+    provider = MockLLMProvider()
+    analysis = _analysis()
+
+    director_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis,
+        duration_seconds,
+        "9:16",
+    )
+
+    assert director_plan.action_arc_windows == []
+    assert director_plan.signature_moment_plan == []
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        analysis.model_copy(update={"director_plan": director_plan}),
+        duration_seconds,
+        "9:16",
+    )
+
+    _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
+    assert all(not scene.signature_moment_ids for scene in storyboard.scenes)
+    assert all(not scene.source_behavior_beat_ids for scene in storyboard.scenes)
+    assert all(scene.anchor_return_instruction is None for scene in storyboard.scenes)
+
+
+@pytest.mark.asyncio
 async def test_gateway_storyboard_normalizes_string_sound_effects() -> None:
     provider, _captured = _gateway_provider_with_responses(
         {
@@ -1738,6 +1829,50 @@ def _analysis() -> FrameAnalysis:
             reason="Visible text is English.",
         ),
     )
+
+
+def _analysis_with_mock_core_behavior() -> FrameAnalysis:
+    reference_data = _reference_video_analysis_data()
+    reference_data["behavior_graph"] = {
+        "entities": ["subject", "target"],
+        "beats": [
+            {
+                "beat_id": "core_behavior",
+                "reference_start_second": 0.6,
+                "reference_end_second": 2.6,
+                "description": "The subject completes a visible causal state change.",
+                "visible_evidence": [
+                    "subject motion",
+                    "target-state change",
+                ],
+                "behavior_type": "action",
+                "importance": "core",
+                "minimum_readable_duration_seconds": 0.5,
+            }
+        ],
+    }
+    return FrameAnalysis.model_validate(
+        {**_analysis().model_dump(), "reference_video_analysis": reference_data}
+    )
+
+
+def _assert_mock_scene_timing(
+    storyboard: FrameAnchoredStoryboard,
+    duration_seconds: int,
+    expected_windows: list[tuple[str, float, float]],
+) -> None:
+    actual_windows = [
+        (scene.frame_anchor, scene.start_second, scene.end_second)
+        for scene in storyboard.scenes
+    ]
+    assert actual_windows == expected_windows
+    assert storyboard.scenes[-1].end_second == duration_seconds
+    for scene in storyboard.scenes:
+        assert scene.start_second is not None
+        assert scene.end_second is not None
+        assert scene.end_second > scene.start_second
+    for previous_scene, scene in zip(storyboard.scenes, storyboard.scenes[1:]):
+        assert previous_scene.end_second <= scene.start_second
 
 
 def _reference_video_analysis_data() -> dict[str, object]:
