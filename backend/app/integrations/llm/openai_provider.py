@@ -522,7 +522,11 @@ class OpenAILLMProvider:
                 reference_frames=reference_frames,
             ),
         )
-        return _frame_analysis_from_data(data)
+        return _frame_analysis_from_data(
+            data,
+            reference_video_duration_seconds=reference_video_duration_seconds,
+            reference_video_sample_interval_seconds=reference_video_sample_interval_seconds,
+        )
 
     async def direct_frame_anchored_video_storyboard(
         self,
@@ -1834,8 +1838,10 @@ def _frame_analysis_system_prompt() -> str:
         "reference_start_second, reference_end_second, description, visible_evidence, "
         "behavior_type (action, state, or overlay), importance (core, supporting, or decorative), "
         "minimum_readable_duration_seconds, depends_on, must_remain_visible_until_final, and "
-        "locked_text. Use reference seconds only to "
-        "describe observed order and duration; they are not target-generation seconds. "
+        "locked_text. Use numeric seconds only. reference_end_second must be strictly greater "
+        "than reference_start_second. Every beat_id must be non-empty and unique. depends_on "
+        "may only contain a known beat_id from the same behavior_graph. Use reference seconds "
+        "only to describe observed order and duration; they are not target-generation seconds. "
         "Set must_remain_visible_until_final=true only for a non-diegetic visual overlay such as "
         "readable reward text, logo, label, or UI layer that remains visible at the reference end. "
         "Never mark a character, prop, setting, camera move, action, transformation, hit, or "
@@ -1972,7 +1978,12 @@ def _frame_pair_user_content(
     return content
 
 
-def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
+def _frame_analysis_from_data(
+    data: dict[str, Any],
+    *,
+    reference_video_duration_seconds: float | None = None,
+    reference_video_sample_interval_seconds: float | None = None,
+) -> FrameAnalysis:
     try:
         first_frame = data.get("first_frame")
         last_frame = data.get("last_frame")
@@ -2030,7 +2041,9 @@ def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
         }
         if isinstance(data.get("reference_video_analysis"), dict):
             normalized["reference_video_analysis"] = _reference_video_analysis_from_data(
-                data["reference_video_analysis"]
+                data["reference_video_analysis"],
+                reference_duration_seconds=reference_video_duration_seconds,
+                reference_sample_interval_seconds=reference_video_sample_interval_seconds,
             )
         return FrameAnalysis.model_validate(normalized)
     except (TypeError, ValidationError, ValueError) as exc:
@@ -2102,8 +2115,26 @@ def _frame_language_list(value: Any) -> list[str]:
     return values
 
 
-def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
+def _reference_video_analysis_from_data(
+    data: dict[str, Any],
+    *,
+    reference_duration_seconds: float | None = None,
+    reference_sample_interval_seconds: float | None = None,
+) -> dict[str, Any]:
     normalized = dict(data)
+    reliable_duration = _positive_finite_float(reference_duration_seconds)
+    reported_duration = _positive_finite_float(data.get("duration_seconds"))
+    duration_seconds = reliable_duration or reported_duration
+    if duration_seconds is not None:
+        normalized["duration_seconds"] = duration_seconds
+
+    reliable_sample_interval = _positive_finite_float(reference_sample_interval_seconds)
+    reported_sample_interval = _positive_finite_float(data.get("sample_interval_seconds"))
+    if reliable_sample_interval is not None:
+        normalized["sample_interval_seconds"] = reliable_sample_interval
+    elif reported_sample_interval is not None:
+        normalized["sample_interval_seconds"] = reported_sample_interval
+
     segments = data.get("segments")
     if segments is None:
         segments = data.get("chronological_segments")
@@ -2124,14 +2155,11 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
 
     behavior_graph = data.get("behavior_graph")
     if isinstance(behavior_graph, dict):
-        normalized["behavior_graph"] = {
-            "entities": _frame_string_list(behavior_graph.get("entities")),
-            "beats": [
-                _reference_behavior_beat_from_data(beat)
-                for beat in behavior_graph.get("beats", [])
-                if isinstance(beat, dict)
-            ],
-        }
+        normalized["behavior_graph"] = _normalize_reference_behavior_graph(
+            behavior_graph,
+            duration_seconds=duration_seconds,
+            segments=normalized.get("segments"),
+        )
 
     constraints = data.get("adapted_constraints")
     if isinstance(constraints, dict):
@@ -2155,6 +2183,175 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
         }
     return normalized
 
+
+def _normalize_reference_behavior_graph(
+    behavior_graph: dict[str, Any],
+    *,
+    duration_seconds: float | None,
+    segments: Any,
+) -> dict[str, Any]:
+    raw_beats = [beat for beat in behavior_graph.get("beats", []) if isinstance(beat, dict)]
+    normalized_beats = [_reference_behavior_beat_from_data(beat) for beat in raw_beats]
+    if not normalized_beats:
+        return {
+            "entities": _frame_string_list(behavior_graph.get("entities")),
+            "beats": [],
+        }
+
+    duration = duration_seconds or _behavior_graph_fallback_duration(normalized_beats)
+    anchors = _reference_timeline_anchors(segments, duration)
+    fallback_window = min(0.5, max(0.1, duration / max(len(normalized_beats) + 1, 2)))
+    prepared: list[dict[str, Any]] = []
+    previous_end = 0.0
+
+    for source_index, beat in enumerate(normalized_beats):
+        start = _finite_float_or_none(beat.get("reference_start_second"))
+        end = _finite_float_or_none(beat.get("reference_end_second"))
+        window = _normalize_reference_behavior_window(
+            start=start,
+            end=end,
+            duration=duration,
+            anchors=anchors,
+            previous_end=previous_end,
+            fallback_window=fallback_window,
+        )
+        beat["reference_start_second"], beat["reference_end_second"] = window
+        if beat["must_remain_visible_until_final"]:
+            beat["reference_end_second"] = duration
+        beat["description"] = (
+            _coerce_optional_text(beat.get("description"))
+            or f"Observed reference behavior {source_index + 1}."
+        )
+        readable_duration = _positive_finite_float(
+            beat.get("minimum_readable_duration_seconds")
+        )
+        beat["minimum_readable_duration_seconds"] = readable_duration or 0.5
+        prepared.append(
+            {
+                "source_index": source_index,
+                "raw_id": _coerce_optional_text(raw_beats[source_index].get("beat_id")),
+                "raw_depends_on": _frame_string_list(raw_beats[source_index].get("depends_on")),
+                "beat": beat,
+            }
+        )
+        previous_end = max(previous_end, beat["reference_end_second"])
+
+    prepared.sort(
+        key=lambda item: (
+            item["beat"]["reference_start_second"],
+            item["beat"]["reference_end_second"],
+            item["source_index"],
+        )
+    )
+    raw_to_canonical: dict[str, str] = {}
+    for index, item in enumerate(prepared, start=1):
+        canonical_id = f"beat_{index:03d}"
+        item["canonical_id"] = canonical_id
+        raw_id = item["raw_id"]
+        if raw_id and raw_id not in raw_to_canonical:
+            raw_to_canonical[raw_id] = canonical_id
+
+    canonical_beats: list[dict[str, Any]] = []
+    for index, item in enumerate(prepared):
+        beat = item["beat"]
+        canonical_id = item["canonical_id"]
+        allowed_prior_ids = {previous["beat_id"] for previous in canonical_beats}
+        declared_dependencies = item["raw_depends_on"]
+        dependencies: list[str] = []
+        for raw_dependency in declared_dependencies:
+            canonical_dependency = raw_to_canonical.get(raw_dependency)
+            if (
+                canonical_dependency
+                and canonical_dependency != canonical_id
+                and canonical_dependency in allowed_prior_ids
+                and canonical_dependency not in dependencies
+            ):
+                dependencies.append(canonical_dependency)
+        if index == 0:
+            dependencies = []
+        elif declared_dependencies and not dependencies:
+            dependencies = [canonical_beats[-1]["beat_id"]]
+        beat["beat_id"] = canonical_id
+        beat["depends_on"] = dependencies
+        canonical_beats.append(beat)
+
+    return {
+        "entities": _frame_string_list(behavior_graph.get("entities")),
+        "beats": canonical_beats,
+    }
+
+
+def _normalize_reference_behavior_window(
+    *,
+    start: float | None,
+    end: float | None,
+    duration: float,
+    anchors: list[float],
+    previous_end: float,
+    fallback_window: float,
+) -> tuple[float, float]:
+    clamped_start = _clamp_reference_second(start, duration)
+    clamped_end = _clamp_reference_second(end, duration)
+    if clamped_start is not None and clamped_end is not None and clamped_end > clamped_start:
+        return clamped_start, clamped_end
+
+    preferred_start = max(previous_end, clamped_start or 0.0)
+    if preferred_start >= duration:
+        return max(0.0, duration - fallback_window), duration
+    anchored_end = next((anchor for anchor in anchors if anchor > preferred_start), None)
+    repaired_end = anchored_end or min(duration, preferred_start + fallback_window)
+    if repaired_end <= preferred_start:
+        repaired_end = min(duration, preferred_start + fallback_window)
+    if repaired_end <= preferred_start:
+        return max(0.0, duration - fallback_window), duration
+    return preferred_start, repaired_end
+
+
+def _reference_timeline_anchors(segments: Any, duration: float) -> list[float]:
+    anchors = {0.0, duration}
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            for key in ("start_second", "end_second"):
+                second = _clamp_reference_second(_finite_float_or_none(segment.get(key)), duration)
+                if second is not None:
+                    anchors.add(second)
+    return sorted(anchors)
+
+
+def _behavior_graph_fallback_duration(beats: list[dict[str, Any]]) -> float:
+    observed_seconds = [
+        second
+        for beat in beats
+        for second in (
+            _finite_float_or_none(beat.get("reference_start_second")),
+            _finite_float_or_none(beat.get("reference_end_second")),
+        )
+        if second is not None and second > 0
+    ]
+    return max(1.0, min(30.0, max(observed_seconds, default=1.0)))
+
+
+def _clamp_reference_second(second: float | None, duration: float) -> float | None:
+    if second is None:
+        return None
+    return max(0.0, min(second, duration))
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    number = _finite_float_or_none(value)
+    return number if number is not None and number > 0 else None
 
 def _reference_visual_identity_mapping_from_data(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)

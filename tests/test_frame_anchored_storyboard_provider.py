@@ -525,8 +525,98 @@ async def test_gateway_frame_analysis_keeps_behavior_graph_and_final_overlay_map
     assert reference.behavior_graph is not None
     assert reference.behavior_graph.beats[1].must_remain_visible_until_final is True
     assert reference.behavior_graph.beats[1].locked_text == "x200,000"
-    assert reference.behavior_graph.beats[1].depends_on == ["approach"]
+    assert reference.behavior_graph.beats[1].depends_on == ["beat_001"]
 
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_canonicalizes_malformed_reference_behavior_timeline() -> None:
+    reference_data = _reference_video_analysis_data()
+    reference_data["behavior_graph"] = {
+        "entities": ["performer", "target", "reward"],
+        "beats": [
+            {
+                "beat_id": "intro",
+                "reference_start_second": 0,
+                "reference_end_second": 2,
+                "description": "The performer enters the frame.",
+                "visible_evidence": ["performer"],
+                "importance": "core",
+            },
+            {
+                "beat_id": "impact",
+                "reference_start_second": 2,
+                "reference_end_second": 2,
+                "description": "The central action reaches its impact.",
+                "visible_evidence": ["target reaction"],
+                "depends_on": ["intro"],
+                "importance": "core",
+            },
+            {
+                "beat_id": "",
+                "reference_start_second": "final moment",
+                "reference_end_second": "final moment",
+                "description": "The reward overlay becomes readable.",
+                "visible_evidence": ["reward"],
+                "behavior_type": "overlay",
+                "depends_on": ["missing", "impact"],
+                "must_remain_visible_until_final": True,
+                "locked_text": "x200,000",
+            },
+            {
+                "beat_id": "final",
+                "reference_start_second": 9,
+                "reference_end_second": 9,
+                "description": "The final composition settles.",
+                "visible_evidence": ["final composition"],
+                "depends_on": ["missing"],
+            },
+        ],
+    }
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "transition_brief": {},
+            "language_analysis": {},
+            "reference_video_analysis": reference_data,
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        6,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=5.8,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    assert reference.behavior_graph is not None
+    beats = reference.behavior_graph.beats
+    assert [beat.beat_id for beat in beats] == [
+        "beat_001",
+        "beat_002",
+        "beat_003",
+        "beat_004",
+    ]
+    assert beats[0].depends_on == []
+    assert beats[1].depends_on == ["beat_001"]
+    assert beats[2].depends_on == ["beat_002"]
+    assert beats[3].depends_on == ["beat_003"]
+    assert all(
+        0 <= beat.reference_start_second < beat.reference_end_second <= 5.8
+        for beat in beats
+    )
+    assert beats[2].must_remain_visible_until_final is True
+    assert beats[2].locked_text == "x200,000"
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "strictly greater than reference_start_second" in system_prompt
+    assert "known beat_id" in system_prompt
 
 @pytest.mark.asyncio
 async def test_gateway_frame_analysis_accepts_chronological_segments_alias() -> None:
