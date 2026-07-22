@@ -23,5 +23,9 @@ celery_app.conf.update(
             "task": "generation_tasks.recover_stale",
             "schedule": settings.generation_task_recovery_interval_seconds,
         },
+        "cleanup-expired-ad-research-results": {
+            "task": "ad_research_jobs.cleanup_expired",
+            "schedule": 15 * 60,
+        },
     },
 )
