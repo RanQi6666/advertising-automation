@@ -1,10 +1,10 @@
-import json
+﻿import json
 
 import httpx
 import pytest
 
 from backend.app.core.config import get_settings
-from backend.app.services.ad_research_model import AdResearchModel
+from backend.app.services.ad_research_model import AdResearchModel, RedisGlobalLimiter
 
 
 class Lease:
@@ -15,6 +15,16 @@ class Lease:
 class Limiter:
     async def acquire(self, *args, **kwargs):
         return Lease()
+
+
+def test_research_model_limiter_falls_back_to_celery_broker(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+    get_settings.cache_clear()
+    try:
+        assert RedisGlobalLimiter().redis_url == "redis://redis:6379/0"
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

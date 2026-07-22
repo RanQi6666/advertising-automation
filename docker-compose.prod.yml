@@ -43,6 +43,7 @@ services:
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -275,6 +276,7 @@ services:
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
       AD_RESEARCH_COLLECTOR_BASE_URL: ${AD_RESEARCH_COLLECTOR_BASE_URL:-http://meta_ads_collector:8090}
     extra_hosts:
       - "host.docker.internal:host-gateway"

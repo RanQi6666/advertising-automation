@@ -34,7 +34,8 @@ class RedisGlobalLimiter:
     """A Redis lease, shared by all research workers rather than per-process semaphores."""
 
     def __init__(self, redis_url: str | None = None) -> None:
-        self.redis_url = redis_url or get_settings().redis_url
+        settings = get_settings()
+        self.redis_url = redis_url or settings.redis_url or settings.celery_broker_url
         self._client: Any = None
 
     async def acquire(self, name: str, *, limit: int, ttl_seconds: int) -> RedisLease | None:
@@ -180,16 +181,25 @@ class AdResearchModel:
                 await client.aclose()
 
     async def _wait_for_lease(self) -> RedisLease:
-        for _ in range(100):
+        # A globally shared slot can be held for a full model request. Wait long enough
+        # for an in-flight request to finish instead of treating a saturated limiter as
+        # an irrelevant candidate.
+        wait_seconds = max(self.settings.ad_research_model_timeout_seconds + 5.0, 60.0)
+        attempts = max(int(wait_seconds / 0.1), 1)
+        lease_seconds = max(
+            int(self.settings.ad_research_model_lease_seconds),
+            int(self.settings.ad_research_model_timeout_seconds) + 5,
+        )
+        for _ in range(attempts):
             lease = await self.limiter.acquire(
                 "ad-research:model",
                 limit=self.settings.ad_research_model_concurrency,
-                ttl_seconds=self.settings.ad_research_model_lease_seconds,
+                ttl_seconds=lease_seconds,
             )
             if lease is not None:
                 return lease
             await asyncio.sleep(0.1)
-        raise ProviderError("ad research model queue is at capacity")
+        raise ProviderError("ad research model queue remained at capacity")
 
 
 def _responses_content(user: Any) -> str | list[dict[str, Any]]:

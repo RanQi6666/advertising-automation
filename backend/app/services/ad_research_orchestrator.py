@@ -6,6 +6,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.models.generation_task import GenerationTask
@@ -41,6 +43,7 @@ class AdResearchOrchestrator:
         self.media = media or AdResearchMediaInspector()
         self.model = model or AdResearchModel()
         self.service = service or AdResearchService()
+        self.settings = get_settings()
 
     async def run(self, session: AsyncSession, job: AdResearchJob) -> AdResearchRunResult:
         job.status = "processing"
@@ -94,13 +97,12 @@ class AdResearchOrchestrator:
             await session.commit()
 
             job.stage = "model_classifying"
-            classifications = await asyncio.gather(
-                *(self.model.classify(category=job.category, candidate=ad) for ad in qualified),
-                return_exceptions=True,
-            )
+            classifications = await self._classify_candidates(job.category, qualified)
             scored = []
+            classification_failures = 0
             for ad, classification in zip(qualified, classifications, strict=True):
                 if isinstance(classification, Exception):
+                    classification_failures += 1
                     continue
                 if not _keep(classification):
                     continue
@@ -109,6 +111,7 @@ class AdResearchOrchestrator:
             job.progress_json = {
                 **job.progress_json,
                 "model_relevant": len(scored),
+                "model_classification_failed": classification_failures,
                 "selected_count": min(len(scored), job.target_count),
             }
             await session.commit()
@@ -119,6 +122,11 @@ class AdResearchOrchestrator:
                     session, job, status="completed", ads=selected, summary=summary
                 )
                 return AdResearchRunResult("completed", selected, summary)
+            if classification_failures:
+                raise ProviderError(
+                    "ad research model classification failed for "
+                    f"{classification_failures} candidates"
+                )
             gap_summary = {
                 "raw_collected": raw_collected,
                 "technical_qualified": technical_qualified,
@@ -140,6 +148,20 @@ class AdResearchOrchestrator:
             session, job, status="insufficient", ads=selected, summary=summary
         )
         return AdResearchRunResult("insufficient", selected, summary)
+
+    async def _classify_candidates(
+        self, category: str, candidates: list[CollectorAd]
+    ) -> list[dict[str, Any] | Exception]:
+        semaphore = asyncio.Semaphore(max(int(self.settings.ad_research_model_concurrency), 1))
+
+        async def classify_one(candidate: CollectorAd) -> dict[str, Any] | Exception:
+            async with semaphore:
+                try:
+                    return await self.model.classify(category=category, candidate=candidate)
+                except Exception as exc:  # Preserve failure state for the caller/job status.
+                    return exc
+
+        return await asyncio.gather(*(classify_one(candidate) for candidate in candidates))
 
     async def execute_task(self, session: AsyncSession, task: GenerationTask) -> None:
         job = await session.get(AdResearchJob, task.business_id)

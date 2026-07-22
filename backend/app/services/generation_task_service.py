@@ -116,6 +116,7 @@ class GenerationTaskListResult:
 class GenerationTaskRecoveryTask:
     id: str
     queue_name: str
+    task_type: str = ""
     priority: int = 0
 
 
@@ -125,6 +126,7 @@ class GenerationTaskRecoveryResult:
     interrupted_task_ids: list[str]
     stale_task_ids: list[str]
     rescheduled_tasks: list[GenerationTaskRecoveryTask] = field(default_factory=list)
+    stale_tasks: list[GenerationTaskRecoveryTask] = field(default_factory=list)
 
 
 @dataclass
@@ -729,6 +731,7 @@ class GenerationTaskService:
             interrupted_task_ids=[],
             stale_task_ids=[task.id for task in stale_tasks],
             rescheduled_tasks=_generation_task_recovery_refs(queued_tasks),
+            stale_tasks=_generation_task_recovery_refs(stale_tasks),
         )
 
     async def _queued_tasks(
@@ -1837,6 +1840,7 @@ def _generation_task_recovery_refs(
         GenerationTaskRecoveryTask(
             id=task.id,
             queue_name=task.queue_name,
+            task_type=task.task_type,
             priority=task.priority,
         )
         for task in tasks
@@ -1995,6 +1999,13 @@ def _schedule_recovered_task(
     task: GenerationTaskRecoveryTask,
     schedule_task: Callable[[str], Any] | None,
 ) -> None:
+    # Ad research has a dedicated worker entrypoint. Sending it to the generic
+    # generation-task executor makes a recovered task fail as unsupported.
+    if task.task_type == "ad_research":
+        from backend.app.services.generation_task_dispatcher import schedule_ad_research_job
+
+        schedule_ad_research_job(task.id)
+        return
     if schedule_task is not None:
         schedule_task(task.id)
         return

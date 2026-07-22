@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.errors import AppError, NotFoundError
@@ -67,15 +68,9 @@ class AdResearchService:
         existing = await session.scalar(
             select(AdResearchJob).where(AdResearchJob.external_user_id == payload.external_user_id)
         )
-        if existing is not None:
-            if existing.is_result_expired:
-                await self._expire_job(session, existing)
-            else:
-                if existing.request_fingerprint != fingerprint:
-                    raise AdResearchIdempotencyConflict(
-                        "external_user_id already exists with a different normalized payload."
-                    )
-                return AdResearchCreateResult(job=existing, task=None, idempotent_replay=True)
+        existing_result = await self._existing_result(session, existing, fingerprint)
+        if existing_result is not None:
+            return existing_result
 
         now = utcnow()
         job_id = f"adr_{uuid4().hex}"
@@ -117,10 +112,100 @@ class AdResearchService:
             },
         )
         session.add_all([job, task])
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # A concurrent caller may have created the same external_user_id after our
+            # initial read. Treat an identical payload as a normal idempotent replay.
+            await session.rollback()
+            existing = await session.scalar(
+                select(AdResearchJob).where(
+                    AdResearchJob.external_user_id == payload.external_user_id
+                )
+            )
+            existing_result = await self._existing_result(session, existing, fingerprint)
+            if existing_result is not None:
+                return existing_result
+            raise
         await session.refresh(job)
         await session.refresh(task)
         return AdResearchCreateResult(job=job, task=task)
+
+    async def _existing_result(
+        self, session: AsyncSession, existing: AdResearchJob | None, fingerprint: str
+    ) -> AdResearchCreateResult | None:
+        if existing is None:
+            return None
+        if existing.is_result_expired:
+            await self._expire_job(session, existing)
+            return None
+        if existing.request_fingerprint != fingerprint:
+            raise AdResearchIdempotencyConflict(
+                "external_user_id already exists with a different normalized payload."
+            )
+        if existing.status == "failed":
+            task = await self._requeue_failed_job(session, existing)
+            return AdResearchCreateResult(job=existing, task=task)
+        return AdResearchCreateResult(job=existing, task=None, idempotent_replay=True)
+
+    async def _requeue_failed_job(
+        self, session: AsyncSession, job: AdResearchJob
+    ) -> GenerationTask:
+        task = (
+            await session.get(GenerationTask, job.generation_task_id)
+            if job.generation_task_id
+            else None
+        )
+        now = utcnow()
+        if task is None:
+            task = GenerationTask(
+                id=str(uuid4()),
+                queue_name=AD_RESEARCH_QUEUE_NAME,
+                task_type=AD_RESEARCH_TASK_TYPE,
+                business_type=AD_RESEARCH_BUSINESS_TYPE,
+                business_id=job.id,
+                status="queued",
+                priority=0,
+                payload_json={"job_id": job.id},
+                result_json=None,
+                retryable=False,
+                attempt_count=0,
+                max_attempts=1,
+                queued_at=now,
+                metadata_json={
+                    "source": "external_ad_research_retry",
+                    "external_user_id": job.external_user_id,
+                    "request_fingerprint": job.request_fingerprint,
+                },
+            )
+            session.add(task)
+            job.generation_task_id = task.id
+        else:
+            task.status = "queued"
+            task.result_json = None
+            task.error_code = None
+            task.error_message = None
+            task.retryable = False
+            task.attempt_count = 0
+            task.queued_at = now
+            task.started_at = None
+            task.finished_at = None
+            task.duration_ms = None
+        job.status = "queued"
+        job.stage = "queued"
+        job.current_round = 0
+        job.progress_json = _initial_progress()
+        job.summary_json = {}
+        job.result_json = None
+        job.result_expires_at = None
+        job.error_code = None
+        job.error_message_summary = None
+        job.started_at = None
+        job.completed_at = None
+        await session.commit()
+        await session.refresh(job)
+        await session.refresh(task)
+        return task
 
     async def get_job(self, session: AsyncSession, job_id: str) -> AdResearchJob:
         job = await session.get(AdResearchJob, job_id)
@@ -161,6 +246,16 @@ class AdResearchService:
         job.stage = "dispatch_failed"
         job.error_code = "queue_dispatch_failed"
         job.error_message_summary = _safe_error(error)
+        task = (
+            await session.get(GenerationTask, job.generation_task_id)
+            if job.generation_task_id
+            else None
+        )
+        if task is not None:
+            task.status = "failed"
+            task.error_code = "queue_dispatch_failed"
+            task.error_message = job.error_message_summary
+            task.finished_at = utcnow()
         await session.commit()
 
     async def complete_job(
@@ -191,6 +286,20 @@ class AdResearchService:
         job.stage = "failed"
         job.error_code = "ad_research_unexpected_error"
         job.error_message_summary = _safe_error(error)
+        job.completed_at = utcnow()
+        await session.commit()
+
+    async def mark_stale_task_failed(self, session: AsyncSession, task_id: str) -> None:
+        task = await session.get(GenerationTask, task_id)
+        if task is None or task.task_type != AD_RESEARCH_TASK_TYPE:
+            return
+        job = await session.get(AdResearchJob, task.business_id)
+        if job is None or job.status in {"completed", "insufficient", "expired", "failed"}:
+            return
+        job.status = "failed"
+        job.stage = "failed"
+        job.error_code = task.error_code or "task_stale"
+        job.error_message_summary = (task.error_message or "ad research task became stale")[:300]
         job.completed_at = utcnow()
         await session.commit()
 

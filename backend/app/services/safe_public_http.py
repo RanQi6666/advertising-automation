@@ -190,6 +190,13 @@ async def _download_public_http_file(
             await final_response.aclose()
 
 
+async def validate_public_http_url(
+    url: str, *, allow_private_networks: bool = False
+) -> None:
+    """Validate an HTTP(S) URL and every current DNS target as public."""
+    await _validate_public_http_url(url, allow_private_networks=allow_private_networks)
+
+
 async def _validate_public_http_url(
     url: str,
     *,

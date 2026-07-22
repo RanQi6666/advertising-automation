@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
-from urllib.parse import urlparse
 
 from backend.app.schemas.ad_research import CollectorAd
+from backend.app.services.safe_public_http import SafePublicHTTPError, validate_public_http_url
 
 MAX_VIDEO_SECONDS = 30.0
 MIN_ACTIVE_DAYS = 3
@@ -17,18 +17,27 @@ class AdResearchMediaInspector:
             return False
         if not ad.video_url or not ad.thumbnail_url:
             return False
-        if not _is_public_http_url(ad.video_url) or not _is_public_http_url(ad.thumbnail_url):
+        try:
+            await validate_public_http_url(ad.video_url)
+            await validate_public_http_url(ad.thumbnail_url)
+        except SafePublicHTTPError:
             return False
         if (ad.days_running or 0) < MIN_ACTIVE_DAYS:
             return False
         duration = ad.duration_seconds
         if duration is None:
-            duration = await self.probe_duration(ad.video_url)
+            duration = await self.probe_duration(ad.video_url, verify_public=False)
             ad.duration_seconds = duration
         return duration is not None and duration <= MAX_VIDEO_SECONDS
 
-    async def probe_duration(self, video_url: str) -> float | None:
+    async def probe_duration(self, video_url: str, *, verify_public: bool = True) -> float | None:
         """Ask ffprobe for public media metadata without downloading a landing page."""
+        if verify_public:
+            try:
+                await validate_public_http_url(video_url)
+            except SafePublicHTTPError:
+                return None
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 "ffprobe",
@@ -47,13 +56,10 @@ class AdResearchMediaInspector:
                 return None
             duration = float(stdout.decode("utf-8", errors="ignore").strip())
             return duration if duration >= 0 else None
-        except (OSError, ValueError, TimeoutError):
+        except TimeoutError:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
             return None
-
-
-def _is_public_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or not host:
-        return False
-    return host not in {"localhost", "127.0.0.1", "::1"} and not host.endswith(".local")
+        except (OSError, ValueError):
+            return None

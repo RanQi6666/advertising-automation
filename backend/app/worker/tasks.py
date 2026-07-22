@@ -9,8 +9,11 @@ from celery.signals import worker_process_shutdown
 from backend.app.core.config import get_settings
 from backend.app.db.session import AsyncSessionLocal
 from backend.app.services.ad_generation_service import AdGenerationService
-from backend.app.services.ad_research_service import AdResearchService
-from backend.app.services.generation_task_dispatcher import schedule_generation_task_id
+from backend.app.services.ad_research_service import AD_RESEARCH_TASK_TYPE, AdResearchService
+from backend.app.services.generation_task_dispatcher import (
+    schedule_ad_research_job,
+    schedule_generation_task_id,
+)
 from backend.app.services.generation_task_service import GenerationTaskService
 from backend.app.worker.celery_app import celery_app
 
@@ -66,11 +69,20 @@ async def _recover_stale_generation_tasks() -> None:
     async with AsyncSessionLocal() as session:
         result = await service.recover_stale_tasks(session)
     for task in result.rescheduled_tasks:
-        schedule_generation_task_id(
-            task.id,
-            queue_name=task.queue_name,
-            priority=task.priority,
-        )
+        if task.task_type == AD_RESEARCH_TASK_TYPE:
+            schedule_ad_research_job(task.id)
+        else:
+            schedule_generation_task_id(
+                task.id,
+                queue_name=task.queue_name,
+                priority=task.priority,
+            )
+    if result.stale_tasks:
+        async with AsyncSessionLocal() as session:
+            service = AdResearchService()
+            for task in result.stale_tasks:
+                if task.task_type == AD_RESEARCH_TASK_TYPE:
+                    await service.mark_stale_task_failed(session, task.id)
 
 
 def _run_async(awaitable: Awaitable[T]) -> T:

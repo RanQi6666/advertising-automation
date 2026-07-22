@@ -182,6 +182,8 @@ GET /api/v1/integrations/ad-research/jobs/{task_id}
 
 模型调用采用 Redis 全局租约限流：广告研究 Worker 并发为 2，模型并发总上限为 6。最终结果仅在任务库中临时保留 24 小时供轮询，过期后自动清除完整结果。
 
+Production: set `REDIS_URL=redis://redis:6379/2` explicitly for the shared model-lease store. If omitted, the service falls back to `CELERY_BROKER_URL`; a separate Redis DB is recommended so lease keys do not share the Celery broker namespace.
+
 ## Collector build configuration
 
 `meta_ads_collector` pins `athm793/meta-ads-scraper` to a known commit at build time and downloads Playwright Chromium. To reduce transient Debian CDN or network-proxy failures, the build retries APT downloads and browser downloads up to three times each.
