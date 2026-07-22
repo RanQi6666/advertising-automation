@@ -132,6 +132,8 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "director inference" in system_prompt
     assert "post-production" in system_prompt
     assert "identity" in system_prompt
+    assert "attention_path must be a list of plain strings" in system_prompt
+    assert "anchor_adaptation_plan must be a list of plain strings" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -1142,3 +1144,93 @@ def _assert_no_legacy_content(system_prompt: str) -> None:
         "3a",
     ):
         assert forbidden not in lowered
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_normalizes_semantically_valid_object_shapes() -> None:
+    """Accept the alternate object-shaped director plan observed in the deployed worker log."""
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "narrative_objective": "Build from the supplied opening anchor to a decisive ending.",
+            "attention_path": [
+                {
+                    "time_ratio": 0.0,
+                    "focus": "opening subject and composition",
+                    "method": "establish the available target identity",
+                },
+                {
+                    "time_ratio": 0.62,
+                    "focus": "visible consequence of the central action",
+                    "method": "tighten the in-shot viewpoint and peak the effect",
+                },
+            ],
+            "tension_curve": [
+                {"phase": "setup", "start_ratio": 0.0, "end_ratio": 0.18},
+                {"phase": "trigger", "start_ratio": 0.18, "end_ratio": 0.36},
+                {"phase": "escalation", "start_ratio": 0.36, "end_ratio": 0.62},
+                {"phase": "climax", "start_ratio": 0.62, "end_ratio": 0.82},
+                {"phase": "resolution", "start_ratio": 0.82, "end_ratio": 1.0},
+            ],
+            "climax_beats": [
+                {
+                    "beat_id": "visible_impact",
+                    "start_ratio": 0.62,
+                    "end_ratio": 0.82,
+                    "source_evidence": {
+                        "observed_action": "The reference analysis records a causal action.",
+                        "observed_result": "The action produces a visible result.",
+                    },
+                    "attention_objective": "Hold attention on the visible result.",
+                    "camera_instruction": "Use an in-shot push-in at the impact.",
+                    "action_requirement": "Show action before its visible consequence.",
+                    "effect_requirement": "Peak the available effect at the consequence.",
+                    "importance": "primary",
+                    "dependencies": [],
+                }
+            ],
+            "overlay_lifecycle_plan": [
+                {
+                    "element": "observed interface layer",
+                    "observed_in": "reference ending",
+                    "observed_final_requirement": "remain readable at the ending",
+                    "decision": "persist through target ending",
+                    "lifecycle": "appear after impact and remain through the ending",
+                    "constraints": ["keep it readable without hiding target content"],
+                }
+            ],
+            "anchor_adaptation_plan": {
+                "opening_anchor": {"instruction": "Start from the supplied first frame."},
+                "transition_strategy": {"instruction": "Carry causal progression in-shot."},
+                "ending_anchor": {"instruction": "Resolve to the supplied last frame."},
+            },
+            "anti_flattening_constraints": [
+                {
+                    "constraint": "Keep cause, action, impact, and result distinct.",
+                    "application": "Peak the effect only at impact.",
+                }
+            ],
+        }
+    )
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert plan.attention_path[0].startswith("At 0%")
+    assert plan.tension_curve == ["setup", "trigger", "escalation", "climax", "resolution"]
+    assert plan.climax_beats[0].stage == "climax"
+    assert plan.climax_beats[0].importance == "core"
+    assert plan.climax_beats[0].source_evidence == [
+        "observed_action: The reference analysis records a causal action.",
+        "observed_result: The action produces a visible result.",
+    ]
+    assert plan.overlay_lifecycle_plan[0].strategy == "persist_to_final"
+    assert "opening_anchor" in plan.anchor_adaptation_plan[0]
+    assert plan.anti_flattening_constraints == [
+        "Keep cause, action, impact, and result distinct. "
+        "Application: Peak the effect only at impact."
+    ]

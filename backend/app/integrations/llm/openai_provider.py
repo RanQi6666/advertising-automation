@@ -1872,6 +1872,15 @@ def _frame_anchored_director_system_prompt() -> str:
         "evidence-backed director plan for one frame-anchored generated video. Return valid JSON "
         "only with narrative_objective, attention_path, tension_curve, climax_beats, "
         "overlay_lifecycle_plan, anchor_adaptation_plan, and anti_flattening_constraints. "
+        "Use the exact primitive field shapes: narrative_objective must be a plain string; "
+        "attention_path must be a list of plain strings, not objects; tension_curve must be a "
+        "list using only setup, trigger, escalation, climax, and resolution; every climax_beats "
+        "item must use stage=climax, source_evidence as a list of plain strings, importance as "
+        "core, supporting, or decorative, and depends_on as a list of beat ids. Each "
+        "overlay_lifecycle_plan item must use reference_element, strategy, timing_instruction, "
+        "and final_frame_requirement. anchor_adaptation_plan must be a list of plain strings, "
+        "and anti_flattening_constraints must be a list of plain strings. Do not substitute "
+        "nested objects for any of those fields. "
         "First distinguish observed evidence from director inference: source_evidence for every "
         "climax beat must describe visible facts from the supplied target frames or the supplied "
         "reference-video analysis; all camera, timing, performance, and effects proposals are "
@@ -2460,11 +2469,304 @@ def _reference_constraint_from_data(value: Any, *, strength: str) -> dict[str, s
     }
 
 
+_DIRECTOR_STAGE_ORDER = {
+    "setup": 0,
+    "trigger": 1,
+    "escalation": 2,
+    "climax": 3,
+    "resolution": 4,
+}
+
+
+def _director_items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else ([] if value is None else [value])
+
+
+def _director_text(value: Any) -> str:
+    """Keep semantic content when the model uses an object for a text field."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "; ".join(text for item in value if (text := _director_text(item)))
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{key}: {text}"
+            for key, item in value.items()
+            if (text := _director_text(item))
+        )
+    return _coerce_text(value).strip()
+
+
+def _director_first_text(data: dict[str, Any], *keys: str) -> str:
+    return next((text for key in keys if (text := _director_text(data.get(key)))), "")
+
+
+def _director_text_list(value: Any) -> list[str]:
+    texts: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            texts.extend(
+                f"{key}: {text}"
+                for key, raw in item.items()
+                if (text := _director_text(raw))
+            )
+        elif text := _director_text(item):
+            texts.append(text)
+    return texts
+
+
+def _director_ratio(value: Any, fallback: float) -> float:
+    ratio = _finite_float_or_none(value)
+    if ratio is None:
+        return fallback
+    if 1 < ratio <= 100:
+        ratio /= 100
+    return max(0.0, min(ratio, 1.0))
+
+
+def _director_stage(value: Any) -> str | None:
+    text = _director_text(value).lower().replace("_", " ").replace("-", " ")
+    for stage in _DIRECTOR_STAGE_ORDER:
+        if stage in text:
+            return stage
+    aliases = (
+        ("climax", ("peak", "payoff", "impact")),
+        ("resolution", ("resolve", "ending", "conclusion")),
+        ("escalation", ("escalat", "rising", "build", "intens", "develop")),
+        ("trigger", ("catalyst", "inciting", "activate", "hook")),
+        ("setup", ("opening", "establish", "intro", "begin")),
+    )
+    return next((stage for stage, words in aliases if any(word in text for word in words)), None)
+
+
+def _normalize_director_attention_path(value: Any) -> list[str]:
+    path: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            focus = _director_first_text(item, "focus", "attention", "subject", "objective")
+            method = _director_first_text(
+                item, "method", "approach", "instruction", "camera"
+            )
+            ratio = _finite_float_or_none(item.get("time_ratio"))
+            prefix = f"At {round(ratio * 100)}%: " if ratio is not None else ""
+            detail = ". ".join(part for part in (focus, method) if part)
+            text = prefix + (detail or _director_text(item))
+        else:
+            text = _director_text(item)
+        if text and text not in path:
+            path.append(text)
+    return path
+
+
+def _normalize_director_tension_curve(value: Any) -> list[str]:
+    stages = {
+        stage
+        for item in _director_items(value)
+        if (stage := _director_stage(item.get("phase") if isinstance(item, dict) else item))
+    }
+    if not stages:
+        return ["setup", "climax", "resolution"]
+    stages.add("climax")
+    return sorted(stages, key=_DIRECTOR_STAGE_ORDER.__getitem__)
+
+
+def _normalize_director_importance(value: Any) -> str:
+    text = _director_text(value).lower()
+    if any(word in text for word in ("decorative", "optional", "minor", "low")):
+        return "decorative"
+    if any(word in text for word in ("core", "primary", "main", "key", "high")):
+        return "core"
+    return "supporting"
+
+
+def _normalize_director_climax_beats(value: Any) -> list[dict[str, Any]]:
+    raw_beats = [item for item in _director_items(value) if isinstance(item, dict)]
+    normalized: list[dict[str, Any]] = []
+    id_map: dict[str, str] = {}
+    raw_dependencies: list[list[str]] = []
+    for index, raw in enumerate(raw_beats, start=1):
+        raw_id = _director_first_text(raw, "beat_id", "id", "name", "title")
+        raw_id = raw_id or f"climax_{index}"
+        beat_id = raw_id
+        suffix = 2
+        while beat_id in {item["beat_id"] for item in normalized}:
+            beat_id = f"{raw_id}_{suffix}"
+            suffix += 1
+        id_map.setdefault(raw_id, beat_id)
+        start = _director_ratio(
+            raw.get("start_ratio", raw.get("start")),
+            min(0.85, 0.45 + 0.12 * (index - 1)),
+        )
+        end = _director_ratio(
+            raw.get("end_ratio", raw.get("end")),
+            min(1.0, start + 0.18),
+        )
+        if end <= start:
+            start = min(start, 0.95)
+            end = min(1.0, max(start + 0.05, end))
+        evidence = _director_text_list(
+            raw.get("source_evidence", raw.get("visible_evidence", raw.get("evidence")))
+        )
+        if not evidence:
+            evidence = _director_text_list(
+                {
+                    key: raw[key]
+                    for key in ("observed_action", "observed_result", "description")
+                    if raw.get(key) is not None
+                }
+            )
+        normalized.append(
+            {
+                "beat_id": beat_id,
+                "stage": "climax",
+                "source_evidence": evidence,
+                "start_ratio": start,
+                "end_ratio": end,
+                "attention_objective": _director_first_text(
+                    raw, "attention_objective", "objective", "attention"
+                ),
+                "camera_instruction": _director_first_text(
+                    raw, "camera_instruction", "camera", "viewpoint"
+                ),
+                "action_requirement": _director_first_text(
+                    raw, "action_requirement", "action", "performance"
+                ),
+                "effect_requirement": _director_first_text(
+                    raw, "effect_requirement", "effects", "vfx"
+                ),
+                "importance": _normalize_director_importance(raw.get("importance")),
+            }
+        )
+        raw_dependencies.append(
+            _director_text_list(raw.get("depends_on", raw.get("dependencies")))
+        )
+    for beat, dependencies in zip(normalized, raw_dependencies, strict=True):
+        beat["depends_on"] = [
+            mapped
+            for dependency in dependencies
+            if (mapped := id_map.get(dependency)) and mapped != beat["beat_id"]
+        ]
+    return normalized
+
+
+def _normalize_director_overlay_strategy(value: Any) -> str:
+    text = _director_text(value).lower()
+    if any(word in text for word in ("persist", "remain", "through", "final", "ending")):
+        return "persist_to_final"
+    if any(word in text for word in ("replace", "target", "swap", "substitut")):
+        return "replace_with_target"
+    if any(word in text for word in ("omit", "remove", "drop", "exclude")):
+        return "omit"
+    return "inherit"
+
+
+def _normalize_director_overlay_lifecycle_plan(value: Any) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for raw in _director_items(value):
+        if not isinstance(raw, dict):
+            continue
+        element = _director_first_text(
+            raw, "reference_element", "element", "overlay", "name", "label"
+        )
+        if not element:
+            continue
+        lifecycle = _director_first_text(
+            raw, "lifecycle", "timing_instruction", "observed_in"
+        )
+        constraints = _director_text(raw.get("constraints"))
+        final_requirement = _director_first_text(
+            raw,
+            "final_frame_requirement",
+            "observed_final_requirement",
+            "final_requirement",
+        )
+        normalized.append(
+            {
+                "reference_element": element,
+                "strategy": _normalize_director_overlay_strategy(
+                    _director_first_text(raw, "strategy", "decision", "lifecycle")
+                ),
+                "timing_instruction": (
+                    ". ".join(part for part in (lifecycle, constraints) if part)
+                    or "Follow the observed overlay lifecycle."
+                ),
+                "final_frame_requirement": (
+                    final_requirement
+                    or "Respect the supplied last-frame base layer when resolving this overlay."
+                ),
+            }
+        )
+    return normalized
+
+
+def _flatten_director_anchor_plan(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, list):
+        return [line for item in value for line in _flatten_director_anchor_plan(item, prefix)]
+    if not isinstance(value, dict):
+        text = _director_text(value)
+        return [f"{prefix}: {text}" if prefix and text else text] if text else []
+    direct = _director_first_text(value, "instruction", "plan", "strategy", "requirement")
+    if direct:
+        return [f"{prefix}: {direct}" if prefix else direct]
+    return [
+        line
+        for key, item in value.items()
+        for line in _flatten_director_anchor_plan(
+            item,
+            f"{prefix}.{key}" if prefix else str(key),
+        )
+    ]
+
+
+def _normalize_director_constraints(value: Any) -> list[str]:
+    normalized: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            constraint = _director_first_text(item, "constraint", "instruction", "requirement")
+            application = _director_first_text(item, "application", "how", "implementation")
+            text = (
+                f"{constraint} Application: {application}"
+                if constraint and application
+                else constraint or application
+            )
+        else:
+            text = _director_text(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def _frame_anchored_director_plan_from_data(
     data: dict[str, Any],
 ) -> FrameAnchoredDirectorPlan:
+    normalized = dict(data)
+    normalized["narrative_objective"] = _director_text(data.get("narrative_objective"))
+    normalized["attention_path"] = _normalize_director_attention_path(
+        data.get("attention_path")
+    )
+    normalized["tension_curve"] = _normalize_director_tension_curve(
+        data.get("tension_curve")
+    )
+    normalized["climax_beats"] = _normalize_director_climax_beats(
+        data.get("climax_beats")
+    )
+    normalized["overlay_lifecycle_plan"] = _normalize_director_overlay_lifecycle_plan(
+        data.get("overlay_lifecycle_plan")
+    )
+    normalized["anchor_adaptation_plan"] = _flatten_director_anchor_plan(
+        data.get("anchor_adaptation_plan")
+    )
+    normalized["anti_flattening_constraints"] = _normalize_director_constraints(
+        data.get("anti_flattening_constraints")
+    )
     try:
-        return FrameAnchoredDirectorPlan.model_validate(data)
+        return FrameAnchoredDirectorPlan.model_validate(normalized)
     except ValidationError as exc:
         logger.warning(
             "Frame-anchored director-plan JSON validation failed: errors=%s response_shape=%s",
@@ -2472,7 +2774,6 @@ def _frame_anchored_director_plan_from_data(
             _frame_analysis_response_shape(data),
         )
         raise ProviderError("LLM returned invalid frame-anchored director-plan JSON.") from exc
-
 
 def _frame_anchored_storyboard_from_data(
     data: dict[str, Any],
