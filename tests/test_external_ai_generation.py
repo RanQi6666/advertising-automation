@@ -519,6 +519,7 @@ class FakeExternalAILLM:
                     source_behavior_beat_ids=source_behavior_beat_ids,
                     execution_evidence=[
                         {
+                            "claim_id": "execution_claim",
                             "executor_kind": "target_subject",
                             "assertion": "affirmed",
                             "action_or_state_change": "linked causal action completes visibly",
@@ -1069,6 +1070,7 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         "signature_moment_ids",
         "source_behavior_beat_ids",
         "execution_evidence",
+        "claim_id",
         "storyboard",
     ):
         assert private_field not in data
@@ -2096,6 +2098,16 @@ def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> N
                     "core_state_change",
                     "custom_behavior_beat",
                 ],
+                execution_evidence=[
+                    {
+                        "claim_id": "__sbv2_claim_001__",
+                        "executor_kind": "target_subject",
+                        "assertion": "affirmed",
+                        "action_or_state_change": "linked state changes visibly",
+                        "signature_moment_ids": ["custom_signature_id"],
+                        "source_behavior_beat_ids": ["core_behavior"],
+                    }
+                ],
             )
         ],
         sound_design=StoryboardSoundDesign(music=leaked, ambience=leaked),
@@ -2205,6 +2217,7 @@ def test_formatter_scrubs_only_safe_private_ids_and_preserves_natural_language()
         "__sbv2_beat_001__",
         "__sbv2_window_001__",
         "__sbv2_moment_001__",
+        "__sbv2_claim_001__",
     )
     natural_sentence = "The camera follows the action while the subject moves."
     storyboard = FrameAnchoredStoryboard(
@@ -2224,6 +2237,16 @@ def test_formatter_scrubs_only_safe_private_ids_and_preserves_natural_language()
                 end_second=4,
                 frame_anchor="last_frame",
                 visual=f"{' '.join(private_ids)}; {natural_sentence}",
+                execution_evidence=[
+                    {
+                        "claim_id": private_ids[4],
+                        "executor_kind": "target_subject",
+                        "assertion": "affirmed",
+                        "action_or_state_change": "linked action changes state visibly",
+                        "signature_moment_ids": [private_ids[3]],
+                        "source_behavior_beat_ids": [private_ids[0]],
+                    }
+                ],
             ),
         ],
     )
@@ -2362,8 +2385,22 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
         }
         observed_call3_ids.update(private_ids)
         storyboard = await original_generate(*args, **kwargs)
+        evidence = storyboard.scenes[1].execution_evidence[0]
+        storyboard.scenes[1].execution_evidence = [
+            evidence.model_copy(update={"claim_id": "primary-claim"}),
+            evidence.model_copy(
+                update={
+                    "claim_id": "__sbv2_claim_001__",
+                    "executor_kind": "target_object",
+                    "action_or_state_change": "a second target action executes visibly",
+                }
+            ),
+        ]
         natural_sentence = "The camera follows the action while the subject moves."
-        storyboard.scenes[1].visual = f"{' '.join(private_ids.values())}; {natural_sentence}"
+        storyboard.scenes[1].visual = (
+            f"{' '.join(private_ids.values())} primary-claim __sbv2_claim_001__; "
+            f"{natural_sentence}"
+        )
         storyboard.scenes[1].motion = natural_sentence
         return storyboard
 
@@ -2396,6 +2433,8 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
     assert "__sbv2_" not in polled["storyboard_text"]
     assert "camera action" not in polled["storyboard_text"]
     assert "camera-action" not in polled["storyboard_text"]
+    assert "primary-claim" not in polled["storyboard_text"]
+    assert "__sbv2_claim_" not in polled["storyboard_text"]
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
         "direct_frame_anchored_video_storyboard",
@@ -2429,5 +2468,10 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
         assert director_plan["signature_moment_plan"][0]["assigned_beat_id"] == (
             "__sbv2_beat_002__"
         )
+        candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
+        assert [
+            evidence["claim_id"]
+            for evidence in candidate["scenes"][1]["execution_evidence"]
+        ] == ["__sbv2_claim_002__", "__sbv2_claim_001__"]
 
     await engine.dispose()

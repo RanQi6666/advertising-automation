@@ -564,9 +564,17 @@ StoryboardExecutionExecutorKind = Literal[
     "environment_support",
 ]
 StoryboardExecutionAssertion = Literal["affirmed", "negated", "static"]
+_STORYBOARD_EXECUTION_CLAIM_ID_PATTERN = (
+    r"^(?:__sbv2_claim_\d+__|[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
+)
 
 
 class StoryboardExecutionEvidence(BaseModel):
+    claim_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=_STORYBOARD_EXECUTION_CLAIM_ID_PATTERN,
+    )
     executor_kind: StoryboardExecutionExecutorKind
     assertion: StoryboardExecutionAssertion
     action_or_state_change: str = Field(min_length=1)
@@ -577,11 +585,50 @@ class StoryboardExecutionEvidence(BaseModel):
     def validate_execution_evidence(self) -> "StoryboardExecutionEvidence":
         if not self.action_or_state_change.strip():
             raise ValueError("execution evidence action or state change must not be blank")
-        if any(not value.strip() for value in self.signature_moment_ids):
-            raise ValueError("execution evidence signature moment ids must not be blank")
-        if any(not value.strip() for value in self.source_behavior_beat_ids):
-            raise ValueError("execution evidence source behavior beat ids must not be blank")
+        if not self.signature_moment_ids or any(
+            not value.strip() for value in self.signature_moment_ids
+        ):
+            raise ValueError("execution evidence requires signature moment ids")
+        if not self.source_behavior_beat_ids or any(
+            not value.strip() for value in self.source_behavior_beat_ids
+        ):
+            raise ValueError("execution evidence requires source behavior beat ids")
         return self
+
+
+def _validate_storyboard_execution_claims(
+    scenes: list["FrameAnchoredStoryboardScene"],
+) -> None:
+    claims: dict[str, tuple[tuple[object, ...], StoryboardExecutionAssertion]] = {}
+    for scene in scenes:
+        for evidence_value in scene.execution_evidence:
+            evidence = (
+                evidence_value
+                if isinstance(evidence_value, StoryboardExecutionEvidence)
+                else StoryboardExecutionEvidence.model_validate(evidence_value)
+            )
+            claim_id = evidence.claim_id.strip()
+            binding = (
+                evidence.executor_kind,
+                tuple(sorted(set(evidence.signature_moment_ids))),
+                tuple(sorted(set(evidence.source_behavior_beat_ids))),
+            )
+            previous = claims.get(claim_id)
+            if previous is not None:
+                previous_binding, previous_assertion = previous
+                if previous_binding != binding:
+                    raise ValueError(
+                        "execution claim id must bind one executor and exact signature/source ids"
+                    )
+                if previous_assertion != evidence.assertion:
+                    raise ValueError("contradictory execution evidence")
+            claims[claim_id] = (binding, evidence.assertion)
+
+
+def validate_storyboard_execution_claims(
+    scenes: list["FrameAnchoredStoryboardScene"],
+) -> None:
+    _validate_storyboard_execution_claims(scenes)
 
 
 class FrameAnchoredStoryboardScene(BaseModel):
@@ -618,18 +665,7 @@ class FrameAnchoredStoryboardScene(BaseModel):
 
     @model_validator(mode="after")
     def validate_execution_evidence_consistency(self) -> "FrameAnchoredStoryboardScene":
-        assertions_by_claim: dict[tuple[object, ...], str] = {}
-        for evidence in self.execution_evidence:
-            claim_key = (
-                evidence.executor_kind,
-                evidence.action_or_state_change.strip().casefold(),
-                tuple(sorted(set(evidence.signature_moment_ids))),
-                tuple(sorted(set(evidence.source_behavior_beat_ids))),
-            )
-            previous = assertions_by_claim.get(claim_key)
-            if previous is not None and previous != evidence.assertion:
-                raise ValueError("contradictory execution evidence")
-            assertions_by_claim[claim_key] = evidence.assertion
+        _validate_storyboard_execution_claims([self])
         return self
 
 
@@ -650,6 +686,7 @@ class FrameAnchoredStoryboard(BaseModel):
             raise ValueError("last scene must use last_frame anchor")
         if any(scene.frame_anchor != "transition" for scene in self.scenes[1:-1]):
             raise ValueError("middle scenes must use transition anchor")
+        _validate_storyboard_execution_claims(self.scenes)
         return self
 
 

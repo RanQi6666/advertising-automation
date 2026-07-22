@@ -163,6 +163,7 @@ def _action_storyboard_response() -> dict[str, object]:
                 "source_behavior_beat_ids": ["core_behavior"],
                 "execution_evidence": [
                     {
+                        "claim_id": "execution_claim",
                         "executor_kind": "target_subject",
                         "assertion": "affirmed",
                         "action_or_state_change": "linked causal action completes visibly",
@@ -1469,6 +1470,8 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "exact beat_id" in system_prompt
     assert "signature_moment_plan" in system_prompt
     assert "execution_evidence" in system_prompt
+    assert "claim_id" in system_prompt
+    assert "stable private claim identity" in system_prompt.lower()
     assert "target_subject" in system_prompt
     assert "camera_support" in system_prompt
     assert "negated or static items never prove execution" in system_prompt.lower()
@@ -1575,6 +1578,10 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
     _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
 
     execution_scene = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
+    assert all(evidence.claim_id for evidence in execution_scene.execution_evidence)
+    assert len({evidence.claim_id for evidence in execution_scene.execution_evidence}) == len(
+        execution_scene.execution_evidence
+    )
     assert execution_scene.signature_moment_ids == [
         moment.moment_id for moment in director_plan.signature_moment_plan
     ]
@@ -2508,13 +2515,16 @@ def test_signature_omit_accepts_affirmed_non_endpoint_structured_facts() -> None
 
 
 @pytest.mark.parametrize("assertion", ["negated", "static"])
-def test_scene_rejects_contradictory_execution_evidence(assertion: str) -> None:
+def test_scene_rejects_same_claim_with_opposite_assertion_and_different_wording(
+    assertion: str,
+) -> None:
     payload = _action_storyboard_response()["scenes"][1]
     payload["execution_evidence"].append(
         {
+            "claim_id": "execution_claim",
             "executor_kind": "target_subject",
             "assertion": assertion,
-            "action_or_state_change": "linked causal action completes visibly",
+            "action_or_state_change": "the linked causal action does not execute",
             "signature_moment_ids": ["signature_action"],
             "source_behavior_beat_ids": ["core_behavior"],
         }
@@ -2524,11 +2534,50 @@ def test_scene_rejects_contradictory_execution_evidence(assertion: str) -> None:
         FrameAnchoredStoryboardScene.model_validate(payload)
 
 
+def test_storyboard_rejects_cross_scene_opposite_assertion_for_same_claim() -> None:
+    payload = _action_storyboard_response()
+    payload["scenes"][2]["execution_evidence"] = [
+        {
+            "claim_id": "execution_claim",
+            "executor_kind": "target_subject",
+            "assertion": "negated",
+            "action_or_state_change": "the subject does not complete the causal action",
+            "signature_moment_ids": ["signature_action"],
+            "source_behavior_beat_ids": ["core_behavior"],
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="contradictory execution evidence"):
+        FrameAnchoredStoryboard.model_validate(payload)
+
+
+def test_scene_allows_distinct_claim_ids_for_distinct_actions() -> None:
+    payload = _action_storyboard_response()["scenes"][1]
+    payload["execution_evidence"].append(
+        {
+            "claim_id": "secondary_execution_claim",
+            "executor_kind": "target_object",
+            "assertion": "affirmed",
+            "action_or_state_change": "the target object changes state visibly",
+            "signature_moment_ids": ["signature_action"],
+            "source_behavior_beat_ids": ["core_behavior"],
+        }
+    )
+
+    scene = FrameAnchoredStoryboardScene.model_validate(payload)
+
+    assert [evidence.claim_id for evidence in scene.execution_evidence] == [
+        "execution_claim",
+        "secondary_execution_claim",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_provider_normalizes_structured_execution_evidence() -> None:
     response = _action_storyboard_response()
     response["scenes"][1]["execution_evidence"] = [
         {
+            "claim_id": "execution_claim",
             "executor_kind": "target_object",
             "assertion": "affirmed",
             "action_or_state_change": "object state changes visibly",
@@ -2546,6 +2595,7 @@ async def test_provider_normalizes_structured_execution_evidence() -> None:
     )
 
     evidence = storyboard.scenes[1].execution_evidence[0]
+    assert evidence.claim_id == "execution_claim"
     assert evidence.executor_kind == "target_object"
     assert evidence.assertion == "affirmed"
     assert evidence.signature_moment_ids == ["signature_action"]

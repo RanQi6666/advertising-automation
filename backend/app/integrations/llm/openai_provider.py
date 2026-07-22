@@ -2023,8 +2023,14 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "action_result_requirement, include camera and effect support in matching fields, show the "
         "visible payoff, and state anchor_return_instruction before final lock. Copy relevant "
         "source behavior IDs into source_behavior_beat_ids. Every scene must return "
-        "execution_evidence as a list of objects with executor_kind, assertion, "
+        "execution_evidence as a list of objects with claim_id, executor_kind, assertion, "
         "action_or_state_change, signature_moment_ids, and source_behavior_beat_ids. "
+        "claim_id is a stable private claim identity, not prose: use one constrained identifier "
+        "for one executor role plus the exact signature moment IDs and exact source behavior IDs. "
+        "Reuse a claim_id only for that identical binding and assertion, even across scenes. "
+        "Use different claim_id values for semantically distinct actions or for preparation/static "
+        "versus affirmed execution; never derive claim identity from action_or_state_change "
+        "wording. "
         "executor_kind must be target_subject, target_object, target_state, camera_support, "
         "effect_support, or environment_support; assertion must be affirmed, negated, or static. "
         "For each executed non-omitted action/state moment, include an affirmed target_subject, "
@@ -2735,6 +2741,7 @@ def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]
             continue
         normalized.append(
             {
+                "claim_id": _director_first_text(item, "claim_id"),
                 "executor_kind": _director_first_text(item, "executor_kind"),
                 "assertion": _director_first_text(item, "assertion"),
                 "action_or_state_change": _director_first_text(

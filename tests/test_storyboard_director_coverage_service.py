@@ -296,6 +296,7 @@ def _valid_final_inputs() -> tuple[
                     "source_behavior_beat_ids": ["core_behavior"],
                     "execution_evidence": [
                         {
+                            "claim_id": "execution_claim",
                             "executor_kind": "target_subject",
                             "assertion": "affirmed",
                             "action_or_state_change": "linked causal action completes visibly",
@@ -649,6 +650,7 @@ def test_final_validation_rejects_execution_before_linked_preparation() -> None:
     storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
     storyboard.scenes[0].execution_evidence = [
         StoryboardExecutionEvidence(
+            claim_id="execution_claim",
             executor_kind="target_state",
             assertion="affirmed",
             action_or_state_change="linked state change starts immediately",
@@ -730,6 +732,7 @@ def test_final_validation_does_not_borrow_second_beat_preparation() -> None:
                     "source_behavior_beat_ids": ["core_behavior_1"],
                     "execution_evidence": [
                         {
+                            "claim_id": "first_execution_claim",
                             "executor_kind": "target_subject",
                             "assertion": "affirmed",
                             "action_or_state_change": "first linked action executes visibly",
@@ -752,6 +755,7 @@ def test_final_validation_does_not_borrow_second_beat_preparation() -> None:
                     "source_behavior_beat_ids": ["core_behavior_2"],
                     "execution_evidence": [
                         {
+                            "claim_id": "second_execution_claim",
                             "executor_kind": "target_state",
                             "assertion": "affirmed",
                             "action_or_state_change": "second linked state change executes visibly",
@@ -1026,6 +1030,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "source_behavior_beat_ids": ["core_behavior"],
                     "execution_evidence": [
                         {
+                            "claim_id": "first_signature_claim",
                             "executor_kind": "target_subject",
                             "assertion": "affirmed",
                             "action_or_state_change": "first signature action executes visibly",
@@ -1058,6 +1063,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "source_behavior_beat_ids": ["core_behavior"],
                     "execution_evidence": [
                         {
+                            "claim_id": "second_signature_claim",
                             "executor_kind": "target_state",
                             "assertion": "affirmed",
                             "action_or_state_change": (
@@ -1130,6 +1136,7 @@ def test_non_affirmed_or_support_evidence_cannot_replace_target_execution(
     storyboard.scenes[1].motion = "Every named actor performs an obvious state-changing action."
     storyboard.scenes[1].execution_evidence = [
         {
+            "claim_id": "execution_claim",
             "executor_kind": executor_kind,
             "assertion": assertion,
             "action_or_state_change": "generic visible change",
@@ -1146,6 +1153,7 @@ def test_execution_evidence_requires_exact_signature_and_source_linkage() -> Non
     storyboard, analysis, review = _valid_final_inputs()
     storyboard.scenes[1].execution_evidence = [
         {
+            "claim_id": "execution_claim",
             "executor_kind": "target_state",
             "assertion": "affirmed",
             "action_or_state_change": "linked state changes visibly",
@@ -1155,6 +1163,23 @@ def test_execution_evidence_requires_exact_signature_and_source_linkage() -> Non
     ]
 
     with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_cross_scene_opposite_assertion_for_same_claim() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[2].execution_evidence = [
+        {
+            "claim_id": "execution_claim",
+            "executor_kind": "target_subject",
+            "assertion": "negated",
+            "action_or_state_change": "the linked action does not execute",
+            "signature_moment_ids": ["signature_action"],
+            "source_behavior_beat_ids": ["core_behavior"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="contradictory execution evidence"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 

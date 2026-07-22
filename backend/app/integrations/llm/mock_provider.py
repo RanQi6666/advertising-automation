@@ -619,6 +619,7 @@ class MockLLMProvider:
             }
             execution_evidence = [
                 {
+                    "claim_id": f"claim:{moment.moment_id}",
                     "executor_kind": (
                         "target_state"
                         if any(

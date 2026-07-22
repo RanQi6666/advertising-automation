@@ -8,6 +8,7 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     ReferenceBehaviorBeat,
+    validate_storyboard_execution_claims,
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
@@ -673,6 +674,7 @@ def validate_final_storyboard_action_coverage(
     frame_analysis: FrameAnalysis,
     review: DirectorActionCoverageReview,
 ) -> None:
+    validate_storyboard_execution_claims(storyboard.scenes)
     plan = frame_analysis.director_plan
     if plan is None:
         return

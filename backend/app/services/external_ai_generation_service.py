@@ -520,6 +520,12 @@ class ExternalAIGenerationService:
                     aspect_ratio=payload.aspect_ratio,
                     director_corrections=director_review.structured_corrections,
                 )
+            try:
+                storyboard = _normalize_private_storyboard_claim_namespace(storyboard)
+            except ValidationError as exc:
+                raise ProviderError(
+                    "LLM returned invalid frame-anchored storyboard execution claims."
+                ) from exc
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
@@ -941,7 +947,7 @@ async def _store_frame_anchored_private_metadata(
 
 
 _SAFE_PRIVATE_ID_PATTERN = re.compile(
-    r"^(?:__sbv2_(?:behavior|beat|window|moment)_\d+__|"
+    r"^(?:__sbv2_(?:behavior|beat|window|moment|claim)_\d+__|"
     r"[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
 )
 
@@ -976,6 +982,41 @@ def _mapped_private_id(value: str | None, mapping: dict[str, str]) -> str | None
         return None
     clean = value.strip()
     return mapping.get(clean, clean)
+
+
+def _replace_private_id_aliases(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {key: _replace_private_id_aliases(item, mapping) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_private_id_aliases(item, mapping) for item in value]
+    if not isinstance(value, str):
+        return value
+    normalized = value
+    for original, replacement in mapping.items():
+        if original == replacement:
+            continue
+        normalized = re.sub(
+            rf"(?<![\w]){re.escape(original)}(?![\w])",
+            replacement,
+            normalized,
+        )
+    return normalized
+
+
+def _normalize_private_storyboard_claim_namespace(
+    storyboard: FrameAnchoredStoryboard,
+) -> FrameAnchoredStoryboard:
+    claim_values = [
+        evidence.claim_id
+        for scene in storyboard.scenes
+        for evidence in scene.execution_evidence
+    ]
+    claim_map = _private_namespace_map(claim_values, "claim")
+    normalized_payload = _replace_private_id_aliases(
+        storyboard.model_dump(mode="python"),
+        claim_map,
+    )
+    return FrameAnchoredStoryboard.model_validate(normalized_payload)
 
 
 def _normalize_private_storyboard_namespace(frame_analysis: FrameAnalysis) -> FrameAnalysis:
