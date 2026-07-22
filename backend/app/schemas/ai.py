@@ -271,32 +271,133 @@ class DirectorOverlayInstruction(BaseModel):
     final_frame_requirement: str = Field(min_length=1)
 
 
+DirectorActionArcPhase = Literal[
+    "anchor_hold",
+    "departure",
+    "preparation",
+    "action",
+    "impact",
+    "payoff",
+    "return",
+    "final_lock",
+]
+
+DirectorSignatureTransferRole = Literal[
+    "causal_setup",
+    "primary_action",
+    "interaction",
+    "impact",
+    "visible_result",
+    "camera_emphasis",
+    "effect_emphasis",
+    "overlay_lifecycle",
+    "other",
+]
+
+
+def _endpoint_mismatch_only(*reasons: str) -> bool:
+    text = " ".join(reason.casefold() for reason in reasons)
+    endpoint = any(term in text for term in ("final", "last frame", "endpoint", "ending"))
+    mismatch = any(
+        term in text
+        for term in ("pose", "position", "orientation", "framing", "composition", "scale")
+    )
+    infeasible = any(
+        term in text
+        for term in ("infeasible", "impossible", "contradict", "no compatible", "cannot execute")
+    )
+    return endpoint and mismatch and not infeasible
+
+
+class DirectorActionArcWindow(BaseModel):
+    window_id: str = Field(min_length=1)
+    phase: DirectorActionArcPhase
+    start_ratio: float = Field(ge=0, le=1)
+    end_ratio: float = Field(gt=0, le=1)
+    objective: str = Field(min_length=1)
+    subject_motion_intensity: float = Field(ge=0, le=1)
+    camera_intensity: float = Field(ge=0, le=1)
+    effect_intensity: float = Field(ge=0, le=1)
+    depends_on: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "DirectorActionArcWindow":
+        if self.end_ratio <= self.start_ratio:
+            raise ValueError("action arc window end ratio must be after its start ratio")
+        return self
+
+
+class DirectorActionCoverageReview(BaseModel):
+    status: Literal["pass", "corrective"]
+    required_core_behavior_beat_ids: list[str] = Field(default_factory=list)
+    covered_core_behavior_beat_ids: list[str] = Field(default_factory=list)
+    uncovered_core_behavior_beat_ids: list[str] = Field(default_factory=list)
+    invalid_omission_moment_ids: list[str] = Field(default_factory=list)
+    missing_execution_detail_moment_ids: list[str] = Field(default_factory=list)
+    missing_return_moment_ids: list[str] = Field(default_factory=list)
+    correction_requirements: list[str] = Field(default_factory=list)
+
+
 class DirectorSignatureMoment(BaseModel):
     moment_id: str = Field(min_length=1)
     moment_type: Literal["camera", "action", "effect", "result", "combined"]
     source_evidence: list[str] = Field(min_length=1)
-    strategy: Literal["preserve", "adapt", "omit"]
+    source_behavior_beat_ids: list[str] = Field(default_factory=list)
+    transfer_role: DirectorSignatureTransferRole = "other"
+    strategy: Literal["preserve", "adapt", "replace_with_equivalent", "omit"]
     target_adaptation: str = ""
+    adapted_action: str = ""
+    temporary_divergence: str = ""
+    camera_support: str = ""
+    effect_support: str = ""
+    visible_payoff: str = ""
+    return_strategy: str = ""
     assigned_beat_id: str | None = None
     omission_reason: str | None = None
+    equivalent_replacement_failure: str | None = None
 
     @model_validator(mode="after")
     def validate_signature_moment(self) -> "DirectorSignatureMoment":
         if any(not evidence.strip() for evidence in self.source_evidence):
             raise ValueError("signature moment source evidence must not be blank")
-        if self.strategy in {"preserve", "adapt"}:
+        if any(not beat_id.strip() for beat_id in self.source_behavior_beat_ids):
+            raise ValueError("signature moment source behavior beat ids must not be blank")
+        if self.strategy != "omit":
             if not self.assigned_beat_id or not self.assigned_beat_id.strip():
-                raise ValueError(
-                    "preserved or adapted signature moment requires an assigned beat"
-                )
+                raise ValueError("non-omitted signature moment requires an assigned beat")
             if not self.target_adaptation.strip():
+                raise ValueError("non-omitted signature moment requires a target adaptation")
+            if not self.adapted_action.strip():
+                raise ValueError("non-omitted signature moment requires an adapted action")
+            if not self.visible_payoff.strip():
+                raise ValueError("non-omitted signature moment requires a visible payoff")
+            if not self.return_strategy.strip():
+                raise ValueError("non-omitted signature moment requires a return strategy")
+            if self.transfer_role in {"primary_action", "interaction", "impact"} and not self.temporary_divergence.strip():
                 raise ValueError(
-                    "preserved or adapted signature moment requires a target adaptation"
+                    "action, interaction, and impact signature moments require temporary divergence"
                 )
-        if self.strategy == "omit" and (
-            self.omission_reason is None or not self.omission_reason.strip()
-        ):
-            raise ValueError("omitted signature moment requires a reason")
+            if self.moment_type in {"camera", "combined"} and not self.camera_support.strip():
+                raise ValueError("camera and combined signature moments require camera support")
+            if self.moment_type in {"effect", "combined"} and not self.effect_support.strip():
+                raise ValueError("effect and combined signature moments require effect support")
+        else:
+            if self.omission_reason is None or not self.omission_reason.strip():
+                raise ValueError("omitted signature moment requires a reason")
+            if (
+                self.equivalent_replacement_failure is None
+                or not self.equivalent_replacement_failure.strip()
+            ):
+                raise ValueError(
+                    "omitted signature moment requires equivalent replacement failure"
+                )
+            if _endpoint_mismatch_only(
+                self.omission_reason,
+                self.equivalent_replacement_failure,
+            ):
+                raise ValueError(
+                    "omitted signature moment cannot use endpoint mismatch as the omission reason"
+                )
         return self
 
 
@@ -306,7 +407,9 @@ class FrameAnchoredDirectorPlan(BaseModel):
     tension_curve: list[DirectorTensionStage] = Field(min_length=1)
     climax_beats: list[DirectorBeat] = Field(min_length=1)
     overlay_lifecycle_plan: list[DirectorOverlayInstruction] = Field(default_factory=list)
+    action_arc_windows: list[DirectorActionArcWindow] = Field(default_factory=list)
     signature_moment_plan: list[DirectorSignatureMoment] = Field(default_factory=list)
+    final_anchor_return: str = ""
     anchor_adaptation_plan: list[str] = Field(min_length=1)
     anti_flattening_constraints: list[str] = Field(min_length=1)
 
@@ -330,12 +433,19 @@ class FrameAnchoredDirectorPlan(BaseModel):
                 raise ValueError("director climax beats must use climax stage")
             if not beat.source_evidence:
                 raise ValueError("climax beat requires source evidence")
+        known_window_ids: set[str] = set()
+        for window in self.action_arc_windows:
+            if window.window_id in known_window_ids:
+                raise ValueError("action arc windows must use unique ordered ids")
+            if any(dependency not in known_window_ids for dependency in window.depends_on):
+                raise ValueError("action arc dependencies must reference earlier known windows")
+            known_window_ids.add(window.window_id)
         signature_ids: set[str] = set()
         for moment in self.signature_moment_plan:
             if moment.moment_id in signature_ids:
                 raise ValueError("director signature moment ids must be unique")
             signature_ids.add(moment.moment_id)
-            if moment.strategy not in {"preserve", "adapt"}:
+            if moment.strategy == "omit":
                 continue
             assigned_beat = beats_by_id.get(moment.assigned_beat_id or "")
             if assigned_beat is None:
@@ -382,10 +492,16 @@ class FrameAnchoredStoryboardScene(BaseModel):
     notes: str | None = None
     cinematic_beat: str | None = None
     cinematic_beats: list[str] = Field(default_factory=list)
+    signature_moment_ids: list[str] = Field(default_factory=list)
+    source_behavior_beat_ids: list[str] = Field(default_factory=list)
     camera_instruction: str | None = None
     tension_stage: DirectorTensionStage | None = None
     action_result_requirement: str | None = None
     effect_timing: str | None = None
+    subject_motion_intensity: float | None = Field(default=None, ge=0, le=1)
+    camera_intensity: float | None = Field(default=None, ge=0, le=1)
+    effect_intensity: float | None = Field(default=None, ge=0, le=1)
+    anchor_return_instruction: str | None = None
     # Preserve provider-flattened director prose rather than dropping its intent.
     # The external contract is the rendered storyboard_text.
     overlay_instruction: DirectorOverlayInstruction | str | None = None

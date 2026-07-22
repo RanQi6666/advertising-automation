@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
+    DirectorActionArcWindow,
     DirectorBeat,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
@@ -43,24 +44,127 @@ def _director_plan_payload(
                 "importance": beat_importance,
             }
         ],
+        "action_arc_windows": [
+            {
+                "window_id": "depart",
+                "phase": "departure",
+                "start_ratio": 0.0,
+                "end_ratio": 0.25,
+                "objective": "Leave the supplied first-frame hold.",
+                "subject_motion_intensity": 0.3,
+                "camera_intensity": 0.2,
+                "effect_intensity": 0.1,
+            },
+            {
+                "window_id": "action_window",
+                "phase": "action",
+                "start_ratio": 0.25,
+                "end_ratio": 0.72,
+                "objective": "Execute the evidence-backed action.",
+                "subject_motion_intensity": 0.8,
+                "camera_intensity": 0.5,
+                "effect_intensity": 0.3,
+                "depends_on": ["depart"],
+            },
+            {
+                "window_id": "final_lock",
+                "phase": "final_lock",
+                "start_ratio": 0.72,
+                "end_ratio": 1.0,
+                "objective": "Settle into the supplied final anchor.",
+                "subject_motion_intensity": 0.1,
+                "camera_intensity": 0.1,
+                "effect_intensity": 0.0,
+                "depends_on": ["action_window"],
+            },
+        ],
         "signature_moment_plan": [
             {
                 "moment_id": "signature_001",
                 "moment_type": "combined",
-                "source_evidence": [
-                    "The reference combines a camera emphasis, visible action, and effect peak."
-                ],
+                "source_evidence": ["The reference contains action, emphasis, and a consequence."],
+                "source_behavior_beat_ids": ["reference_action"],
+                "transfer_role": "primary_action",
                 "strategy": signature_strategy,
-                "target_adaptation": (
-                    "Recreate the observed camera-action-effect relationship with target assets."
-                ),
+                "target_adaptation": "Legacy-compatible summary.",
+                "adapted_action": "Execute the target-compatible causal action." if signature_strategy != "omit" else "",
+                "temporary_divergence": "Allow a different middle pose and composition." if signature_strategy != "omit" else "",
+                "camera_support": "Reframe continuously around execution." if signature_strategy != "omit" else "",
+                "effect_support": "Support the consequence without replacing action." if signature_strategy != "omit" else "",
+                "visible_payoff": "Show the resulting target-state change." if signature_strategy != "omit" else "",
+                "return_strategy": "Settle continuously into the exact final anchor." if signature_strategy != "omit" else "",
                 "assigned_beat_id": assigned_beat_id,
                 "omission_reason": omission_reason,
+                "equivalent_replacement_failure": (
+                    "No target-compatible equivalent preserves the causal role."
+                    if signature_strategy == "omit" and omission_reason
+                    else None
+                ),
             }
         ],
+        "final_anchor_return": "Settle continuously into the supplied last frame.",
         "anchor_adaptation_plan": ["End in the supplied last frame."],
         "anti_flattening_constraints": ["Do not flatten the signature impact."],
     }
+
+
+def test_director_action_arc_window_rejects_reversed_ratio() -> None:
+    with pytest.raises(ValidationError, match="action arc window end ratio"):
+        DirectorActionArcWindow(
+            window_id="action_window",
+            phase="action",
+            start_ratio=0.6,
+            end_ratio=0.4,
+            objective="Execute the evidence-backed action.",
+            subject_motion_intensity=0.8,
+            camera_intensity=0.5,
+            effect_intensity=0.3,
+        )
+
+
+def test_director_plan_rejects_unknown_action_window_dependency() -> None:
+    payload = _director_plan_payload()
+    payload["action_arc_windows"][0]["depends_on"] = ["missing_window"]
+    with pytest.raises(ValidationError, match="action arc dependencies"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_non_omitted_signature_requires_action_payoff_and_return() -> None:
+    payload = _director_plan_payload()
+    payload["signature_moment_plan"][0]["adapted_action"] = ""
+    with pytest.raises(ValidationError, match="requires an adapted action"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_equivalent_replacement_is_valid() -> None:
+    payload = _director_plan_payload(signature_strategy="replace_with_equivalent")
+    assert FrameAnchoredDirectorPlan.model_validate(payload).signature_moment_plan[0].strategy == (
+        "replace_with_equivalent"
+    )
+
+
+def test_omit_requires_equivalent_replacement_failure() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="Literal and adapted execution contradict target facts.",
+    )
+    payload["signature_moment_plan"][0]["equivalent_replacement_failure"] = None
+    with pytest.raises(ValidationError, match="equivalent replacement failure"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_endpoint_pose_mismatch_is_not_an_omission_reason() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="The action pose differs from the final pose.",
+    )
+    payload["signature_moment_plan"][0]["equivalent_replacement_failure"] = (
+        "The middle framing differs from the final composition."
+    )
+    with pytest.raises(ValidationError, match="endpoint mismatch"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
 
 
 def test_director_plan_rejects_climax_without_causal_evidence() -> None:
@@ -314,10 +418,18 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
                         "The reference camera emphasis, action, and effect peak form "
                         "one signature moment."
                     ],
+                    "source_behavior_beat_ids": ["reference_action"],
+                    "transfer_role": "primary_action",
                     "strategy": "adapt",
                     "target_adaptation": (
                         "Execute the observed camera-action-effect relationship with target assets."
                     ),
+                    "adapted_action": "Execute the observed action with target-compatible assets.",
+                    "temporary_divergence": "Allow a different middle pose while preserving the causal role.",
+                    "camera_support": "Reframe in-shot around the action and consequence.",
+                    "effect_support": "Peak the effect at the visible consequence without replacing the action.",
+                    "visible_payoff": "Show the visible result of the action.",
+                    "return_strategy": "Return continuously into the supplied final anchor.",
                     "assigned_beat_id": "decisive_result",
                     "omission_reason": None,
                 }
