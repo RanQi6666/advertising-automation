@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -323,6 +324,37 @@ _OMISSION_CATEGORY_TEXT_REQUIREMENTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("unavailable", "no ", "cannot", "lack", "without", "absent", "impossible"),
     ),
 }
+_OMISSION_FACT_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"[.;]|\b(?:but|however|although|though|yet)\b"
+)
+_OMISSION_NEGATED_INFEASIBILITY_PATTERNS = (
+    re.compile(
+        r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+"
+        r"(?:unavailable|impossible|absent|infeasible|lacking)\b"
+    ),
+    re.compile(
+        r"\bno\b[^.;]{0,80}\b(?:is|are|was|were|remains?|seems?)\b"
+        r"[^.;]{0,40}\b(?:unavailable|impossible|absent|infeasible|lacking)\b"
+    ),
+)
+
+
+def _has_affirmative_local_infeasibility_fact(
+    normalized: str,
+    requirements: tuple[tuple[str, ...], ...],
+) -> bool:
+    clauses = [
+        clause.strip()
+        for clause in _OMISSION_FACT_CLAUSE_SPLIT_PATTERN.split(normalized)
+        if clause.strip()
+    ]
+    for clause in clauses:
+        if not all(any(term in clause for term in alternatives) for alternatives in requirements):
+            continue
+        if any(pattern.search(clause) for pattern in _OMISSION_NEGATED_INFEASIBILITY_PATTERNS):
+            continue
+        return True
+    return False
 
 
 def omission_infeasibility_matches_category(
@@ -341,9 +373,9 @@ def omission_infeasibility_matches_category(
         return False
     for value in (reason, evidence):
         normalized = (value or "").strip().casefold()
-        if not normalized or not all(
-            any(term in normalized for term in alternatives)
-            for alternatives in requirements
+        if not normalized or not _has_affirmative_local_infeasibility_fact(
+            normalized,
+            requirements,
         ):
             return False
     return True

@@ -55,6 +55,7 @@ from backend.app.services.external_ai_generation_service import (
     ExternalAIGenerationService,
     _format_frame_anchored_storyboard_text,
     _format_optional_intensity,
+    _normalize_private_storyboard_namespace,
 )
 from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
@@ -1077,7 +1078,7 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         assert task.metadata_json["frame_analysis"]["first_frame"]["visible_text"] == ["START"]
         assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
         director_plan = task.metadata_json["frame_analysis"]["director_plan"]
-        assert director_plan["climax_beats"][0]["beat_id"] == "causal_peak"
+        assert director_plan["climax_beats"][0]["beat_id"] == "__sbv2_beat_001__"
         first_scene = task.metadata_json["frame_anchored_storyboard"]["scenes"][0]
         assert first_scene["frame_anchor"] == "first_frame"
 
@@ -1597,7 +1598,7 @@ async def test_external_storyboard_v2_saves_candidate_before_director_coverage_v
 
         await session.refresh(task)
         candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
-        assert candidate["scenes"][1]["cinematic_beat"] == "causal_peak"
+        assert candidate["scenes"][1]["cinematic_beat"] == "__sbv2_beat_001__"
         assert "frame_anchored_storyboard" not in task.metadata_json
 
     await engine.dispose()
@@ -2235,40 +2236,78 @@ def test_formatter_scrubs_only_safe_private_ids_and_preserves_natural_language()
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_normalizes_alpha_private_ids_without_scrubbing_prose(
+async def test_private_namespace_normalization_revalidates_nested_models() -> None:
+    fake_llm = FakeExternalAILLM()
+    frame_analysis = await fake_llm.analyze_video_frame_pair(
+        "https://cdn.example.test/first.png",
+        "https://cdn.example.test/last.png",
+        12,
+        "9:16",
+    )
+    plan = await fake_llm.direct_frame_anchored_video_storyboard(
+        "https://cdn.example.test/first.png",
+        "https://cdn.example.test/last.png",
+        frame_analysis,
+        12,
+        "9:16",
+    )
+    duplicate_moment_plan = plan.model_copy(
+        update={
+            "signature_moment_plan": [
+                plan.signature_moment_plan[0],
+                plan.signature_moment_plan[0].model_copy(),
+            ]
+        }
+    )
+    invalid_analysis = frame_analysis.model_copy(
+        update={"director_plan": duplicate_moment_plan}
+    )
+
+    with pytest.raises(ValidationError, match="signature moment ids must be unique"):
+        _normalize_private_storyboard_namespace(invalid_analysis)
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_prose(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
     original_direct = fake_llm.direct_frame_anchored_video_storyboard
     original_generate = fake_llm.generate_frame_anchored_video_storyboard
-    observed_call3_ids: dict[str, str] = {}
+    observed_call3_ids: dict[str, object] = {}
 
-    async def alpha_private_namespace_director(*args, **kwargs):
+    async def mixed_private_namespace_director(*args, **kwargs):
         plan = await original_direct(*args, **kwargs)
         old_beat_id = plan.climax_beats[0].beat_id
         old_window_id = plan.action_arc_windows[0].window_id
         old_moment_id = plan.signature_moment_plan[0].moment_id
+        reserved_beat = plan.climax_beats[0].model_copy(
+            update={
+                "beat_id": "__sbv2_beat_001__",
+                "attention_objective": "Preserve a separately reserved private beat.",
+            }
+        )
         climax_beats = [
-            beat.model_copy(
+            plan.climax_beats[0].model_copy(
                 update={
-                    "beat_id": "action" if beat.beat_id == old_beat_id else beat.beat_id,
+                    "beat_id": " action ",
                     "depends_on": [
-                        "action" if dependency == old_beat_id else dependency
-                        for dependency in beat.depends_on
+                        " action " if dependency == old_beat_id else dependency
+                        for dependency in plan.climax_beats[0].depends_on
                     ],
                 }
-            )
-            for beat in plan.climax_beats
+            ),
+            reserved_beat,
         ]
         action_arc_windows = [
             window.model_copy(
                 update={
                     "window_id": (
-                        "camera" if window.window_id == old_window_id else window.window_id
+                        "camera-action" if window.window_id == old_window_id else window.window_id
                     ),
                     "depends_on": [
-                        "camera" if dependency == old_window_id else dependency
+                        "camera-action" if dependency == old_window_id else dependency
                         for dependency in window.depends_on
                     ],
                 }
@@ -2281,8 +2320,9 @@ async def test_storyboard_v2_normalizes_alpha_private_ids_without_scrubbing_pros
                     "moment_id": (
                         "subject" if moment.moment_id == old_moment_id else moment.moment_id
                     ),
+                    "source_behavior_beat_ids": [" camera action "],
                     "assigned_beat_id": (
-                        "action"
+                        " action "
                         if moment.assigned_beat_id == old_beat_id
                         else moment.assigned_beat_id
                     ),
@@ -2302,27 +2342,22 @@ async def test_storyboard_v2_normalizes_alpha_private_ids_without_scrubbing_pros
         frame_analysis = kwargs["frame_analysis"]
         plan = frame_analysis.director_plan
         assert plan is not None
-        beat_id = plan.climax_beats[0].beat_id
-        window_id = plan.action_arc_windows[0].window_id
-        moment_id = plan.signature_moment_plan[0].moment_id
-        observed_call3_ids.update(beat=beat_id, window=window_id, moment=moment_id)
+        signature_moment = plan.signature_moment_plan[0]
+        private_ids = {
+            "behavior": signature_moment.source_behavior_beat_ids[0],
+            "beat": plan.climax_beats[0].beat_id,
+            "reserved_beat": plan.climax_beats[1].beat_id,
+            "window": plan.action_arc_windows[0].window_id,
+            "moment": signature_moment.moment_id,
+        }
+        observed_call3_ids.update(private_ids)
         storyboard = await original_generate(*args, **kwargs)
         natural_sentence = "The camera follows the action while the subject moves."
-        for scene in storyboard.scenes:
-            scene.cinematic_beats = [
-                beat_id if value == "causal_peak" else value for value in scene.cinematic_beats
-            ]
-            if scene.cinematic_beat == "causal_peak":
-                scene.cinematic_beat = beat_id
-            scene.signature_moment_ids = [
-                moment_id if value == "signature_action" else value
-                for value in scene.signature_moment_ids
-            ]
-        storyboard.scenes[1].visual = f"{moment_id}; {natural_sentence}"
+        storyboard.scenes[1].visual = f"{' '.join(private_ids.values())}; {natural_sentence}"
         storyboard.scenes[1].motion = natural_sentence
         return storyboard
 
-    fake_llm.direct_frame_anchored_video_storyboard = alpha_private_namespace_director
+    fake_llm.direct_frame_anchored_video_storyboard = mixed_private_namespace_director
     fake_llm.generate_frame_anchored_video_storyboard = natural_language_candidate
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     client, engine, app = await _client_with_db(
@@ -2346,26 +2381,43 @@ async def test_storyboard_v2_normalizes_alpha_private_ids_without_scrubbing_pros
         client.close()
 
     assert polled["status"] == "succeeded"
-    assert "The camera follows the action while the subject moves." in polled["storyboard_text"]
+    natural_sentence = "The camera follows the action while the subject moves."
+    assert natural_sentence in polled["storyboard_text"]
     assert "__sbv2_" not in polled["storyboard_text"]
+    assert "camera action" not in polled["storyboard_text"]
+    assert "camera-action" not in polled["storyboard_text"]
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
         "direct_frame_anchored_video_storyboard",
         "generate_frame_anchored_video_storyboard",
     ]
-    assert observed_call3_ids["beat"].startswith("__sbv2_beat_")
-    assert observed_call3_ids["window"].startswith("__sbv2_window_")
-    assert observed_call3_ids["moment"].startswith("__sbv2_moment_")
+    assert observed_call3_ids == {
+        "behavior": "__sbv2_behavior_001__",
+        "beat": "__sbv2_beat_002__",
+        "reserved_beat": "__sbv2_beat_001__",
+        "window": "__sbv2_window_001__",
+        "moment": "__sbv2_moment_001__",
+    }
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         task = await session.get(GenerationTask, job_id)
         assert task is not None
         director_plan = task.metadata_json["frame_analysis"]["director_plan"]
-        assert director_plan["climax_beats"][0]["beat_id"] == observed_call3_ids["beat"]
-        assert director_plan["action_arc_windows"][0]["window_id"] == observed_call3_ids["window"]
-        assert (
-            director_plan["signature_moment_plan"][0]["moment_id"]
-            == observed_call3_ids["moment"]
+        assert [beat["beat_id"] for beat in director_plan["climax_beats"]] == [
+            "__sbv2_beat_002__",
+            "__sbv2_beat_001__",
+        ]
+        assert director_plan["signature_moment_plan"][0][
+            "source_behavior_beat_ids"
+        ] == ["__sbv2_behavior_001__"]
+        assert director_plan["action_arc_windows"][0]["window_id"] == (
+            "__sbv2_window_001__"
+        )
+        assert director_plan["signature_moment_plan"][0]["moment_id"] == (
+            "__sbv2_moment_001__"
+        )
+        assert director_plan["signature_moment_plan"][0]["assigned_beat_id"] == (
+            "__sbv2_beat_002__"
         )
 
     await engine.dispose()

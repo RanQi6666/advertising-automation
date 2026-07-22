@@ -418,8 +418,8 @@ def _predicate_is_locally_negated(clause: str, predicate_start: int) -> bool:
     return _NEGATED_EXECUTION_PATTERN.search(clause[scope_start:predicate_start]) is not None
 
 
-def _actor_head_before_first_predicate(clause: str, predicate_start: int) -> str | None:
-    actor_scope = clause[:predicate_start].strip()
+def _actor_head_from_scope(actor_scope: str) -> str | None:
+    actor_scope = actor_scope.strip()
     if not actor_scope:
         return None
     auxiliary = _ACTOR_AUXILIARY_PATTERN.search(actor_scope)
@@ -432,6 +432,25 @@ def _actor_head_before_first_predicate(clause: str, predicate_start: int) -> str
         if token not in _NON_ACTOR_TOKENS and not token.endswith("ly")
     ]
     return candidates[-1] if candidates else None
+
+
+def _predicate_actor_head(
+    clause: str,
+    predicate_start: int,
+    previous_actor_head: str | None,
+) -> str | None:
+    boundary = None
+    for match in _PREDICATE_NEGATION_RESET_PATTERN.finditer(clause[:predicate_start]):
+        boundary = match
+    scope_start = boundary.end() if boundary is not None else 0
+    actor_head = _actor_head_from_scope(clause[scope_start:predicate_start])
+    if actor_head is not None:
+        return actor_head
+    if previous_actor_head is not None:
+        return previous_actor_head
+    if boundary is not None:
+        return _actor_head_from_scope(clause[: boundary.start()])
+    return None
 
 
 def _is_support_only_actor(actor_head: str) -> bool:
@@ -460,13 +479,20 @@ def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
         )
         if not execution_matches:
             continue
-        actor_head = _actor_head_before_first_predicate(
-            clause, execution_matches[0].start()
-        )
-        if actor_head is None or _is_support_only_actor(actor_head):
-            continue
+        previous_actor_head: str | None = None
         for match in execution_matches:
-            if not _predicate_is_locally_negated(clause, match.start()):
+            actor_head = _predicate_actor_head(
+                clause,
+                match.start(),
+                previous_actor_head,
+            )
+            if actor_head is not None:
+                previous_actor_head = actor_head
+            if (
+                actor_head is not None
+                and not _is_support_only_actor(actor_head)
+                and not _predicate_is_locally_negated(clause, match.start())
+            ):
                 return True
     return False
 

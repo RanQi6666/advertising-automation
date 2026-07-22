@@ -3,6 +3,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -460,7 +461,33 @@ class ExternalAIGenerationService:
                 )
                 director_plan_added = True
 
-            normalized_frame_analysis = _normalize_private_storyboard_namespace(frame_analysis)
+            try:
+                normalized_frame_analysis = _normalize_private_storyboard_namespace(
+                    frame_analysis
+                )
+            except ValidationError as exc:
+                invalid_plan = frame_analysis.director_plan
+                if invalid_plan is not None:
+                    invalid_review = review_director_action_coverage(
+                        frame_analysis,
+                        invalid_plan,
+                    )
+                    if invalid_review.status == "unrecoverable":
+                        await _store_frame_anchored_private_metadata(
+                            session,
+                            task,
+                            director_action_coverage_review=invalid_review.model_dump(
+                                mode="json"
+                            ),
+                        )
+                        raise ProviderError(
+                            "Director plan is unrecoverable before storyboard generation because "
+                            f"{_public_unrecoverable_director_reason(invalid_review)}."
+                        ) from exc
+                raise ProviderError(
+                    "Director plan is unrecoverable before storyboard generation because "
+                    "director action coverage contract is invalid."
+                ) from exc
             if director_plan_added or normalized_frame_analysis != frame_analysis:
                 frame_analysis = normalized_frame_analysis
                 await _store_frame_anchored_private_metadata(
@@ -914,30 +941,41 @@ async def _store_frame_anchored_private_metadata(
 
 
 _SAFE_PRIVATE_ID_PATTERN = re.compile(
-    r"^(?:__sbv2_(?:behavior|beat|window|moment)_\d{3}__|"
+    r"^(?:__sbv2_(?:behavior|beat|window|moment)_\d+__|"
     r"[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
 )
 
 
 def _private_namespace_map(values: list[str], namespace: str) -> dict[str, str]:
+    normalized_values = [value.strip() for value in values if value.strip()]
+    reserved_pattern = re.compile(rf"^__sbv2_{re.escape(namespace)}_\d+__$")
+    reserved_ids = {
+        value for value in normalized_values if reserved_pattern.fullmatch(value)
+    }
     mapping: dict[str, str] = {}
+    used_ids = set(reserved_ids)
     next_index = 1
-    for value in values:
-        clean = value.strip()
-        if not clean or clean in mapping:
+    for clean in normalized_values:
+        if clean in mapping:
             continue
-        if clean.isalpha():
-            mapping[clean] = f"__sbv2_{namespace}_{next_index:03d}__"
-            next_index += 1
-        else:
+        if clean in reserved_ids:
             mapping[clean] = clean
+            continue
+        while True:
+            candidate = f"__sbv2_{namespace}_{next_index:03d}__"
+            next_index += 1
+            if candidate not in used_ids:
+                break
+        mapping[clean] = candidate
+        used_ids.add(candidate)
     return mapping
 
 
 def _mapped_private_id(value: str | None, mapping: dict[str, str]) -> str | None:
     if value is None:
         return None
-    return mapping.get(value, value)
+    clean = value.strip()
+    return mapping.get(clean, clean)
 
 
 def _normalize_private_storyboard_namespace(frame_analysis: FrameAnalysis) -> FrameAnalysis:
@@ -1071,7 +1109,7 @@ def _normalize_private_storyboard_namespace(frame_analysis: FrameAnalysis) -> Fr
             "director_plan": normalized_plan,
         }
     )
-    return normalized
+    return FrameAnalysis.model_validate(normalized.model_dump(mode="python"))
 
 
 def _public_unrecoverable_director_reason(
