@@ -1345,7 +1345,7 @@ async def test_external_video_generation_invalid_frame_does_not_fallback_to_text
     [
         (
             [ONE_PIXEL_PNG_BASE64] * 2,
-            [ONE_PIXEL_PNG_BASE64] * 2,
+            [],
             EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
         ),
         (
