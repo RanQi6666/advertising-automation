@@ -334,6 +334,7 @@ class FrameAnchoredStoryboardScene(BaseModel):
     sound_effects: list[str] = Field(default_factory=list)
     notes: str | None = None
     cinematic_beat: str | None = None
+    cinematic_beats: list[str] = Field(default_factory=list)
     camera_instruction: str | None = None
     tension_stage: DirectorTensionStage | None = None
     action_result_requirement: str | None = None
@@ -364,24 +365,65 @@ class FrameAnchoredStoryboard(BaseModel):
         return self
 
 
+def _scene_director_beat_ids(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    valid_beat_ids: set[str] | None = None,
+) -> set[str]:
+    beat_ids = {beat_id.strip() for beat_id in scene.cinematic_beats if beat_id.strip()}
+    legacy_beat_id = (scene.cinematic_beat or "").strip()
+    if legacy_beat_id:
+        beat_ids.add(legacy_beat_id)
+    if valid_beat_ids is not None:
+        beat_ids.intersection_update(valid_beat_ids)
+    return beat_ids
+
+
+def _scene_can_carry_director_beat(scene: FrameAnchoredStoryboardScene) -> bool:
+    has_timed_window = (
+        scene.start_second is not None
+        and scene.end_second is not None
+        and scene.end_second > scene.start_second
+    )
+    has_climax_direction = any(
+        (value or "").strip()
+        for value in (
+            scene.camera_instruction,
+            scene.action_result_requirement,
+            scene.effect_timing,
+            scene.anti_flattening_requirement,
+        )
+    )
+    return (
+        has_timed_window
+        or scene.frame_anchor == "transition"
+        or scene.tension_stage == "climax"
+        or has_climax_direction
+    )
+
+
 def _assign_missing_director_beat_ids(
     storyboard: FrameAnchoredStoryboard,
     plan: FrameAnchoredDirectorPlan,
 ) -> None:
-    """Link unlabeled scenes to core director beats without changing their creative content."""
-    available_scenes = [
-        scene for scene in storyboard.scenes if not (scene.cinematic_beat or "").strip()
+    """Link core beats by target-time overlap without changing scene creative direction."""
+    valid_beat_ids = {beat.beat_id for beat in plan.climax_beats}
+    assigned_beat_ids = set().union(
+        *(
+            _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids)
+            for scene in storyboard.scenes
+        )
+    )
+    candidate_scenes = [
+        scene for scene in storyboard.scenes if _scene_can_carry_director_beat(scene)
     ]
-    duration = float(storyboard.duration_seconds)
-    assigned_beat_ids = {
-        scene.cinematic_beat for scene in storyboard.scenes if scene.cinematic_beat
-    }
+    if not candidate_scenes:
+        return
 
+    duration = float(storyboard.duration_seconds)
     for beat in plan.climax_beats:
         if beat.importance != "core" or beat.beat_id in assigned_beat_ids:
             continue
-        if not available_scenes:
-            return
 
         beat_start = beat.start_ratio * duration
         beat_end = beat.end_ratio * duration
@@ -407,10 +449,12 @@ def _assign_missing_director_beat_ids(
                 1 if scene.frame_anchor == "transition" else 0,
             )
 
-        scene = max(available_scenes, key=scene_score)
-        scene.cinematic_beat = beat.beat_id
+        scene = max(candidate_scenes, key=scene_score)
+        if beat.beat_id not in scene.cinematic_beats:
+            scene.cinematic_beats.append(beat.beat_id)
+        if not (scene.cinematic_beat or "").strip():
+            scene.cinematic_beat = beat.beat_id
         assigned_beat_ids.add(beat.beat_id)
-        available_scenes.remove(scene)
 
 
 def validate_director_coverage(
@@ -420,10 +464,17 @@ def validate_director_coverage(
     if plan is None:
         return
     _assign_missing_director_beat_ids(storyboard, plan)
+    valid_beat_ids = {beat.beat_id for beat in plan.climax_beats}
+    covered_beat_ids = set().union(
+        *(
+            _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids)
+            for scene in storyboard.scenes
+        )
+    )
     for beat in plan.climax_beats:
         if beat.importance != "core":
             continue
-        if not any(scene.cinematic_beat == beat.beat_id for scene in storyboard.scenes):
+        if beat.beat_id not in covered_beat_ids:
             raise ValueError(f"storyboard is missing required director beat: {beat.beat_id}")
 
 

@@ -1897,12 +1897,18 @@ def _frame_anchored_director_system_prompt() -> str:
         "or viewpoint changes must happen in-shot. Do not require post-production editing, multi-"
         "segment generation, stitching, or external compositing. Build a tension_curve in "
         "ascending "
-        "setup, trigger, escalation, climax, resolution order. Include one or more evidence-backed "
-        "climax_beats. Each climax beat must have a stable beat_id, a 0-to-1 start_ratio and "
-        "end_ratio, source_evidence, attention_objective, camera_instruction, action_requirement, "
-        "effect_requirement, importance, and dependency ids when needed. Core beats must separate "
-        "cause, action, impact, and visible result rather than flattening them into a generic "
-        "continuous move. For each observed overlay or UI element, decide dynamically whether to "
+        "setup, trigger, escalation, climax, resolution order. Return the executable final "
+        "core beat set for the supplied target duration, not an unlimited list of candidate "
+        "moments. Include one or more evidence-backed climax_beats. Each climax beat must have "
+        "a stable beat_id, a 0-to-1 start_ratio and end_ratio, source_evidence, "
+        "attention_objective, camera_instruction, action_requirement, effect_requirement, "
+        "importance, and dependency ids when needed. Adapt the number and width of core beats "
+        "to both the observed reference duration and the requested target duration. When time "
+        "is short, merge adjacent causal roles into one executable beat and downgrade repeated "
+        "or decorative moments before weakening the causal climax. Cause, action, impact, and "
+        "visible result must remain readable as a causal chain, but each role does not need its "
+        "own beat. Do not create a core beat set whose combined minimum readable time exceeds "
+        "target duration. For each observed overlay or UI element, decide dynamically whether to "
         "inherit it, replace it with the target equivalent, persist it to the final frame, or omit "
         "it; state the final-frame requirement without inventing a fixed overlay rule. Provide "
         "non-empty anti_flattening_constraints that preserve causal readability, the effect peak, "
@@ -1917,7 +1923,8 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
-        "camera_instruction, tension_stage, action_result_requirement, effect_timing, "
+        "cinematic_beats, camera_instruction, tension_stage, action_result_requirement, "
+        "effect_timing, "
         "overlay_instruction, and anti_flattening_requirement. overlay_instruction must be "
         "null or an object with reference_element, strategy, timing_instruction, and "
         "final_frame_requirement; strategy must be exactly inherit, replace_with_target, "
@@ -1938,9 +1945,11 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "readability or the final state when the target duration is longer. "
         "For each core behavior beat, describe the actual available actors, objects, action, "
         "interaction, causal change, and visible result from the analysis. When frame_analysis "
-        "contains a director_plan, every core climax beat must be assigned to a scene whose "
-        "cinematic_beat is the exact beat_id from that plan, verbatim; use neither a stage name "
-        "nor a new freeform label. Do not replace a "
+        "contains a director_plan, every core climax beat must be assigned verbatim using either "
+        "cinematic_beat for a legacy single id or cinematic_beats for a list of exact beat_id "
+        "values. One continuous scene may carry multiple core beat ids when its target time "
+        "window performs those roles without a cut. Use neither a stage name nor a new freeform "
+        "label. Do not replace a "
         "specific observed causal action with a generic effect, passive pose, or static result. "
         "Reference characters, appearance, props, products, brands, text, rewards, UI, settings, "
         "camera, transitions, and effects may be preserved when their visual_identity_mappings "
@@ -2797,9 +2806,22 @@ def _frame_anchored_storyboard_from_data(
         normalized["scenes"] = [
             {
                 **scene,
-                "sound_effects": _frame_string_list(scene.get("sound_effects")),
+                **(
+                    {"sound_effects": _frame_string_list(scene.get("sound_effects"))}
+                    if "sound_effects" in scene
+                    else {}
+                ),
+                **(
+                    {
+                        "cinematic_beats": list(
+                            dict.fromkeys(_frame_string_list(scene.get("cinematic_beats")))
+                        )
+                    }
+                    if "cinematic_beats" in scene
+                    else {}
+                ),
             }
-            if isinstance(scene, dict) and "sound_effects" in scene
+            if isinstance(scene, dict)
             else scene
             for scene in scenes
         ]

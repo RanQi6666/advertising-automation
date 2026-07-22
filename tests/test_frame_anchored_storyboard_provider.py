@@ -134,6 +134,90 @@ def test_director_coverage_assigns_a_missing_core_beat_to_its_timeline_scene() -
     assert storyboard.scenes[1].cinematic_beat == "impact_reveal"
 
 
+def test_director_coverage_allows_one_timed_scene_to_carry_multiple_core_beats() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Compress a causal climax into the available target duration.",
+        attention_path=["cause", "action", "impact", "visible result"],
+        tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="cause",
+                stage="climax",
+                source_evidence=["A visible trigger begins the reference climax."],
+                start_ratio=0.25,
+                end_ratio=0.4,
+                importance="core",
+            ),
+            DirectorBeat(
+                beat_id="action",
+                stage="climax",
+                source_evidence=["The subject performs a readable action."],
+                start_ratio=0.38,
+                end_ratio=0.58,
+                importance="core",
+                depends_on=["cause"],
+            ),
+            DirectorBeat(
+                beat_id="impact",
+                stage="climax",
+                source_evidence=["The action creates a visible impact."],
+                start_ratio=0.55,
+                end_ratio=0.72,
+                importance="core",
+                depends_on=["action"],
+            ),
+            DirectorBeat(
+                beat_id="visible_result",
+                stage="climax",
+                source_evidence=["The supplied ending establishes a readable result."],
+                start_ratio=0.7,
+                end_ratio=0.92,
+                importance="core",
+                depends_on=["impact"],
+            ),
+        ],
+        anchor_adaptation_plan=["Resolve in the supplied last frame."],
+        anti_flattening_constraints=["Keep cause and visible result readable."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=2,
+                frame_anchor="first_frame",
+                visual="Open on the supplied first-frame composition.",
+                cinematic_beat="legacy_setup_label",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=2,
+                end_second=8,
+                frame_anchor="transition",
+                visual="Perform the causal action and show its impact in one continuous shot.",
+                cinematic_beat="legacy_climax_label",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=3,
+                start_second=8,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last-frame result.",
+                cinematic_beat="legacy_resolution_label",
+            ),
+        ],
+    )
+
+    validate_director_coverage(storyboard, director_plan)
+
+    covered = {beat_id for scene in storyboard.scenes for beat_id in scene.cinematic_beats}
+    assert covered == {"cause", "action", "impact", "visible_result"}
+    assert any(len(scene.cinematic_beats) > 1 for scene in storyboard.scenes)
+    assert storyboard.scenes[1].cinematic_beat == "legacy_climax_label"
+
+
 @pytest.mark.asyncio
 async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() -> None:
     provider, captured = _gateway_provider_with_responses(
@@ -185,6 +269,10 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "identity" in system_prompt
     assert "attention_path must be a list of plain strings" in system_prompt
     assert "anchor_adaptation_plan must be a list of plain strings" in system_prompt
+    assert "executable final core beat set" in system_prompt
+    assert "merge adjacent causal roles" in system_prompt
+    assert "minimum readable time" in system_prompt
+    assert "does not need its own beat" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -997,6 +1085,8 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "voiceover" in system_prompt
     assert "sound_effects" in system_prompt
     assert "cinematic_beat" in system_prompt
+    assert "cinematic_beats" in system_prompt
+    assert "one continuous scene may carry multiple" in system_prompt.lower()
     assert "exact beat_id" in system_prompt
     assert "overlay_instruction must be null or an object" in system_prompt
     assert (
@@ -1042,6 +1132,47 @@ async def test_gateway_storyboard_normalizes_string_sound_effects() -> None:
 
     assert storyboard.scenes[0].sound_effects == ["soft cinematic rise"]
     assert storyboard.scenes[1].sound_effects == ["golden impact burst"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_normalizes_multiple_cinematic_beat_ids() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 8,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open and carry the continuous causal action.",
+                    "cinematic_beat": "legacy_single_id",
+                    "cinematic_beats": ["cause", " action ", "cause", ""],
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 8,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "cinematic_beats": "visible_result",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].cinematic_beat == "legacy_single_id"
+    assert storyboard.scenes[0].cinematic_beats == ["cause", "action"]
+    assert storyboard.scenes[1].cinematic_beats == ["visible_result"]
 
 
 @pytest.mark.asyncio
