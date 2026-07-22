@@ -55,6 +55,42 @@ def test_volcengine_video_payload_uses_seedance_task_schema() -> None:
     assert payload["content"][2]["image_url"]["url"] == "https://example.com/2.png"
 
 
+def test_volcengine_video_payload_supports_text_only_content() -> None:
+    provider = VolcengineVideoProvider(
+        api_key="test-key",
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        model="ep-20260611001554-nwgqk",
+        resolution="720p",
+        image_mode="first_last_frame",
+        min_duration_seconds=4,
+        max_duration_seconds=12,
+        max_reference_images=2,
+        generate_audio=False,
+        watermark=False,
+        return_last_frame=False,
+        execution_expires_after=172800,
+        priority=0,
+        safety_identifier="test-user",
+    )
+
+    payload = provider._build_payload(
+        VideoGenerationRequest(
+            prompt="Create a direct-response ad video from text only.",
+            source_images=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+        )
+    )
+
+    assert payload["content"] == [
+        {"type": "text", "text": "Create a direct-response ad video from text only."}
+    ]
+    assert payload["model"] == "ep-20260611001554-nwgqk"
+    assert payload["ratio"] == "9:16"
+    assert payload["duration"] == 12
+    assert payload["safety_identifier"] == "test-user"
+
+
 def test_volcengine_video_payload_rejects_unsupported_seedance_duration() -> None:
     provider = VolcengineVideoProvider(
         api_key="test-key",
