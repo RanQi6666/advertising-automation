@@ -67,7 +67,7 @@ async def test_model_planner_accepts_fenced_json(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"output_text": "```json\n{\"queries\":[\"rummy bonus\"]}\n```"},
+            json={"output_text": '```json\n{"queries":["rummy bonus"]}\n```'},
         )
 
     client = httpx.AsyncClient(
@@ -185,6 +185,7 @@ async def test_model_classification_normalizes_natural_language_keep_recommendat
     await client.aclose()
     get_settings.cache_clear()
 
+
 @pytest.mark.asyncio
 async def test_model_classification_excludes_negative_natural_language_recommendation(
     monkeypatch,
@@ -243,3 +244,55 @@ def test_classification_excludes_prose_that_starts_with_exclude() -> None:
     )
 
     assert classification["recommendation"] == "exclude"
+
+
+@pytest.mark.asyncio
+async def test_model_planner_receives_history_and_adapts_to_rejection_signals(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test-key")
+    get_settings.cache_clear()
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {"queries": ["short promo", "SHORT PROMO", "new direction"]}
+                )
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
+    )
+    model = AdResearchModel(http_client=client, limiter=Limiter())
+    gap_summary = {
+        "previous_queries": ["old query"],
+        "technical_rejection_summary": {"duration_over_30": 12},
+        "model_exclusion_summary": {"category_not_matched": 4},
+        "duplicate_count": 7,
+    }
+
+    queries = await model.plan_queries(
+        country="IN",
+        category="gambling",
+        seed_keywords=[],
+        round_number=2,
+        gap_summary=gap_summary,
+    )
+
+    assert queries == ["short promo", "new direction"]
+    system_prompt = captured["input"][0]["content"]
+    assert "Do not repeat previous_queries" in system_prompt
+    assert "duration_over_30" in system_prompt
+    assert "category mismatch" in system_prompt
+    assert "duplicate" in system_prompt
+    user_payload = json.loads(captured["input"][1]["content"])
+    assert user_payload["gap_summary"] == gap_summary
+    await client.aclose()
+    get_settings.cache_clear()

@@ -6,9 +6,87 @@ from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_media import AdResearchMediaInspector
 
 
+@pytest.fixture
+def allow_public_media(monkeypatch):
+    import backend.app.services.ad_research_media as media_module
+
+    async def allow_public_url(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(media_module, "validate_public_http_url", allow_public_url)
+
+
+def eligible_ad(**overrides) -> CollectorAd:
+    values = {
+        "ad_library_id": "eligible",
+        "status": "ACTIVE",
+        "days_running": 1,
+        "video_url": "https://cdn.example/ad.mp4",
+        "thumbnail_url": "https://cdn.example/ad.jpg",
+        "duration_seconds": 30,
+    }
+    values.update(overrides)
+    return CollectorAd(**values)
+
+
 @pytest.mark.asyncio
-async def test_media_inspector_rejects_link_local_video_url_when_duration_is_reported(
+@pytest.mark.parametrize("days_running", [None, 0])
+async def test_media_inspector_rejects_ads_active_for_less_than_one_day(
+    allow_public_media, days_running
 ) -> None:
+    result = await AdResearchMediaInspector().inspect(eligible_ad(days_running=days_running))
+
+    assert result.qualified is False
+    assert "active_days_below_minimum" in result.reasons
+    assert result.active_days == days_running
+
+
+@pytest.mark.asyncio
+async def test_media_inspector_accepts_one_active_day(allow_public_media) -> None:
+    result = await AdResearchMediaInspector().inspect(eligible_ad(days_running=1))
+
+    assert result.qualified is True
+    assert result.reasons == ()
+
+
+@pytest.mark.asyncio
+async def test_media_inspector_accepts_exactly_thirty_seconds(allow_public_media) -> None:
+    result = await AdResearchMediaInspector().inspect(eligible_ad(duration_seconds=30))
+
+    assert result.qualified is True
+    assert result.duration_seconds == 30
+
+
+@pytest.mark.asyncio
+async def test_media_inspector_rejects_video_over_thirty_seconds(
+    allow_public_media,
+) -> None:
+    result = await AdResearchMediaInspector().inspect(eligible_ad(duration_seconds=30.1))
+
+    assert result.qualified is False
+    assert "duration_over_30" in result.reasons
+    assert result.duration_seconds == 30.1
+
+
+@pytest.mark.asyncio
+async def test_media_inspector_records_multiple_rejection_reasons(
+    allow_public_media,
+) -> None:
+    result = await AdResearchMediaInspector().inspect(
+        eligible_ad(status="INACTIVE", days_running=0, thumbnail_url=None, duration_seconds=31)
+    )
+
+    assert result.qualified is False
+    assert result.reasons == (
+        "status_not_active",
+        "missing_thumbnail",
+        "active_days_below_minimum",
+        "duration_over_30",
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_inspector_rejects_link_local_video_url_when_duration_is_reported() -> None:
     ad = CollectorAd(
         ad_library_id="unsafe",
         status="ACTIVE",
