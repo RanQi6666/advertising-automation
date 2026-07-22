@@ -613,12 +613,34 @@ class MockLLMProvider:
             final_lock_start = _mock_phase_boundary(
                 director_plan, "final_lock", duration_seconds, use_start=True
             )
+            behavior_types = {
+                beat.beat_id: beat.behavior_type
+                for beat in _mock_core_behavior_beats(frame_analysis)
+            }
+            execution_evidence = [
+                {
+                    "executor_kind": (
+                        "target_state"
+                        if any(
+                            behavior_types.get(source_id) == "state"
+                            for source_id in moment.source_behavior_beat_ids
+                        )
+                        else "target_subject"
+                    ),
+                    "assertion": "affirmed",
+                    "action_or_state_change": moment.adapted_action,
+                    "signature_moment_ids": [moment.moment_id],
+                    "source_behavior_beat_ids": list(moment.source_behavior_beat_ids),
+                }
+                for moment in signature_moments
+            ]
             common_execution = {
                 "motion": motion,
                 "cinematic_beat": beat_ids[0],
                 "cinematic_beats": beat_ids,
                 "signature_moment_ids": signature_ids,
                 "source_behavior_beat_ids": source_ids,
+                "execution_evidence": execution_evidence,
                 "camera_instruction": camera_instruction,
                 "tension_stage": "climax",
                 "action_result_requirement": payoff,

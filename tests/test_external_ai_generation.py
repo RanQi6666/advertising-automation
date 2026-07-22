@@ -517,6 +517,15 @@ class FakeExternalAILLM:
                     cinematic_beats=[assigned_beat_id, "custom_director_beat"],
                     signature_moment_ids=signature_moment_ids,
                     source_behavior_beat_ids=source_behavior_beat_ids,
+                    execution_evidence=[
+                        {
+                            "executor_kind": "target_subject",
+                            "assertion": "affirmed",
+                            "action_or_state_change": "linked causal action completes visibly",
+                            "signature_moment_ids": signature_moment_ids,
+                            "source_behavior_beat_ids": source_behavior_beat_ids,
+                        }
+                    ],
                     camera_instruction="Use an in-shot push and reframing at impact.",
                     tension_stage="climax",
                     effect_timing="Keep effects subordinate until the action reads.",
@@ -1059,6 +1068,7 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         "frame_anchored_storyboard",
         "signature_moment_ids",
         "source_behavior_beat_ids",
+        "execution_evidence",
         "storyboard",
     ):
         assert private_field not in data

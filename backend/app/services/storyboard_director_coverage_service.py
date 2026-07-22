@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from backend.app.schemas.ai import (
     DirectorActionCorrection,
     DirectorActionCoverageReview,
@@ -10,7 +8,6 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     ReferenceBehaviorBeat,
-    omission_infeasibility_matches_category,
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
@@ -35,50 +32,6 @@ _DIVERGENCE_TERMS = (
     "different middle",
     "leave the opening",
     "away from",
-)
-_SUPPORT_ONLY_MOTION_TERMS = (
-    "camera",
-    "lens",
-    "zoom",
-    "pan",
-    "tilt",
-    "dolly",
-    "framing",
-    "reframe",
-    "focus",
-    "exposure",
-    "light",
-    "glow",
-    "particle",
-    "effect",
-    "vfx",
-    "flare",
-    "bloom",
-)
-_NEGATED_EXECUTION_PATTERN = re.compile(
-    r"\b(?:no|not|never|nothing|neither|nor|without)\b|n['?]t\b"
-)
-_SUBJECT_EXECUTION_PATTERNS = (
-    r"\bexecut(?:e|es|ed|ing)\b",
-    r"\bperform(?:s|ed|ing)?\b",
-    r"\bcomplet(?:e|es|ed|ing)\b",
-    r"\bchang(?:e|es|ed|ing)\b",
-    r"\btransform(?:s|ed|ing)?\b",
-    r"\bmov(?:e|es|ed|ing)\b",
-    r"\badvanc(?:e|es|ed|ing)\b",
-    r"\bretreat(?:s|ed|ing)?\b",
-    r"\bturn(?:s|ed|ing)?\b",
-    r"\brotat(?:e|es|ed|ing)\b",
-    r"\brais(?:e|es|ed|ing)\b",
-    r"\blower(?:s|ed|ing)?\b",
-    r"\breach(?:es|ed|ing)?\b",
-    r"\bstep(?:s|ped|ping)?\b",
-    r"\bopen(?:s|ed|ing)?\b",
-    r"\bclos(?:e|es|ed|ing)\b",
-    r"\bexpand(?:s|ed|ing)?\b",
-    r"\bcontract(?:s|ed|ing)?\b",
-    r"\bdeform(?:s|ed|ing)?\b",
-    r"\bshift(?:s|ed|ing)?\b",
 )
 
 
@@ -141,30 +94,54 @@ def _has_execution_detail(moment: object) -> bool:
     return assigned_core_beat and bool(adapted_action) and bool(visible_payoff)
 
 
-def _valid_omission(moment: object) -> bool:
-    omission_reason = str(getattr(moment, "omission_reason", "") or "").strip()
-    replacement_failure = str(getattr(moment, "equivalent_replacement_failure", "") or "").strip()
-    literal_category = getattr(moment, "literal_infeasibility_category", None)
-    literal_evidence = str(
-        getattr(moment, "literal_infeasibility_evidence", "") or ""
-    ).strip()
-    equivalent_category = getattr(moment, "equivalent_infeasibility_category", None)
-    equivalent_evidence = str(
-        getattr(moment, "equivalent_infeasibility_evidence", "") or ""
-    ).strip()
+_OMISSION_FACT_CATEGORY_BASIS = {
+    "target_capability_unavailable": "target_capability",
+    "mechanism_unavailable": "mechanism",
+    "identity_semantics_conflict": "identity_semantics",
+    "causal_equivalent_unavailable": "causal_equivalent",
+}
+_LITERAL_OMISSION_CATEGORIES = {
+    "target_capability_unavailable",
+    "mechanism_unavailable",
+    "identity_semantics_conflict",
+}
+
+
+def _structured_value(value: object, field: str, default: object = None) -> object:
+    if isinstance(value, dict):
+        return value.get(field, default)
+    return getattr(value, field, default)
+
+
+def _valid_omission_fact(fact: object, *, literal: bool) -> bool:
+    if fact is None:
+        return False
+    category = _structured_value(fact, "category")
+    basis = _structured_value(fact, "basis")
+    polarity = _structured_value(fact, "polarity")
+    scope = _structured_value(fact, "scope")
+    detail = str(_structured_value(fact, "detail", "") or "").strip()
+    allowed_categories = (
+        _LITERAL_OMISSION_CATEGORIES
+        if literal
+        else {"causal_equivalent_unavailable"}
+    )
     return bool(
-        omission_infeasibility_matches_category(
-            literal_category,
-            omission_reason,
-            literal_evidence,
-            literal=True,
-        )
-        and omission_infeasibility_matches_category(
-            equivalent_category,
-            replacement_failure,
-            equivalent_evidence,
-            literal=False,
-        )
+        category in allowed_categories
+        and _OMISSION_FACT_CATEGORY_BASIS.get(str(category)) == basis
+        and polarity == "affirmed"
+        and scope in {"global", "action_interval"}
+        and detail
+    )
+
+
+def _valid_omission(moment: object) -> bool:
+    return _valid_omission_fact(
+        _structured_value(moment, "literal_infeasibility_fact"),
+        literal=True,
+    ) and _valid_omission_fact(
+        _structured_value(moment, "equivalent_infeasibility_fact"),
+        literal=False,
     )
 
 
@@ -373,218 +350,46 @@ def review_director_action_coverage(
     )
 
 
-_ACTOR_AUXILIARY_PATTERN = re.compile(
-    r"\b(?:do|does|did|is|are|was|were|has|have|had|will|would|shall|should|"
-    r"can|could|may|might|must)\b"
-)
-_PREDICATE_COORDINATOR_PATTERN = re.compile(r"\b(?:and|but|then|or)\b")
-_ACTOR_MODIFIER_BOUNDARY_PATTERN = re.compile(
-    r"\b(?:near|beside|behind|before|after|around|inside|outside|under|over|"
-    r"against|toward|towards|from|with|without|next\s+to|in\s+front\s+of)\b"
-)
-_NON_ACTOR_TOKENS = {
-    "a",
-    "an",
-    "the",
-    "this",
-    "that",
-    "these",
-    "those",
-    "my",
-    "our",
-    "your",
-    "his",
-    "her",
-    "its",
-    "their",
-    "no",
-    "not",
-    "never",
-    "nothing",
-    "neither",
-    "nor",
-    "without",
-    "still",
-}
-_SUPPORT_ONLY_ACTOR_TERMS = set(_SUPPORT_ONLY_MOTION_TERMS) | {
-    "composition",
-    "frame",
-    "shot",
-    "background",
-    "lighting",
-}
-_ACTOR_ENTITY_HEAD_TERMS = {
-    "actor",
-    "artist",
-    "character",
-    "crew",
-    "designer",
-    "driver",
-    "engineer",
-    "human",
-    "operator",
-    "performer",
-    "person",
-    "pilot",
-    "researcher",
-    "scientist",
-    "specialist",
-    "subject",
-    "technician",
-    "user",
-    "worker",
-}
-_SUPPORT_COMPOUND_HEAD_TERMS = {
-    "array",
-    "background",
-    "beam",
-    "bloom",
-    "cloud",
-    "composition",
-    "effect",
-    "field",
-    "flare",
-    "frame",
-    "glow",
-    "layer",
-    "lighting",
-    "particles",
-    "rig",
-    "shot",
-    "system",
-    "trail",
-}
+_TARGET_EXECUTOR_KINDS = {"target_subject", "target_object", "target_state"}
 
 
-def _latest_predicate_coordinator(
-    clause: str,
-    predicate_start: int,
-) -> re.Match[str] | None:
-    boundary = None
-    for match in _PREDICATE_COORDINATOR_PATTERN.finditer(clause[:predicate_start]):
-        boundary = match
-    return boundary
-
-
-def _actor_phrase_from_scope(actor_scope: str) -> str | None:
-    actor_scope = actor_scope.strip()
-    if not actor_scope:
-        return None
-    auxiliary = _ACTOR_AUXILIARY_PATTERN.search(actor_scope)
-    if auxiliary is not None:
-        actor_scope = actor_scope[: auxiliary.start()].strip()
-    tokens = re.findall(r"[a-z][a-z'-]*", actor_scope)
-    candidates = [
-        token
-        for token in tokens
-        if token not in _NON_ACTOR_TOKENS and not token.endswith("ly")
-    ]
-    return " ".join(candidates) or None
-
-
-def _predicate_context(
-    clause: str,
-    predicate_start: int,
-    previous_actor_phrase: str | None,
-    previous_predicate_negated: bool,
-) -> tuple[str | None, bool]:
-    boundary = _latest_predicate_coordinator(clause, predicate_start)
-    if boundary is not None and previous_actor_phrase is None:
-        prefix = clause[: boundary.start()]
-        prefix_has_predicate = _ACTOR_AUXILIARY_PATTERN.search(prefix) is not None or any(
-            re.search(pattern, prefix) for pattern in _SUBJECT_EXECUTION_PATTERNS
-        )
-        if not prefix_has_predicate:
-            boundary = None
-    scope_start = boundary.end() if boundary is not None else 0
-    local_scope = clause[scope_start:predicate_start]
-    local_actor_phrase = _actor_phrase_from_scope(local_scope)
-    if local_actor_phrase is not None:
-        actor_phrase = local_actor_phrase
-    elif previous_actor_phrase is not None:
-        actor_phrase = previous_actor_phrase
-    elif boundary is not None:
-        actor_phrase = _actor_phrase_from_scope(clause[: boundary.start()])
-    else:
-        actor_phrase = None
-
-    locally_negated = _NEGATED_EXECUTION_PATTERN.search(local_scope) is not None
-    if locally_negated or local_actor_phrase is not None or boundary is None:
-        return actor_phrase, locally_negated
-    coordinator = boundary.group(0)
-    inherits_negation = coordinator in {"and", "or"} and previous_actor_phrase is not None
-    return actor_phrase, previous_predicate_negated if inherits_negation else False
-
-
-def _actor_token_matches(token: str, terms: set[str]) -> bool:
-    return token in terms or (token.endswith("s") and token[:-1] in terms)
-
-
-def _actor_member_is_support_only(actor_member: str) -> bool:
-    actor_core = _ACTOR_MODIFIER_BOUNDARY_PATTERN.split(actor_member, maxsplit=1)[0]
-    tokens = re.findall(r"[a-z][a-z'-]*", actor_core)
-    if not tokens:
-        return False
-    head = tokens[-1]
-    if _actor_token_matches(head, _ACTOR_ENTITY_HEAD_TERMS):
-        return False
-    if _actor_token_matches(head, _SUPPORT_ONLY_ACTOR_TERMS):
-        return True
-    return _actor_token_matches(head, _SUPPORT_COMPOUND_HEAD_TERMS) and any(
-        _actor_token_matches(token, _SUPPORT_ONLY_ACTOR_TERMS) for token in tokens[:-1]
-    )
-
-
-def _is_support_only_actor(actor_phrase: str) -> bool:
-    actor_members = [
-        member.strip()
-        for member in re.split(r"\b(?:and|or)\b", actor_phrase)
-        if member.strip()
-    ]
-    return bool(actor_members) and all(
-        _actor_member_is_support_only(member) for member in actor_members
-    )
-
-
-def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
-    motion = (scene.motion or "").strip().casefold()
-    if not motion:
-        return False
-    clauses = [
-        clause.strip()
-        for clause in re.split(r"[.;]|\b(?:while|whereas|as)\b", motion)
-        if clause.strip()
-    ]
-    for clause in clauses:
-        execution_matches = sorted(
-            (
-                match
-                for pattern in _SUBJECT_EXECUTION_PATTERNS
-                for match in re.finditer(pattern, clause)
-            ),
-            key=lambda match: match.start(),
-        )
-        if not execution_matches:
+def _matching_target_execution_evidence(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    moment_id: str | None = None,
+    source_ids: set[str] | None = None,
+) -> list[object]:
+    matches: list[object] = []
+    for evidence in scene.execution_evidence:
+        if _structured_value(evidence, "executor_kind") not in _TARGET_EXECUTOR_KINDS:
             continue
-        previous_actor_phrase: str | None = None
-        previous_predicate_negated = False
-        for match in execution_matches:
-            actor_phrase, predicate_negated = _predicate_context(
-                clause,
-                match.start(),
-                previous_actor_phrase,
-                previous_predicate_negated,
-            )
-            if actor_phrase is not None:
-                previous_actor_phrase = actor_phrase
-            previous_predicate_negated = predicate_negated
-            if (
-                actor_phrase is not None
-                and not _is_support_only_actor(actor_phrase)
-                and not predicate_negated
-            ):
-                return True
-    return False
+        if _structured_value(evidence, "assertion") != "affirmed":
+            continue
+        action_or_state_change = str(
+            _structured_value(evidence, "action_or_state_change", "") or ""
+        ).strip()
+        if not action_or_state_change:
+            continue
+        evidence_moment_ids = {
+            str(value).strip()
+            for value in (_structured_value(evidence, "signature_moment_ids", []) or [])
+            if str(value).strip()
+        }
+        evidence_source_ids = {
+            str(value).strip()
+            for value in (_structured_value(evidence, "source_behavior_beat_ids", []) or [])
+            if str(value).strip()
+        }
+        if moment_id is not None and moment_id not in evidence_moment_ids:
+            continue
+        if source_ids and not source_ids.intersection(evidence_source_ids):
+            continue
+        matches.append(evidence)
+    return matches
+
+
+def _scene_has_target_execution(scene: FrameAnchoredStoryboardScene) -> bool:
+    return bool(_matching_target_execution_evidence(scene))
 
 
 def _scene_text(scene: FrameAnchoredStoryboardScene) -> str:
@@ -614,7 +419,7 @@ def _scene_has_final_hold(scene: FrameAnchoredStoryboardScene) -> bool:
 
 
 def _scene_has_temporary_divergence(scene: FrameAnchoredStoryboardScene) -> bool:
-    if scene.frame_anchor == "transition" and _scene_has_subject_execution(scene):
+    if scene.frame_anchor == "transition" and _scene_has_target_execution(scene):
         return True
     text = _scene_text(scene)
     return any(term in text for term in _DIVERGENCE_TERMS)
@@ -625,8 +430,9 @@ def _scene_links_moment(
     moment_id: str,
     source_ids: set[str],
 ) -> bool:
-    del source_ids
-    return moment_id in scene.signature_moment_ids
+    return moment_id in scene.signature_moment_ids and (
+        not source_ids or bool(source_ids.intersection(scene.source_behavior_beat_ids))
+    )
 
 
 def _phase_window_seconds(
@@ -905,30 +711,48 @@ def validate_final_storyboard_action_coverage(
             for index, scene in enumerate(storyboard.scenes)
             if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
         ]
-        if referenced_required_ids:
-            execution_scenes = [
-                scene
-                for scene in scenes
-                if _scene_has_subject_execution(scene)
-                and referenced_required_ids.intersection(scene.source_behavior_beat_ids)
-            ]
-        else:
-            execution_scenes = [scene for scene in scenes if _scene_has_subject_execution(scene)]
+        execution_matches = [
+            (
+                scene,
+                _matching_target_execution_evidence(
+                    scene,
+                    moment_id=moment.moment_id,
+                    source_ids=referenced_required_ids,
+                ),
+            )
+            for scene in scenes
+            if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
+        ]
+        execution_matches = [
+            (scene, evidence)
+            for scene, evidence in execution_matches
+            if evidence
+        ]
         requires_execution = bool(referenced_required_ids) or moment.transfer_role in {
             "primary_action",
             "interaction",
             "impact",
         }
-        if requires_execution and not execution_scenes:
+        if requires_execution and not execution_matches:
             raise ValueError(f"signature moment {moment.moment_id} lacks subject/state execution")
-        moment_execution_indexes = [storyboard.scenes.index(scene) for scene in execution_scenes]
-        for scene in execution_scenes:
+        moment_execution_indexes = [
+            storyboard.scenes.index(scene) for scene, _ in execution_matches
+        ]
+        for scene, matching_evidence in execution_matches:
             execution_scene_indexes.append(storyboard.scenes.index(scene))
             if moment.temporary_divergence.strip() and not _scene_has_temporary_divergence(scene):
                 continue
-            executed_source_ids.update(
-                referenced_required_ids.intersection(scene.source_behavior_beat_ids)
-            )
+            for evidence in matching_evidence:
+                evidence_source_ids = {
+                    str(value).strip()
+                    for value in (
+                        _structured_value(evidence, "source_behavior_beat_ids", []) or []
+                    )
+                    if str(value).strip()
+                }
+                executed_source_ids.update(
+                    referenced_required_ids.intersection(evidence_source_ids)
+                )
 
         if moment.moment_type in {"camera", "combined"} and not any(
             (scene.camera_instruction or "").strip() for scene in scenes

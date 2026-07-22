@@ -1,4 +1,3 @@
-import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -305,198 +304,38 @@ DirectorOmissionInfeasibilityCategory = Literal[
 ]
 
 
-_OMISSION_CATEGORY_CONTEXT_REQUIREMENTS: dict[
-    str, tuple[tuple[str, ...], ...]
-] = {
-    "target_capability_unavailable": (
-        ("target", "subject", "state", "entity", "object", "asset"),
-    ),
-    "mechanism_unavailable": (
-        ("mechanism", "articulat", "actuator", "component", "movable part"),
-    ),
-    "identity_semantics_conflict": (
-        ("identity", "semantic", "brand", "logo", "text", "meaning"),
-    ),
-    "causal_equivalent_unavailable": (
-        ("equivalent", "alternative", "replacement"),
-        ("causal", "same role", "same effect", "same intensity", "required role"),
-    ),
+DirectorOmissionInfeasibilityBasis = Literal[
+    "target_capability",
+    "mechanism",
+    "identity_semantics",
+    "causal_equivalent",
+]
+DirectorEvidencePolarity = Literal["affirmed", "negated"]
+DirectorEvidenceScope = Literal["global", "action_interval", "endpoint_only"]
+
+_OMISSION_CATEGORY_BASIS: dict[str, str] = {
+    "target_capability_unavailable": "target_capability",
+    "mechanism_unavailable": "mechanism",
+    "identity_semantics_conflict": "identity_semantics",
+    "causal_equivalent_unavailable": "causal_equivalent",
 }
-_OMISSION_FACT_CLAUSE_SPLIT_PATTERN = re.compile(
-    r"[.;!?]|\u2014+|--+|\b(?:and|but|however|although|though|yet)\b"
-)
-_OMISSION_CONTRACTION_REPLACEMENTS = (
-    (re.compile(r"\bisn't\b"), "is not"),
-    (re.compile(r"\baren't\b"), "are not"),
-    (re.compile(r"\bwasn't\b"), "was not"),
-    (re.compile(r"\bweren't\b"), "were not"),
-    (re.compile(r"\bcan't\b"), "cannot"),
-    (re.compile(r"\bcouldn't\b"), "could not"),
-    (re.compile(r"\bwon't\b"), "will not"),
-    (re.compile(r"\bwouldn't\b"), "would not"),
-    (re.compile(r"\bdoesn't\b"), "does not"),
-    (re.compile(r"\bdon't\b"), "do not"),
-    (re.compile(r"\bdidn't\b"), "did not"),
-    (re.compile(r"\bhasn't\b"), "has not"),
-    (re.compile(r"\bhaven't\b"), "have not"),
-    (re.compile(r"\bhadn't\b"), "had not"),
-)
-_OMISSION_NEGATIVE_STATE = (
-    r"unavailable|impossible|absent|infeasible|missing|lacking"
-)
-_OMISSION_REVERSED_NEGATIVE_STATE_PATTERNS = (
-    re.compile(
-        rf"\b(?:not|never|far\s+from|by\s+no\s+means|anything\s+but|"
-        rf"hardly|scarcely)\b(?:\s+[a-z'-]+){{0,3}}\s+"
-        rf"(?:{_OMISSION_NEGATIVE_STATE})\b"
-    ),
-    re.compile(
-        rf"\b(?:cannot|could not|will not|would not)\b"
-        rf"(?:\s+[a-z'-]+){{0,2}}\s+be\s+"
-        rf"(?:{_OMISSION_NEGATIVE_STATE})\b"
-    ),
-    re.compile(
-        rf"\bno\b[^.;!?\u2014]{{0,80}}\b"
-        rf"(?:is|are|was|were|remains?|seems?)\b"
-        rf"[^.;!?\u2014]{{0,40}}\b(?:{_OMISSION_NEGATIVE_STATE})\b"
-    ),
-    re.compile(r"\b(?:do|does|did|has|have|had)\s+not\s+lack(?:s|ed|ing)?\b"),
-)
-_OMISSION_NEGATIVE_STATE_PATTERN = re.compile(
-    rf"\b(?:{_OMISSION_NEGATIVE_STATE})\b"
-)
-_OMISSION_NEGATED_AVAILABILITY_PATTERN = re.compile(
-    r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+available\b"
-)
-_OMISSION_INABILITY_PATTERN = re.compile(
-    r"\b(?:cannot|could not|will not|would not)\b(?:\s+[a-z'-]+){0,2}\s+"
-    r"(?:execute|perform|move|articulate|operate|actuate|transform|change|rotate|"
-    r"interact|support|produce|create|replicate|transfer|fulfill|control)\w*\b"
-)
-_OMISSION_RESOURCE_NOUN = (
-    r"capabilit(?:y|ies)|subjects?|states?|entities|entity|objects?|assets?|mechanisms?|"
-    r"articulations?|actuators?|components?|parts?|equivalents?|alternatives?|replacements?"
-)
-_OMISSION_ABSENCE_PATTERN = re.compile(
-    rf"\b(?:has|have|had|contains?|shows?|provides?|offers?|includes?)\s+no"
-    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b|"
-    rf"\bno(?:\s+[a-z'-]+){{0,4}}\s+(?:{_OMISSION_RESOURCE_NOUN})"
-    rf"(?:\s+[a-z'-]+){{0,4}}\s+(?:exists?|is\s+available|are\s+available)\b|"
-    rf"\bwithout(?:\s+(?:a|an|any|the))?(?:\s+[a-z'-]+){{0,3}}\s+"
-    rf"(?:{_OMISSION_RESOURCE_NOUN})\b|"
-    rf"\black(?:s|ed|ing)?(?:\s+(?:a|an|any|the))?"
-    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b|"
-    rf"\b(?:do|does|did|has|have|had)\s+not\s+have(?:\s+(?:a|an|any|the))?"
-    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b"
-)
-_OMISSION_REVERSED_CONFLICT_PATTERNS = (
-    re.compile(
-        r"\b(?:no|not|never|without|far\s+from|by\s+no\s+means)\b"
-        r"(?:\s+[a-z'-]+){0,4}\s+(?:conflict\w*|incompat\w*)\b"
-    ),
-    re.compile(
-        r"\b(?:conflict\w*|incompatibilit(?:y|ies))\b"
-        r"(?:\s+[a-z'-]+){0,3}\s+(?:absent|missing|nonexistent|resolved)\b"
-    ),
-)
-_OMISSION_IDENTITY_CONFLICT_PATTERN = re.compile(
-    r"\b(?:conflict\w*|incompat\w*|cannot\s+transfer|not\s+permitted|"
-    r"would\s+change)\b"
-)
-_OMISSION_ENDPOINT_TERM = (
-    r"endpoint|final\s+(?:pose|frame|state|composition)|"
-    r"last\s+(?:pose|frame|state|composition)|"
-    r"ending\s+(?:pose|frame|state|composition)|end\s+frame"
-)
-_OMISSION_INFEASIBILITY_TERM = (
-    rf"{_OMISSION_NEGATIVE_STATE}|conflict\w*|incompat\w*"
-)
-_OMISSION_ENDPOINT_SCOPED_PATTERNS = (
-    re.compile(
-        rf"\b(?:{_OMISSION_INFEASIBILITY_TERM})\b"
-        rf"[^.;!?\u2014]{{0,80}}\b(?:only\s+)?"
-        rf"(?:in|at|from|during|on|within|for)\s+(?:the\s+)?"
-        rf"(?:{_OMISSION_ENDPOINT_TERM})\b(?:\s+only\b)?"
-    ),
-    re.compile(
-        rf"\bonly\s+(?:in|at|from|during|on|within|for)\s+(?:the\s+)?"
-        rf"(?:{_OMISSION_ENDPOINT_TERM})\b"
-        rf"[^.;!?\u2014]{{0,80}}\b(?:{_OMISSION_INFEASIBILITY_TERM})\b"
-    ),
-)
 
 
-def _normalize_omission_fact_text(value: str) -> str:
-    normalized = value.strip().casefold().replace("\u2019", "'")
-    for pattern, replacement in _OMISSION_CONTRACTION_REPLACEMENTS:
-        normalized = pattern.sub(replacement, normalized)
-    return re.sub(r"\bnot\s+(?:only|merely)\b", "emphatically", normalized)
+class DirectorOmissionInfeasibilityFact(BaseModel):
+    category: DirectorOmissionInfeasibilityCategory
+    basis: DirectorOmissionInfeasibilityBasis
+    polarity: DirectorEvidencePolarity
+    scope: DirectorEvidenceScope
+    detail: str = Field(min_length=1)
 
-
-def _clause_affirms_infeasibility(clause: str, *, identity_conflict: bool) -> bool:
-    if any(pattern.search(clause) for pattern in _OMISSION_ENDPOINT_SCOPED_PATTERNS):
-        return False
-    if identity_conflict:
-        if any(pattern.search(clause) for pattern in _OMISSION_REVERSED_CONFLICT_PATTERNS):
-            return False
-        return _OMISSION_IDENTITY_CONFLICT_PATTERN.search(clause) is not None
-    if any(
-        pattern.search(clause)
-        for pattern in _OMISSION_REVERSED_NEGATIVE_STATE_PATTERNS
-    ):
-        return False
-    return bool(
-        _OMISSION_NEGATIVE_STATE_PATTERN.search(clause)
-        or _OMISSION_NEGATED_AVAILABILITY_PATTERN.search(clause)
-        or _OMISSION_INABILITY_PATTERN.search(clause)
-        or _OMISSION_ABSENCE_PATTERN.search(clause)
-    )
-
-
-def _has_affirmative_local_infeasibility_fact(
-    normalized: str,
-    category: str,
-    requirements: tuple[tuple[str, ...], ...],
-) -> bool:
-    clauses = [
-        clause.strip()
-        for clause in _OMISSION_FACT_CLAUSE_SPLIT_PATTERN.split(normalized)
-        if clause.strip()
-    ]
-    for clause in clauses:
-        if not all(any(term in clause for term in alternatives) for alternatives in requirements):
-            continue
-        if _clause_affirms_infeasibility(
-            clause,
-            identity_conflict=category == "identity_semantics_conflict",
-        ):
-            return True
-    return False
-
-
-def omission_infeasibility_matches_category(
-    category: DirectorOmissionInfeasibilityCategory | None,
-    reason: str | None,
-    evidence: str | None,
-    *,
-    literal: bool,
-) -> bool:
-    if category is None or category == "endpoint_constraint_only":
-        return False
-    if literal and category == "causal_equivalent_unavailable":
-        return False
-    requirements = _OMISSION_CATEGORY_CONTEXT_REQUIREMENTS.get(category)
-    if requirements is None:
-        return False
-    for value in (reason, evidence):
-        normalized = _normalize_omission_fact_text(value or "")
-        if not normalized or not _has_affirmative_local_infeasibility_fact(
-            normalized,
-            category,
-            requirements,
-        ):
-            return False
-    return True
+    @model_validator(mode="after")
+    def validate_fact(self) -> "DirectorOmissionInfeasibilityFact":
+        expected_basis = _OMISSION_CATEGORY_BASIS.get(self.category)
+        if expected_basis is None or self.basis != expected_basis:
+            raise ValueError("omission infeasibility category and basis must match")
+        if not self.detail.strip():
+            raise ValueError("omission infeasibility detail must not be blank")
+        return self
 
 
 class DirectorActionArcWindow(BaseModel):
@@ -568,6 +407,8 @@ class DirectorSignatureMoment(BaseModel):
     literal_infeasibility_evidence: str | None = None
     equivalent_infeasibility_category: DirectorOmissionInfeasibilityCategory | None = None
     equivalent_infeasibility_evidence: str | None = None
+    literal_infeasibility_fact: DirectorOmissionInfeasibilityFact | None = None
+    equivalent_infeasibility_fact: DirectorOmissionInfeasibilityFact | None = None
 
     @model_validator(mode="after")
     def validate_signature_moment(self) -> "DirectorSignatureMoment":
@@ -596,52 +437,28 @@ class DirectorSignatureMoment(BaseModel):
             if self.moment_type in {"effect", "combined"} and not self.effect_support.strip():
                 raise ValueError("effect and combined signature moments require effect support")
         else:
-            if self.omission_reason is None or not self.omission_reason.strip():
-                raise ValueError("omitted signature moment requires a reason")
-            if (
-                self.equivalent_replacement_failure is None
-                or not self.equivalent_replacement_failure.strip()
-            ):
+            if self.literal_infeasibility_fact is None:
                 raise ValueError(
-                    "omitted signature moment requires equivalent replacement failure"
+                    "omitted signature moment requires structured literal infeasibility fact"
+                )
+            if self.equivalent_infeasibility_fact is None:
+                raise ValueError(
+                    "omitted signature moment requires structured equivalent infeasibility fact"
+                )
+            if self.literal_infeasibility_fact.category not in {
+                "target_capability_unavailable",
+                "mechanism_unavailable",
+                "identity_semantics_conflict",
+            }:
+                raise ValueError(
+                    "literal infeasibility fact must describe a literal target limitation"
                 )
             if (
-                self.literal_infeasibility_category is None
-                or self.literal_infeasibility_evidence is None
-                or not self.literal_infeasibility_evidence.strip()
+                self.equivalent_infeasibility_fact.category
+                != "causal_equivalent_unavailable"
             ):
                 raise ValueError(
-                    "omitted signature moment requires structured literal infeasibility; "
-                    "endpoint mismatch is insufficient"
-                )
-            if (
-                self.equivalent_infeasibility_category is None
-                or self.equivalent_infeasibility_evidence is None
-                or not self.equivalent_infeasibility_evidence.strip()
-            ):
-                raise ValueError(
-                    "omitted signature moment requires structured equivalent infeasibility; "
-                    "endpoint mismatch is insufficient"
-                )
-            if not omission_infeasibility_matches_category(
-                self.literal_infeasibility_category,
-                self.omission_reason,
-                self.literal_infeasibility_evidence,
-                literal=True,
-            ):
-                raise ValueError(
-                    "literal infeasibility category does not match its reason and evidence; "
-                    "endpoint mismatch is insufficient"
-                )
-            if not omission_infeasibility_matches_category(
-                self.equivalent_infeasibility_category,
-                self.equivalent_replacement_failure,
-                self.equivalent_infeasibility_evidence,
-                literal=False,
-            ):
-                raise ValueError(
-                    "equivalent infeasibility category does not match its reason and evidence; "
-                    "endpoint mismatch is insufficient"
+                    "equivalent infeasibility fact must describe causal equivalent unavailability"
                 )
         return self
 
@@ -738,6 +555,35 @@ class StoryboardSoundDesign(BaseModel):
     ambience: str | None = None
 
 
+StoryboardExecutionExecutorKind = Literal[
+    "target_subject",
+    "target_object",
+    "target_state",
+    "camera_support",
+    "effect_support",
+    "environment_support",
+]
+StoryboardExecutionAssertion = Literal["affirmed", "negated", "static"]
+
+
+class StoryboardExecutionEvidence(BaseModel):
+    executor_kind: StoryboardExecutionExecutorKind
+    assertion: StoryboardExecutionAssertion
+    action_or_state_change: str = Field(min_length=1)
+    signature_moment_ids: list[str] = Field(default_factory=list)
+    source_behavior_beat_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_execution_evidence(self) -> "StoryboardExecutionEvidence":
+        if not self.action_or_state_change.strip():
+            raise ValueError("execution evidence action or state change must not be blank")
+        if any(not value.strip() for value in self.signature_moment_ids):
+            raise ValueError("execution evidence signature moment ids must not be blank")
+        if any(not value.strip() for value in self.source_behavior_beat_ids):
+            raise ValueError("execution evidence source behavior beat ids must not be blank")
+        return self
+
+
 class FrameAnchoredStoryboardScene(BaseModel):
     scene_index: int
     # Target scene windows may use sub-second boundaries after adapting a reference
@@ -756,6 +602,7 @@ class FrameAnchoredStoryboardScene(BaseModel):
     cinematic_beats: list[str] = Field(default_factory=list)
     signature_moment_ids: list[str] = Field(default_factory=list)
     source_behavior_beat_ids: list[str] = Field(default_factory=list)
+    execution_evidence: list[StoryboardExecutionEvidence] = Field(default_factory=list)
     camera_instruction: str | None = None
     tension_stage: DirectorTensionStage | None = None
     action_result_requirement: str | None = None
@@ -768,6 +615,22 @@ class FrameAnchoredStoryboardScene(BaseModel):
     # The external contract is the rendered storyboard_text.
     overlay_instruction: DirectorOverlayInstruction | str | None = None
     anti_flattening_requirement: str | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_evidence_consistency(self) -> "FrameAnchoredStoryboardScene":
+        assertions_by_claim: dict[tuple[object, ...], str] = {}
+        for evidence in self.execution_evidence:
+            claim_key = (
+                evidence.executor_kind,
+                evidence.action_or_state_change.strip().casefold(),
+                tuple(sorted(set(evidence.signature_moment_ids))),
+                tuple(sorted(set(evidence.source_behavior_beat_ids))),
+            )
+            previous = assertions_by_claim.get(claim_key)
+            if previous is not None and previous != evidence.assertion:
+                raise ValueError("contradictory execution evidence")
+            assertions_by_claim[claim_key] = evidence.assertion
+        return self
 
 
 class FrameAnchoredStoryboard(BaseModel):

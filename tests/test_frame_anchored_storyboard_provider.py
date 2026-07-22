@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 
 import httpx
@@ -161,6 +161,15 @@ def _action_storyboard_response() -> dict[str, object]:
                 "effect_timing": "Peak after the subject motion reads.",
                 "signature_moment_ids": ["signature_action"],
                 "source_behavior_beat_ids": ["core_behavior"],
+                "execution_evidence": [
+                    {
+                        "executor_kind": "target_subject",
+                        "assertion": "affirmed",
+                        "action_or_state_change": "linked causal action completes visibly",
+                        "signature_moment_ids": ["signature_action"],
+                        "source_behavior_beat_ids": ["core_behavior"],
+                    }
+                ],
                 "subject_motion_intensity": 0.9,
                 "camera_intensity": 0.65,
                 "effect_intensity": 0.8,
@@ -300,30 +309,6 @@ def test_equivalent_replacement_is_valid() -> None:
     )
 
 
-def test_omit_requires_equivalent_replacement_failure() -> None:
-    payload = _director_plan_payload(
-        signature_strategy="omit",
-        assigned_beat_id=None,
-        omission_reason="Literal and adapted execution contradict target facts.",
-    )
-    payload["signature_moment_plan"][0]["equivalent_replacement_failure"] = None
-    with pytest.raises(ValidationError, match="equivalent replacement failure"):
-        FrameAnchoredDirectorPlan.model_validate(payload)
-
-
-def test_endpoint_pose_mismatch_is_not_an_omission_reason() -> None:
-    payload = _director_plan_payload(
-        signature_strategy="omit",
-        assigned_beat_id=None,
-        omission_reason="The action pose differs from the final pose.",
-    )
-    payload["signature_moment_plan"][0]["equivalent_replacement_failure"] = (
-        "The middle framing differs from the final composition."
-    )
-    with pytest.raises(ValidationError, match="endpoint mismatch"):
-        FrameAnchoredDirectorPlan.model_validate(payload)
-
-
 def test_director_plan_rejects_climax_without_causal_evidence() -> None:
     with pytest.raises(ValidationError, match="climax beat requires source evidence"):
         FrameAnchoredDirectorPlan.model_validate(
@@ -355,17 +340,6 @@ def test_director_plan_rejects_signature_assignment_to_non_core_beat() -> None:
     payload = _director_plan_payload(beat_importance="supporting")
 
     with pytest.raises(ValidationError, match="signature moment.*core director beat"):
-        FrameAnchoredDirectorPlan.model_validate(payload)
-
-
-def test_director_plan_requires_reason_when_signature_moment_is_omitted() -> None:
-    payload = _director_plan_payload(
-        signature_strategy="omit",
-        assigned_beat_id=None,
-        omission_reason=None,
-    )
-
-    with pytest.raises(ValidationError, match="omitted signature moment requires a reason"):
         FrameAnchoredDirectorPlan.model_validate(payload)
 
 
@@ -637,25 +611,19 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "preserve or adapt" in system_prompt
     assert "generic endpoint lock" in system_prompt
     assert "omit only when" in system_prompt
-    assert "structured infeasibility category and evidence fields" in system_prompt
+    assert "provide both structured facts" in system_prompt
     for category in (
         "target_capability_unavailable",
         "mechanism_unavailable",
         "identity_semantics_conflict",
         "causal_equivalent_unavailable",
-        "endpoint_constraint_only",
     ):
         assert category in system_prompt
-    assert (
-        "literal_infeasibility_category allows only target_capability_unavailable, "
-        "mechanism_unavailable, or identity_semantics_conflict"
-    ) in system_prompt
-    assert (
-        "equivalent_infeasibility_category allows only target_capability_unavailable, "
-        "mechanism_unavailable, identity_semantics_conflict, or "
-        "causal_equivalent_unavailable"
-    ) in system_prompt
-    assert "endpoint_constraint_only is forbidden for omit" in system_prompt
+    for field in ("category", "basis", "polarity", "scope", "concise detail"):
+        assert field in system_prompt
+    assert "prose reason/evidence fields are explanatory only" in system_prompt
+    assert "scope other than endpoint_only" in system_prompt
+    assert "never infer polarity or scope from prose" in system_prompt
     assert "assigned core beat" in system_prompt
 
 
@@ -1500,6 +1468,10 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "one continuous scene may carry multiple" in system_prompt.lower()
     assert "exact beat_id" in system_prompt
     assert "signature_moment_plan" in system_prompt
+    assert "execution_evidence" in system_prompt
+    assert "target_subject" in system_prompt
+    assert "camera_support" in system_prompt
+    assert "negated or static items never prove execution" in system_prompt.lower()
     assert "preserve or adapt" in system_prompt.lower()
     assert "must be executed" in system_prompt.lower()
     assert "not merely label" in system_prompt.lower()
@@ -2481,3 +2453,100 @@ async def test_mock_payoff_budget_changes_with_effect_readability_evidence() -> 
     assert _phase_seconds(readable_plan, "payoff", 12) != pytest.approx(
         _phase_seconds(subtle_plan, "payoff", 12)
     )
+
+
+
+def test_signature_omit_requires_structured_infeasibility_facts() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="Legacy prose claims literal infeasibility.",
+    )
+    moment = payload["signature_moment_plan"][0]
+    moment["literal_infeasibility_category"] = "mechanism_unavailable"
+    moment["literal_infeasibility_evidence"] = "Legacy prose evidence."
+    moment["equivalent_infeasibility_category"] = "causal_equivalent_unavailable"
+    moment["equivalent_infeasibility_evidence"] = "Legacy prose evidence."
+
+    with pytest.raises(ValidationError, match="structured literal infeasibility fact"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_signature_omit_accepts_affirmed_non_endpoint_structured_facts() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="The system is conflict-free and free of conflict.",
+    )
+    moment = payload["signature_moment_plan"][0]
+    moment.update(
+        {
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": "Legacy prose only.",
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": "Legacy prose only.",
+            "literal_infeasibility_fact": {
+                "category": "identity_semantics_conflict",
+                "basis": "identity_semantics",
+                "polarity": "affirmed",
+                "scope": "global",
+                "detail": "Literal transfer conflicts with target identity semantics.",
+            },
+            "equivalent_infeasibility_fact": {
+                "category": "causal_equivalent_unavailable",
+                "basis": "causal_equivalent",
+                "polarity": "affirmed",
+                "scope": "action_interval",
+                "detail": "No causal equivalent can preserve the required role.",
+            },
+        }
+    )
+
+    plan = FrameAnchoredDirectorPlan.model_validate(payload)
+
+    assert plan.signature_moment_plan[0].strategy == "omit"
+
+
+@pytest.mark.parametrize("assertion", ["negated", "static"])
+def test_scene_rejects_contradictory_execution_evidence(assertion: str) -> None:
+    payload = _action_storyboard_response()["scenes"][1]
+    payload["execution_evidence"].append(
+        {
+            "executor_kind": "target_subject",
+            "assertion": assertion,
+            "action_or_state_change": "linked causal action completes visibly",
+            "signature_moment_ids": ["signature_action"],
+            "source_behavior_beat_ids": ["core_behavior"],
+        }
+    )
+
+    with pytest.raises(ValidationError, match="contradictory execution evidence"):
+        FrameAnchoredStoryboardScene.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_structured_execution_evidence() -> None:
+    response = _action_storyboard_response()
+    response["scenes"][1]["execution_evidence"] = [
+        {
+            "executor_kind": "target_object",
+            "assertion": "affirmed",
+            "action_or_state_change": "object state changes visibly",
+            "signature_moment_ids": ["signature_action", "signature_action"],
+            "source_behavior_beat_ids": ["core_behavior", "core_behavior"],
+        }
+    ]
+    provider, _ = _gateway_provider_with_responses(response)
+    analysis = _analysis().model_copy(
+        update={"director_plan": FrameAnchoredDirectorPlan.model_validate(_director_plan_payload())}
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 12, "9:16"
+    )
+
+    evidence = storyboard.scenes[1].execution_evidence[0]
+    assert evidence.executor_kind == "target_object"
+    assert evidence.assertion == "affirmed"
+    assert evidence.signature_moment_ids == ["signature_action"]
+    assert evidence.source_behavior_beat_ids == ["core_behavior"]

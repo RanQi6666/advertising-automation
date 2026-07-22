@@ -1893,8 +1893,11 @@ def _frame_anchored_director_system_prompt() -> str:
         "strategy, target_adaptation, adapted_action, temporary_divergence, camera_support, "
         "effect_support, visible_payoff, return_strategy, assigned_beat_id, omission_reason, "
         "equivalent_replacement_failure, literal_infeasibility_category, "
-        "literal_infeasibility_evidence, equivalent_infeasibility_category, and "
-        "equivalent_infeasibility_evidence. moment_type must be camera, action, effect, result, "
+        "literal_infeasibility_evidence, equivalent_infeasibility_category, "
+        "equivalent_infeasibility_evidence, literal_infeasibility_fact, and "
+        "equivalent_infeasibility_fact. Each infeasibility fact must be an object with category, "
+        "basis, polarity, scope, and concise detail. moment_type must be camera, action, effect, "
+        "result, "
         "or a "
         "combination represented by combined; strategy must be preserve, adapt, "
         "replace_with_equivalent, or omit. final_anchor_return must be a plain string. "
@@ -1918,18 +1921,18 @@ def _frame_anchored_director_system_prompt() -> str:
         "visibly provided by a target frame or the existing visual identity mapping explicitly "
         "permits it. For each core action or state change, choose preserve, then adapt, then "
         "replace_with_equivalent, and omit only when literal/adapted and equivalent-intensity "
-        "execution are independently infeasible. Use the structured infeasibility category and "
-        "evidence fields. The exact infeasibility enum values are "
-        "target_capability_unavailable, mechanism_unavailable, identity_semantics_conflict, "
-        "causal_equivalent_unavailable, and endpoint_constraint_only. For omit, "
-        "literal_infeasibility_category allows only target_capability_unavailable, "
-        "mechanism_unavailable, or identity_semantics_conflict; "
-        "equivalent_infeasibility_category allows only target_capability_unavailable, "
-        "mechanism_unavailable, identity_semantics_conflict, or "
-        "causal_equivalent_unavailable. Each category must match both its paired reason and "
-        "evidence. endpoint_constraint_only is forbidden for omit in either field. Endpoint pose, "
-        "framing, composition, or scale mismatch alone is invalid. Do not infer categories "
-        "from injectable wording. Generic glow, particles, passive posing, or camera drift cannot "
+        "execution are independently infeasible. For omit, provide both structured facts; prose "
+        "reason/evidence fields are explanatory only and never determine validity. The literal "
+        "fact "
+        "category must be target_capability_unavailable, mechanism_unavailable, or "
+        "identity_semantics_conflict with matching basis target_capability, mechanism, or "
+        "identity_semantics. The equivalent fact category must be "
+        "causal_equivalent_unavailable with basis causal_equivalent. polarity must be affirmed or "
+        "negated, and scope must be global, action_interval, or endpoint_only. A valid omit "
+        "requires "
+        "both facts to use polarity affirmed and a scope other than endpoint_only. Endpoint pose, "
+        "framing, composition, or scale mismatch alone is invalid. Never infer polarity or scope "
+        "from prose. Generic glow, particles, passive posing, or camera drift cannot "
         "replace physical or state-changing action. Plan subject motion, camera motion, and effect "
         "intensity independently. Select action_arc_windows dynamically from target duration, "
         "action complexity, endpoint difference, camera travel, effect readability, and "
@@ -1978,7 +1981,7 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
-        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, "
+        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, execution_evidence, "
         "camera_instruction, tension_stage, action_result_requirement, effect_timing, "
         "subject_motion_intensity, camera_intensity, effect_intensity, "
         "anchor_return_instruction, overlay_instruction, and anti_flattening_requirement. "
@@ -2019,8 +2022,16 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "exact moment_id into signature_moment_ids, execute its action in motion and/or "
         "action_result_requirement, include camera and effect support in matching fields, show the "
         "visible payoff, and state anchor_return_instruction before final lock. Copy relevant "
-        "source behavior IDs into source_behavior_beat_ids. One continuous scene may carry "
-        "multiple "
+        "source behavior IDs into source_behavior_beat_ids. Every scene must return "
+        "execution_evidence as a list of objects with executor_kind, assertion, "
+        "action_or_state_change, signature_moment_ids, and source_behavior_beat_ids. "
+        "executor_kind must be target_subject, target_object, target_state, camera_support, "
+        "effect_support, or environment_support; assertion must be affirmed, negated, or static. "
+        "For each executed non-omitted action/state moment, include an affirmed target_subject, "
+        "target_object, or target_state item with a visible action/state change and the exact "
+        "moment/source IDs. Camera, effect, and environment support items never replace target "
+        "execution. Negated or static items never prove execution. Do not derive these roles or "
+        "assertions from motion prose. One continuous scene may carry multiple "
         "IDs when duration is short. The final last_frame scene must end exactly at "
         "duration_seconds. If director_corrections contains items, use each correction_type "
         "and its exact signature_moment_ids and source_behavior_beat_ids to update only the "
@@ -2702,6 +2713,45 @@ def _normalize_director_action_arc_windows(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+
+def _normalize_director_omission_fact(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "category": _director_first_text(value, "category"),
+        "basis": _director_first_text(value, "basis"),
+        "polarity": _director_first_text(value, "polarity"),
+        "scope": _director_first_text(value, "scope"),
+        "detail": _director_first_text(value, "detail"),
+    }
+
+
+def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "executor_kind": _director_first_text(item, "executor_kind"),
+                "assertion": _director_first_text(item, "assertion"),
+                "action_or_state_change": _director_first_text(
+                    item, "action_or_state_change"
+                ),
+                "signature_moment_ids": list(
+                    dict.fromkeys(_frame_string_list(item.get("signature_moment_ids")))
+                ),
+                "source_behavior_beat_ids": list(
+                    dict.fromkeys(
+                        _frame_string_list(item.get("source_behavior_beat_ids"))
+                    )
+                ),
+            }
+        )
+    return normalized
+
 def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
     fields = (
         "adapted_action",
@@ -2736,6 +2786,12 @@ def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
                 item, "equivalent_infeasibility_category"
             )
             or None,
+            "literal_infeasibility_fact": _normalize_director_omission_fact(
+                item.get("literal_infeasibility_fact")
+            ),
+            "equivalent_infeasibility_fact": _normalize_director_omission_fact(
+                item.get("equivalent_infeasibility_fact")
+            ),
         }
         normalized.update({field: _director_text(item.get(field)) or None for field in fields})
         result.append(normalized)
@@ -2971,6 +3027,9 @@ def _frame_anchored_storyboard_from_data(
                 ),
                 "source_behavior_beat_ids": list(
                     dict.fromkeys(_frame_string_list(scene.get("source_behavior_beat_ids")))
+                ),
+                "execution_evidence": _normalize_storyboard_execution_evidence(
+                    scene.get("execution_evidence")
                 ),
             }
             if isinstance(scene, dict)
