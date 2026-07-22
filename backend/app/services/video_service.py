@@ -29,7 +29,10 @@ from backend.app.services.creative_safety_prompts import (
     creative_safety_prompt_block,
     sanitize_creative_safety_text,
 )
-from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
+from backend.app.services.external_sources import (
+    EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+    EXTERNAL_VIDEO_GENERATION_SOURCE,
+)
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.landing_visual_reference import merge_landing_visual_reference
@@ -648,13 +651,19 @@ class VideoService:
         session: AsyncSession,
         video: VideoAsset,
     ) -> VideoGenerationRequest:
-        if not video.source_asset_ids:
+        is_external_text_to_video = _is_external_text_to_video_generation(video)
+        if not video.source_asset_ids and not is_external_text_to_video:
             raise AppError("Video task has no source images.")
-        assets = await self._load_source_assets(
-            session=session,
-            campaign_id=video.campaign_id,
-            asset_ids=video.source_asset_ids,
-        )
+        if video.source_asset_ids and is_external_text_to_video:
+            raise AppError("External text-to-video tasks must not have source images.")
+
+        assets = []
+        if video.source_asset_ids:
+            assets = await self._load_source_assets(
+                session=session,
+                campaign_id=video.campaign_id,
+                asset_ids=video.source_asset_ids,
+            )
         source_images: list[VideoSourceImage] = []
         missing_url_ids: list[str] = []
         for asset in assets:
@@ -1508,6 +1517,14 @@ def _strategy_from_metadata(metadata: Any) -> dict | None:
 def _is_external_video_generation(video: VideoAsset) -> bool:
     metadata = video.metadata_json or {}
     return metadata.get("source") == EXTERNAL_VIDEO_GENERATION_SOURCE
+
+
+def _is_external_text_to_video_generation(video: VideoAsset) -> bool:
+    metadata = video.metadata_json or {}
+    return (
+        metadata.get("source") == EXTERNAL_VIDEO_GENERATION_SOURCE
+        and metadata.get("generation_mode") == EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    )
 
 
 def _ensure_storyboard_source_asset_notes(text: str, assets: list[CreativeAsset]) -> str:

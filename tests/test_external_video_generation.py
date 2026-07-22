@@ -15,7 +15,11 @@ from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import get_session
 from backend.app.integrations.video import factory as video_factory
-from backend.app.integrations.video.base import VideoGenerationStart, VideoGenerationStatus
+from backend.app.integrations.video.base import (
+    VideoGenerationStart,
+    VideoGenerationStatus,
+    VideoSourceImage,
+)
 from backend.app.integrations.video.volcengine_provider import VolcengineVideoProvider
 from backend.app.main import create_app
 from backend.app.services import external_video_generation_service as external_video_service_module
@@ -577,11 +581,13 @@ async def test_external_video_start_passes_storyboard_text_without_backend_augme
     enqueued: list[tuple[str, str, int]] = []
     captured_prompts: list[str] = []
     captured_metadata: list[dict] = []
+    captured_source_images: list[list[VideoSourceImage]] = []
 
     class CapturingVideoProvider:
         async def start_generation(self, request):
             captured_prompts.append(request.prompt)
             captured_metadata.append(request.metadata)
+            captured_source_images.append(request.source_images)
             return VideoGenerationStart(
                 provider_job_id="provider-passthrough-job",
                 provider_status="queued",
@@ -624,6 +630,7 @@ Continue the exact first-frame action, then resolve into the supplied last frame
             headers=_authorized_headers(),
             json=_video_payload(
                 external_request_id="external-video-passthrough",
+                images=[],
                 storyboard_text=storyboard_text,
             ),
         )
@@ -650,9 +657,80 @@ Continue the exact first-frame action, then resolve into the supplied last frame
         client.close()
 
     assert response.status_code == 202
+    assert captured_source_images == [[]]
     assert captured_prompts == [storyboard_text.strip()]
     assert len(captured_metadata) == 1
     assert "creative_strategy" not in captured_metadata[0]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata_json",
+    [
+        {},
+        {"source": EXTERNAL_SOURCE},
+        {"source": EXTERNAL_SOURCE, "generation_mode": "unknown"},
+        {
+            "source": "internal",
+            "generation_mode": EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+        },
+    ],
+)
+async def test_video_service_rejects_zero_images_without_external_text_double_marker(
+    tmp_path, metadata_json: dict
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "zero-image-gate.db")
+    async with session_factory() as session:
+        campaign = Campaign(name="Zero image gate", metadata_json={})
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            source_asset_ids=[],
+            prompt="Generate directly from text.",
+            storyboard=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+            status=VideoStatus.REQUESTED.value,
+            metadata_json=metadata_json,
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+        with pytest.raises(AppError, match="Video task has no source images"):
+            await VideoService()._build_provider_request(session, video)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_video_service_rejects_text_mode_record_with_source_images(tmp_path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "corrupt-text-mode.db")
+    async with session_factory() as session:
+        campaign = Campaign(name="Corrupt text mode", metadata_json={})
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            source_asset_ids=["unexpected-source-asset"],
+            prompt="Generate directly from text.",
+            storyboard=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+            status=VideoStatus.REQUESTED.value,
+            metadata_json={
+                "source": EXTERNAL_SOURCE,
+                "generation_mode": EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+            },
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+        with pytest.raises(
+            AppError,
+            match="External text-to-video tasks must not have source images",
+        ):
+            await VideoService()._build_provider_request(session, video)
     await engine.dispose()
 
 
