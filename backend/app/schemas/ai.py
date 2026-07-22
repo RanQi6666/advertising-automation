@@ -331,6 +331,7 @@ class DirectorActionCoverageReview(BaseModel):
     status: Literal["pass", "corrective"]
     required_core_behavior_beat_ids: list[str] = Field(default_factory=list)
     covered_core_behavior_beat_ids: list[str] = Field(default_factory=list)
+    validly_omitted_core_behavior_beat_ids: list[str] = Field(default_factory=list)
     uncovered_core_behavior_beat_ids: list[str] = Field(default_factory=list)
     invalid_omission_moment_ids: list[str] = Field(default_factory=list)
     missing_execution_detail_moment_ids: list[str] = Field(default_factory=list)

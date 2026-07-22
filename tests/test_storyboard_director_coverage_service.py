@@ -90,7 +90,7 @@ def _analysis(
                     "transition": {"type": "continuous", "description": "no edit"},
                     "effects": ["supportive effect peak"],
                     "confidence": "high",
-                }
+                },
             ],
             "adapted_constraints": {
                 "subject_presence": {
@@ -119,6 +119,37 @@ def _analysis(
             },
         }
     return FrameAnalysis.model_validate(payload)
+
+
+def _analysis_with_core_beats(
+    *,
+    behavior_types: list[str],
+    minimum_readable_durations: list[float] | None = None,
+) -> FrameAnalysis:
+    analysis = _analysis(behavior_type=behavior_types[0])
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    graph = reference.behavior_graph
+    assert graph is not None
+    durations = minimum_readable_durations or [0.8] * len(behavior_types)
+    beats = [
+        graph.beats[0].model_copy(
+            update={
+                "beat_id": f"core_behavior_{index}",
+                "behavior_type": behavior_type,
+                "minimum_readable_duration_seconds": durations[index - 1],
+                "description": f"Core {behavior_type} behavior {index} changes visible state.",
+            }
+        )
+        for index, behavior_type in enumerate(behavior_types, start=1)
+    ]
+    return analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"behavior_graph": graph.model_copy(update={"beats": beats})}
+            )
+        }
+    )
 
 
 def _plan(*, source_ids: list[str]) -> FrameAnchoredDirectorPlan:
@@ -160,6 +191,17 @@ def _plan(*, source_ids: list[str]) -> FrameAnchoredDirectorPlan:
                 }
             ],
             "action_arc_windows": [
+                {
+                    "window_id": "preparation",
+                    "phase": "preparation",
+                    "start_ratio": 0.0,
+                    "end_ratio": 0.15,
+                    "objective": "Prepare subject/state execution from the opening anchor.",
+                    "subject_motion_intensity": 0.25,
+                    "camera_intensity": 0.15,
+                    "effect_intensity": 0.05,
+                    "depends_on": [],
+                },
                 {
                     "window_id": "action",
                     "phase": "action",
@@ -231,6 +273,8 @@ def _valid_final_inputs() -> tuple[
                     "end_second": 1,
                     "frame_anchor": "first_frame",
                     "visual": "Hold the exact supplied opening anchor.",
+                    "motion": "Prepare the subject for the continuous causal action.",
+                    "transition_goal": "Prepare and depart from the opening anchor in-shot.",
                 },
                 {
                     "scene_index": 2,
@@ -259,6 +303,7 @@ def _valid_final_inputs() -> tuple[
                     "anchor_return_instruction": (
                         "Continuously restore final pose, framing, and camera."
                     ),
+                    "signature_moment_ids": ["signature_action"],
                 },
                 {
                     "scene_index": 4,
@@ -311,9 +356,7 @@ def test_review_marks_unlinked_core_behavior_for_correction() -> None:
 
 
 def test_review_passes_valid_adapted_action() -> None:
-    review = review_director_action_coverage(
-        _analysis(), _plan(source_ids=["core_behavior"])
-    )
+    review = review_director_action_coverage(_analysis(), _plan(source_ids=["core_behavior"]))
     assert review.status == "pass"
     assert review.covered_core_behavior_beat_ids == ["core_behavior"]
     assert review.correction_requirements == []
@@ -386,7 +429,8 @@ def test_low_motion_reference_does_not_invent_core_action() -> None:
 
 def test_final_validation_rejects_missing_signature_id() -> None:
     storyboard, analysis, review = _valid_final_inputs()
-    storyboard.scenes[1].signature_moment_ids = []
+    for scene in storyboard.scenes:
+        scene.signature_moment_ids = []
     with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
     assert str(excinfo.value) == "storyboard is missing required signature moment: signature_action"
@@ -398,9 +442,7 @@ def test_final_validation_rejects_id_without_action_direction() -> None:
     storyboard.scenes[1].action_result_requirement = None
     with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
-    assert str(excinfo.value) == (
-        "signature moment signature_action lacks executable action or result direction"
-    )
+    assert str(excinfo.value) == "signature moment signature_action lacks subject/state execution"
 
 
 def test_final_validation_rejects_missing_camera_support() -> None:
@@ -443,7 +485,7 @@ def test_final_validation_rejects_missing_required_source_behavior_beat() -> Non
     with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
     assert str(excinfo.value) == (
-        "storyboard is missing required source behavior beats: core_behavior"
+        "storyboard is missing executed source behavior beats: core_behavior"
     )
 
 
@@ -452,7 +494,15 @@ def test_final_validation_rejects_missing_return() -> None:
     storyboard.scenes[2].anchor_return_instruction = None
     with pytest.raises(ValueError) as excinfo:
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
-    assert str(excinfo.value) == "storyboard is missing anchor return instruction"
+    assert str(excinfo.value) == "signature moment signature_action lacks linked anchor return"
+
+
+def test_final_validation_rejects_unlinked_return_instruction() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[2].signature_moment_ids = []
+
+    with pytest.raises(ValueError, match="lacks linked anchor return"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 
 def test_final_validation_rejects_wrong_final_end_time() -> None:
@@ -487,4 +537,203 @@ def test_short_duration_may_share_action_payoff_and_return_scene() -> None:
 
 def test_final_validation_accepts_short_storyboard_with_continuous_return() -> None:
     storyboard, analysis, review = _valid_short_final_inputs()
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_static_source_id_with_payoff_only() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].motion = None
+    storyboard.scenes[1].source_behavior_beat_ids = []
+    storyboard.scenes[-1].source_behavior_beat_ids = ["core_behavior"]
+
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_primary_action_with_result_but_no_motion() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].motion = None
+    assert storyboard.scenes[1].action_result_requirement
+
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_camera_effect_only_motion_as_execution() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].motion = "Camera pushes in while particles and light intensify."
+
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_state_only_core_evidence_cannot_be_replaced_by_camera_or_effects() -> None:
+    analysis = _analysis(behavior_type="state")
+    plan = _plan(source_ids=["core_behavior"])
+    plan = plan.model_copy(
+        update={
+            "action_arc_windows": [
+                window.model_copy(
+                    update={
+                        "subject_motion_intensity": 0,
+                        "camera_intensity": 1,
+                        "effect_intensity": 1,
+                    }
+                )
+                if window.phase in {"action", "payoff"}
+                else window
+                for window in plan.action_arc_windows
+            ]
+        }
+    )
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "corrective"
+    assert any("camera or effects alone" in item for item in review.correction_requirements)
+
+    storyboard, _, _ = _valid_final_inputs()
+    storyboard.scenes[1].motion = None
+    storyboard.scenes[1].camera_instruction = "Camera supplies all visible activity."
+    storyboard.scenes[1].effect_timing = "Effects supply all visible activity."
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_source_id_only_in_unlinked_final_lock_scene() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].source_behavior_beat_ids = []
+    storyboard.scenes[-1].source_behavior_beat_ids = ["core_behavior"]
+
+    with pytest.raises(ValueError, match="lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_valid_double_infeasibility_omit_passes_without_scene_source_id() -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": (
+                "Literal and adapted execution are infeasible because the target has no "
+                "controllable subject or state capable of the observed causal behavior."
+            ),
+            "equivalent_replacement_failure": (
+                "No target-compatible equivalent can preserve the causal role because the "
+                "available target evidence contains no controllable replacement state."
+            ),
+        }
+    )
+    plan = base_plan.model_copy(
+        update={
+            "signature_moment_plan": [omitted],
+            "action_arc_windows": [],
+            "final_anchor_return": "",
+        }
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+    assert review.validly_omitted_core_behavior_beat_ids == ["core_behavior"]
+
+    storyboard, _, _ = _valid_final_inputs()
+    storyboard = storyboard.model_copy(
+        update={
+            "scenes": [
+                scene.model_copy(
+                    update={
+                        "signature_moment_ids": [],
+                        "source_behavior_beat_ids": [],
+                        "cinematic_beats": [],
+                        "cinematic_beat": None,
+                    }
+                )
+                for scene in storyboard.scenes
+            ]
+        }
+    )
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_endpoint_mismatch_only_omit_remains_corrective() -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": "The final frame pose does not match the reference pose.",
+            "equivalent_replacement_failure": (
+                "The ending composition and orientation do not match the reference."
+            ),
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "corrective"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda scenes: setattr(scenes[0], "start_second", 0.1), "first scene must start at 0"),
+        (lambda scenes: setattr(scenes[1], "start_second", 1.01), "storyboard timeline has a gap"),
+        (
+            lambda scenes: setattr(scenes[1], "start_second", 0.99),
+            "storyboard timeline has an overlap",
+        ),
+    ],
+)
+def test_final_validation_rejects_non_continuous_timeline(mutation, message: str) -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    mutation(storyboard.scenes)
+
+    with pytest.raises(ValueError, match=message):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_accepts_small_float_rounding_at_scene_boundary() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[0].end_second = 1.0000001
+    storyboard.scenes[1].start_second = 1.0000002
+
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_missing_preparation() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[0].motion = None
+    storyboard.scenes[0].transition_goal = None
+    storyboard.scenes[0].visual = "Hold the exact supplied opening anchor."
+
+    with pytest.raises(ValueError, match="missing preparation evidence"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_one_short_scene_may_share_all_required_action_phases() -> None:
+    storyboard, analysis, review = _valid_short_final_inputs()
+    shared = storyboard.scenes[1]
+    shared.visual = (
+        "Prepare, execute the causal state change, show the payoff, and return toward the end."
+    )
+    shared.transition_goal = "Preparation, execution, payoff, and return remain readable in-shot."
+    shared.anchor_return_instruction = "Return continuously after payoff."
+    storyboard.scenes[-1].visual = "Hold and lock the exact supplied last frame."
+
     validate_final_storyboard_action_coverage(storyboard, analysis, review)

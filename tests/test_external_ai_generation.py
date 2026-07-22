@@ -359,6 +359,83 @@ class FakeExternalAILLM:
                     importance="core",
                 )
             ],
+            action_arc_windows=[
+                {
+                    "window_id": "preparation",
+                    "phase": "preparation",
+                    "start_ratio": 0.0,
+                    "end_ratio": 0.2,
+                    "objective": "Prepare the subject action from the opening anchor.",
+                    "subject_motion_intensity": 0.3,
+                    "camera_intensity": 0.2,
+                    "effect_intensity": 0.1,
+                },
+                {
+                    "window_id": "action",
+                    "phase": "action",
+                    "start_ratio": 0.2,
+                    "end_ratio": 0.55,
+                    "objective": "Execute the evidence-backed subject action.",
+                    "subject_motion_intensity": 0.9,
+                    "camera_intensity": 0.6,
+                    "effect_intensity": 0.4,
+                    "depends_on": ["preparation"],
+                },
+                {
+                    "window_id": "payoff",
+                    "phase": "payoff",
+                    "start_ratio": 0.55,
+                    "end_ratio": 0.72,
+                    "objective": "Reveal the visible result of the action.",
+                    "subject_motion_intensity": 0.5,
+                    "camera_intensity": 0.5,
+                    "effect_intensity": 0.7,
+                    "depends_on": ["action"],
+                },
+                {
+                    "window_id": "return",
+                    "phase": "return",
+                    "start_ratio": 0.72,
+                    "end_ratio": 0.88,
+                    "objective": "Return continuously to the ending anchor.",
+                    "subject_motion_intensity": 0.4,
+                    "camera_intensity": 0.3,
+                    "effect_intensity": 0.2,
+                    "depends_on": ["payoff"],
+                },
+                {
+                    "window_id": "final_lock",
+                    "phase": "final_lock",
+                    "start_ratio": 0.88,
+                    "end_ratio": 1.0,
+                    "objective": "Hold and lock the supplied final anchor.",
+                    "subject_motion_intensity": 0.05,
+                    "camera_intensity": 0.05,
+                    "effect_intensity": 0.0,
+                    "depends_on": ["return"],
+                },
+            ],
+            signature_moment_plan=[
+                {
+                    "moment_id": "signature_action",
+                    "moment_type": "combined",
+                    "source_evidence": [
+                        "The analyzed transition contains a visible causal action."
+                    ],
+                    "source_behavior_beat_ids": ["approach"],
+                    "transfer_role": "primary_action",
+                    "strategy": "adapt",
+                    "target_adaptation": "Adapt the approach to the supplied target frames.",
+                    "adapted_action": "Execute the target-compatible subject approach.",
+                    "temporary_divergence": "Depart temporarily from the opening composition.",
+                    "camera_support": "Use an in-shot push and reframe around execution.",
+                    "effect_support": "Peak effects only after subject motion is readable.",
+                    "visible_payoff": "Show the visible result of the completed approach.",
+                    "return_strategy": "Return continuously to the supplied last frame.",
+                    "assigned_beat_id": "causal_peak",
+                }
+            ],
+            final_anchor_return="Return continuously and settle into the supplied last frame.",
             anchor_adaptation_plan=["Resolve to the supplied last-frame composition."],
             anti_flattening_constraints=[
                 "Keep trigger, action, impact, and ending as distinct readable phases."
@@ -400,9 +477,9 @@ class FakeExternalAILLM:
                     start_second=0,
                     end_second=3,
                     frame_anchor="first_frame",
-                    visual="Hold the supplied opening state.",
-                    motion="Slow push in.",
-                    transition_goal="Start at the supplied first frame.",
+                    visual="Prepare from the supplied opening state.",
+                    motion="Prepare the subject for the continuous causal action.",
+                    transition_goal="Preparation begins at the supplied first frame.",
                     sound_effects=["soft room tone"],
                 ),
                 FrameAnchoredStoryboardScene(
@@ -434,9 +511,9 @@ class FakeExternalAILLM:
                     start_second=9,
                     end_second=12,
                     frame_anchor="last_frame",
-                    visual="Arrive at the supplied ending state.",
-                    motion="Settle into the final composition.",
-                    transition_goal="End at the supplied last frame.",
+                    visual="Arrive, hold, and lock the supplied ending state.",
+                    motion="Settle and stabilize the subject in the final composition.",
+                    transition_goal="End and hold on the supplied last frame.",
                     sound_effects=["music resolve"],
                 ),
             ],
@@ -1036,7 +1113,7 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
         assert task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
             "must_remain_visible_until_final"
         ] is True
-        assert task.metadata_json["director_action_coverage_review"]["status"] == "corrective"
+        assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
     await engine.dispose()
 
 
@@ -1139,7 +1216,7 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_
         ]
         assert CountingReferenceVideoService.prepare_calls == 1
         assert CountingReferenceVideoService.cleanup_calls == 1
-        assert fake_llm.call_details[-1]["director_correction_requirements"]
+        assert fake_llm.call_details[-1]["director_correction_requirements"] == []
 
     await engine.dispose()
 

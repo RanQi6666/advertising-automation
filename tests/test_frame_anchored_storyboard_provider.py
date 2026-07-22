@@ -21,6 +21,10 @@ from backend.app.schemas.ai import (
     ReferenceVideoFrame,
     validate_director_coverage,
 )
+from backend.app.services.storyboard_director_coverage_service import (
+    review_director_action_coverage,
+    validate_final_storyboard_action_coverage,
+)
 
 FIRST_FRAME_URL = "https://cdn.example.test/first.png"
 LAST_FRAME_URL = "https://cdn.example.test/last.png"
@@ -99,9 +103,7 @@ def _director_plan_payload(
                     else ""
                 ),
                 "camera_support": (
-                    "Reframe continuously around execution."
-                    if signature_strategy != "omit"
-                    else ""
+                    "Reframe continuously around execution." if signature_strategy != "omit" else ""
                 ),
                 "effect_support": (
                     "Support the consequence without replacing action."
@@ -694,6 +696,7 @@ async def test_gateway_frame_analysis_sends_first_then_last_image() -> None:
     system_prompt = captured[0]["input"][0]["content"]
     _assert_no_legacy_content(system_prompt)
 
+
 @pytest.mark.asyncio
 async def test_gateway_frame_anchored_operations_use_long_timeout() -> None:
     captured_timeouts: list[dict[str, float | None]] = []
@@ -759,6 +762,7 @@ async def test_gateway_frame_anchored_operations_use_long_timeout() -> None:
         {"connect": 5.0, "read": 180.0, "write": 10.0, "pool": 5.0},
         {"connect": 5.0, "read": 180.0, "write": 10.0, "pool": 5.0},
     ]
+
 
 @pytest.mark.asyncio
 async def test_gateway_joint_analysis_sends_reference_frames_chronologically() -> None:
@@ -978,6 +982,7 @@ async def test_gateway_frame_analysis_emits_reference_identity_mapping_plan() ->
     assert "replace_with_target" in system_prompt
     assert "morph_to_target" in system_prompt
 
+
 @pytest.mark.asyncio
 async def test_gateway_frame_analysis_keeps_behavior_graph_and_final_overlay_mapping() -> None:
     reference_data = _reference_video_analysis_data()
@@ -1130,14 +1135,14 @@ async def test_gateway_frame_analysis_canonicalizes_malformed_reference_behavior
     assert beats[2].depends_on == ["beat_002"]
     assert beats[3].depends_on == ["beat_003"]
     assert all(
-        0 <= beat.reference_start_second < beat.reference_end_second <= 5.8
-        for beat in beats
+        0 <= beat.reference_start_second < beat.reference_end_second <= 5.8 for beat in beats
     )
     assert beats[2].must_remain_visible_until_final is True
     assert beats[2].locked_text == "x200,000"
     system_prompt = captured[0]["input"][0]["content"].lower()
     assert "strictly greater than reference_start_second" in system_prompt
     assert "known beat_id" in system_prompt
+
 
 @pytest.mark.asyncio
 async def test_gateway_frame_analysis_accepts_chronological_segments_alias() -> None:
@@ -1268,8 +1273,9 @@ async def test_gateway_frame_analysis_logs_sanitized_reference_validation_detail
         }
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(
-        ProviderError, match="invalid frame analysis JSON"
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(ProviderError, match="invalid frame analysis JSON"),
     ):
         await provider.analyze_video_frame_pair(
             FIRST_FRAME_URL,
@@ -1322,8 +1328,9 @@ async def test_gateway_storyboard_logs_sanitized_validation_details(
         }
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(
-        ProviderError, match="invalid frame-anchored storyboard JSON"
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(ProviderError, match="invalid frame-anchored storyboard JSON"),
     ):
         await provider.generate_frame_anchored_video_storyboard(
             FIRST_FRAME_URL,
@@ -1438,11 +1445,7 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
         }
     )
     analysis = _analysis().model_copy(
-        update={
-            "director_plan": FrameAnchoredDirectorPlan.model_validate(
-                _director_plan_payload()
-            )
-        }
+        update={"director_plan": FrameAnchoredDirectorPlan.model_validate(_director_plan_payload())}
     )
 
     storyboard = await provider.generate_frame_anchored_video_storyboard(
@@ -1572,7 +1575,9 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
     _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
 
     execution_scene = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
-    assert execution_scene.signature_moment_ids == ["signature_action"]
+    assert execution_scene.signature_moment_ids == [
+        moment.moment_id for moment in director_plan.signature_moment_plan
+    ]
     assert execution_scene.source_behavior_beat_ids == ["core_behavior"]
     assert execution_scene.action_result_requirement is not None
     assert "Corrections:" in execution_scene.action_result_requirement
@@ -1620,6 +1625,136 @@ async def test_mock_storyboard_merges_short_durations_without_core_evidence(
     assert all(not scene.signature_moment_ids for scene in storyboard.scenes)
     assert all(not scene.source_behavior_beat_ids for scene in storyboard.scenes)
     assert all(scene.anchor_return_instruction is None for scene in storyboard.scenes)
+
+
+@pytest.mark.asyncio
+async def test_mock_director_and_storyboard_cover_every_core_behavior() -> None:
+    provider = MockLLMProvider()
+    analysis = _analysis_with_multiple_mock_core_behaviors()
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 8, "9:16"
+    )
+
+    assert [moment.source_behavior_beat_ids for moment in plan.signature_moment_plan] == [
+        ["core_behavior"],
+        ["core_state_change"],
+    ]
+    assert all(
+        moment.strategy in {"preserve", "adapt", "replace_with_equivalent", "omit"}
+        for moment in plan.signature_moment_plan
+    )
+    assert len({moment.assigned_beat_id for moment in plan.signature_moment_plan}) == 2
+
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 8, "9:16"
+    )
+    execution = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    assert set(execution.signature_moment_ids) == {
+        moment.moment_id for moment in plan.signature_moment_plan
+    }
+    assert set(execution.source_behavior_beat_ids) == {
+        "core_behavior",
+        "core_state_change",
+    }
+    assert execution.motion
+    assert execution.action_result_requirement
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+@pytest.mark.asyncio
+async def test_mock_short_storyboard_shares_scene_for_all_core_behaviors() -> None:
+    provider = MockLLMProvider()
+    analysis = _analysis_with_multiple_mock_core_behaviors()
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 2, "9:16"
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 2, "9:16"
+    )
+
+    execution = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    assert set(execution.source_behavior_beat_ids) == {
+        "core_behavior",
+        "core_state_change",
+    }
+    assert len(execution.signature_moment_ids) == 2
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+@pytest.mark.asyncio
+async def test_mock_action_windows_change_with_requested_duration() -> None:
+    provider = MockLLMProvider()
+    analysis = _analysis_with_multiple_mock_core_behaviors()
+
+    short_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 4, "9:16"
+    )
+    long_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 12, "9:16"
+    )
+
+    short_windows = [
+        (window.phase, window.start_ratio, window.end_ratio)
+        for window in short_plan.action_arc_windows
+    ]
+    long_windows = [
+        (window.phase, window.start_ratio, window.end_ratio)
+        for window in long_plan.action_arc_windows
+    ]
+    assert short_windows != long_windows
+    assert (
+        short_plan.action_arc_windows[1].end_ratio
+        - short_plan.action_arc_windows[1].start_ratio
+    ) > (
+        long_plan.action_arc_windows[1].end_ratio
+        - long_plan.action_arc_windows[1].start_ratio
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_action_windows_change_with_evidence_complexity() -> None:
+    provider = MockLLMProvider()
+    simple = _analysis_with_mock_core_behavior()
+    complex_analysis = _analysis_with_multiple_mock_core_behaviors(
+        minimum_readable_durations=(1.2, 2.1)
+    )
+
+    simple_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, simple, 12, "9:16"
+    )
+    complex_plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL, LAST_FRAME_URL, complex_analysis, 12, "9:16"
+    )
+
+    simple_windows = [
+        (window.phase, window.start_ratio, window.end_ratio)
+        for window in simple_plan.action_arc_windows
+    ]
+    complex_windows = [
+        (window.phase, window.start_ratio, window.end_ratio)
+        for window in complex_plan.action_arc_windows
+    ]
+    assert [window.phase for window in simple_plan.action_arc_windows] == [
+        "preparation",
+        "action",
+        "payoff",
+        "return",
+        "final_lock",
+    ]
+    assert simple_windows != complex_windows
+    assert (
+        complex_plan.action_arc_windows[1].end_ratio
+        - complex_plan.action_arc_windows[1].start_ratio
+    ) > (
+        simple_plan.action_arc_windows[1].end_ratio - simple_plan.action_arc_windows[1].start_ratio
+    )
 
 
 @pytest.mark.asyncio
@@ -1893,25 +2028,55 @@ def _analysis_with_mock_core_behavior() -> FrameAnalysis:
     )
 
 
+def _analysis_with_multiple_mock_core_behaviors(
+    *,
+    minimum_readable_durations: tuple[float, float] = (0.5, 1.4),
+) -> FrameAnalysis:
+    analysis = _analysis_with_mock_core_behavior()
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    graph = reference.behavior_graph
+    assert graph is not None
+    first = graph.beats[0].model_copy(
+        update={"minimum_readable_duration_seconds": minimum_readable_durations[0]}
+    )
+    second = graph.beats[0].model_copy(
+        update={
+            "beat_id": "core_state_change",
+            "reference_start_second": 2.6,
+            "reference_end_second": 4.8,
+            "description": "The visible target state stabilizes after the causal action.",
+            "visible_evidence": ["state transition", "stable visible payoff"],
+            "behavior_type": "state",
+            "minimum_readable_duration_seconds": minimum_readable_durations[1],
+            "depends_on": ["core_behavior"],
+        }
+    )
+    return analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={"behavior_graph": graph.model_copy(update={"beats": [first, second]})}
+            )
+        }
+    )
+
+
 def _assert_mock_scene_timing(
     storyboard: FrameAnchoredStoryboard,
     duration_seconds: int,
     expected_windows: list[tuple[str, float, float]],
 ) -> None:
-    actual_windows = [
-        (scene.frame_anchor, scene.start_second, scene.end_second)
-        for scene in storyboard.scenes
+    assert [scene.frame_anchor for scene in storyboard.scenes] == [
+        anchor for anchor, _start, _end in expected_windows
     ]
-    assert actual_windows == expected_windows
+    assert storyboard.scenes[0].start_second == 0
     assert storyboard.scenes[-1].end_second == duration_seconds
     for scene in storyboard.scenes:
         assert scene.start_second is not None
         assert scene.end_second is not None
         assert scene.end_second > scene.start_second
-    for previous_scene, scene in zip(
-        storyboard.scenes, storyboard.scenes[1:], strict=False
-    ):
-        assert previous_scene.end_second <= scene.start_second
+    for previous_scene, scene in zip(storyboard.scenes, storyboard.scenes[1:], strict=False):
+        assert previous_scene.end_second == pytest.approx(scene.start_second, abs=1e-6)
 
 
 def _reference_video_analysis_data() -> dict[str, object]:
