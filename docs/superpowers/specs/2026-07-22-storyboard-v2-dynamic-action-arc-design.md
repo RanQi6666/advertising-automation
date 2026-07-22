@@ -1,8 +1,8 @@
-﻿# Storyboard V2 Dynamic Action Arc Design
+# Storyboard V2 Dynamic Action Arc Design
 
 ## Status
 
-Draft for user review. This document refines the implemented Storyboard V2 3A director pipeline. It does not authorize business-code implementation until the user approves this specification.
+Approved by the user on July 22, 2026. This document refines the implemented Storyboard V2 3A director pipeline and authorizes implementation under the constraints below.
 
 ## Problem Statement
 
@@ -221,7 +221,7 @@ Extend `FrameAnchoredStoryboardScene` with private validation fields:
   - anchor_return_instruction: optional string
 ```
 
-These IDs and numeric intensity fields support deterministic checks. They do not need to be rendered verbatim into public `storyboard_text`. The formatter must instead render clear natural-language action, camera, effect, payoff, and return directions. It may render a concise qualitative or numeric intensity line if doing so improves downstream video-model execution, but must not expose internal evidence IDs as user-facing prose.
+The signature and source-behavior IDs plus numeric intensity fields support deterministic checks. `source_behavior_beat_ids` also lets Call 3 prove execution of a core behavior beat when the local review found that Call 2 did not create a usable signature-moment link. They do not need to be rendered verbatim into public `storyboard_text`. The formatter must instead render clear natural-language action, camera, effect, payoff, and return directions. It may render a concise qualitative or numeric intensity line if doing so improves downstream video-model execution, but must not expose internal evidence IDs as user-facing prose.
 
 ## Director Prompt Requirements
 
