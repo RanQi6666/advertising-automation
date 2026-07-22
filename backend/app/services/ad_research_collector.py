@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Protocol
@@ -47,6 +48,8 @@ def normalize_collector_ad(event: dict) -> dict:
 class MetaAdsBridgeAdapter:
     """Internal-only JSON-lines client for the pinned meta-ads-scraper bridge."""
 
+    _REMOTE_PROTOCOL_ATTEMPTS = 2
+
     def __init__(
         self, base_url: str | None = None, client: httpx.AsyncClient | None = None
     ) -> None:
@@ -62,44 +65,57 @@ class MetaAdsBridgeAdapter:
             raise CollectorUnavailable("ad research collector bridge is not configured")
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient()
-        ads: list[CollectorAd] = []
         try:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/collect",
-                json={
-                    "request_id": request_id,
-                    "query": query,
-                    "country": country,
-                    "limit": min(max(int(limit), 1), 50),
-                    "active_only": True,
-                    "video_only": True,
-                },
-                timeout=httpx.Timeout(self.timeout_seconds),
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise CollectorUnavailable("collector returned malformed event") from exc
-                    if event.get("type") == "error":
-                        raise CollectorUnavailable(str(event.get("message") or "collector failed"))
-                    if event.get("type") != "ad" or not isinstance(event.get("ad"), dict):
-                        continue
-                    normalized = normalize_collector_ad(event["ad"])
-                    if normalized["ad_library_id"]:
-                        ads.append(CollectorAd.model_validate(normalized))
-        except httpx.HTTPError as exc:
-            raise CollectorUnavailable(
-                f"collector bridge unavailable: {exc.__class__.__name__}"
-            ) from exc
+            for attempt in range(self._REMOTE_PROTOCOL_ATTEMPTS):
+                ads: list[CollectorAd] = []
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/collect",
+                        json={
+                            "request_id": request_id,
+                            "query": query,
+                            "country": country,
+                            "limit": min(max(int(limit), 1), 50),
+                            "active_only": True,
+                            "video_only": True,
+                        },
+                        timeout=httpx.Timeout(self.timeout_seconds),
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError as exc:
+                                raise CollectorUnavailable(
+                                    "collector returned malformed event"
+                                ) from exc
+                            if event.get("type") == "error":
+                                raise CollectorUnavailable(
+                                    str(event.get("message") or "collector failed")
+                                )
+                            if event.get("type") != "ad" or not isinstance(event.get("ad"), dict):
+                                continue
+                            normalized = normalize_collector_ad(event["ad"])
+                            if normalized["ad_library_id"]:
+                                ads.append(CollectorAd.model_validate(normalized))
+                    return ads
+                except httpx.RemoteProtocolError as exc:
+                    if attempt + 1 >= self._REMOTE_PROTOCOL_ATTEMPTS:
+                        raise CollectorUnavailable(
+                            f"collector bridge unavailable: {exc.__class__.__name__}"
+                        ) from exc
+                    await asyncio.sleep(0.25 * (attempt + 1))
+                except httpx.HTTPError as exc:
+                    raise CollectorUnavailable(
+                        f"collector bridge unavailable: {exc.__class__.__name__}"
+                    ) from exc
         finally:
             if owns_client:
                 await client.aclose()
-        return ads
+        raise AssertionError("unreachable")
 
 
 async def iter_collector_ads(

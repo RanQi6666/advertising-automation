@@ -40,6 +40,7 @@ RUN for attempt in 1 2 3; do \
 
 COPY collector/meta_ads_bridge/package.json collector/meta_ads_bridge/package.json
 COPY collector/meta_ads_bridge/contracts.ts collector/meta_ads_bridge/contracts.ts
+COPY collector/meta_ads_bridge/selection.ts collector/meta_ads_bridge/selection.ts
 COPY collector/meta_ads_bridge/server.ts collector/meta_ads_bridge/server.ts
 RUN npm install --no-save --no-package-lock --prefix collector/meta_ads_bridge
 
