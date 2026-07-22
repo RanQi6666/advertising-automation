@@ -3,19 +3,276 @@ import logging
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.llm.responses_provider import GatewayResponsesLLMProvider
 from backend.app.schemas.ai import (
+    DirectorBeat,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
+    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
     FrameTransitionBrief,
     FrameVisualFacts,
     ReferenceVideoFrame,
+    validate_director_coverage,
 )
 
 FIRST_FRAME_URL = "https://cdn.example.test/first.png"
 LAST_FRAME_URL = "https://cdn.example.test/last.png"
+
+
+def test_director_plan_rejects_climax_without_causal_evidence() -> None:
+    with pytest.raises(ValidationError, match="climax beat requires source evidence"):
+        FrameAnchoredDirectorPlan.model_validate(
+            {
+                "narrative_objective": "Build to a decisive result.",
+                "attention_path": ["subject", "result"],
+                "tension_curve": ["setup", "climax", "resolution"],
+                "climax_beats": [
+                    {
+                        "beat_id": "impact",
+                        "stage": "climax",
+                        "source_evidence": [],
+                    }
+                ],
+                "anchor_adaptation_plan": ["End in the supplied last frame."],
+                "anti_flattening_constraints": ["Do not merge impact and result."],
+            }
+        )
+
+
+def test_director_coverage_requires_frame_anchored_storyboard_to_represent_climax() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Build to a decisive result.",
+        attention_path=["subject", "impact", "result"],
+        tension_curve=["setup", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="impact",
+                stage="climax",
+                source_evidence=["The reference motion culminates in an observable impact."],
+                importance="core",
+            )
+        ],
+        anchor_adaptation_plan=["End in the supplied last frame."],
+        anti_flattening_constraints=["Do not merge impact and result."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=12,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                frame_anchor="first_frame",
+                visual="Open in the supplied first-frame composition.",
+                cinematic_beat="setup",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                frame_anchor="last_frame",
+                visual="Resolve in the supplied last-frame composition.",
+                cinematic_beat="resolution",
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="required director beat: impact"):
+        validate_director_coverage(storyboard, director_plan)
+
+
+def test_director_coverage_assigns_a_missing_core_beat_to_its_timeline_scene() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Escalate to an evidence-backed visible impact.",
+        attention_path=["subject", "impact", "result"],
+        tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="impact_reveal",
+                stage="climax",
+                source_evidence=["The supplied frames establish an activation and result."],
+                start_ratio=0.35,
+                end_ratio=0.75,
+                importance="core",
+            )
+        ],
+        anchor_adaptation_plan=["Resolve in the supplied last frame."],
+        anti_flattening_constraints=["Keep the causal impact readable."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=3,
+                frame_anchor="first_frame",
+                visual="Open on the supplied first-frame composition.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=3,
+                end_second=8,
+                frame_anchor="transition",
+                visual="Show the adapted causal action and visible impact.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=3,
+                start_second=8,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last-frame composition.",
+            ),
+        ],
+    )
+
+    validate_director_coverage(storyboard, director_plan)
+
+    assert storyboard.scenes[1].cinematic_beat == "impact_reveal"
+
+
+def test_director_coverage_allows_one_timed_scene_to_carry_multiple_core_beats() -> None:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Compress a causal climax into the available target duration.",
+        attention_path=["cause", "action", "impact", "visible result"],
+        tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="cause",
+                stage="climax",
+                source_evidence=["A visible trigger begins the reference climax."],
+                start_ratio=0.25,
+                end_ratio=0.4,
+                importance="core",
+            ),
+            DirectorBeat(
+                beat_id="action",
+                stage="climax",
+                source_evidence=["The subject performs a readable action."],
+                start_ratio=0.38,
+                end_ratio=0.58,
+                importance="core",
+                depends_on=["cause"],
+            ),
+            DirectorBeat(
+                beat_id="impact",
+                stage="climax",
+                source_evidence=["The action creates a visible impact."],
+                start_ratio=0.55,
+                end_ratio=0.72,
+                importance="core",
+                depends_on=["action"],
+            ),
+            DirectorBeat(
+                beat_id="visible_result",
+                stage="climax",
+                source_evidence=["The supplied ending establishes a readable result."],
+                start_ratio=0.7,
+                end_ratio=0.92,
+                importance="core",
+                depends_on=["impact"],
+            ),
+        ],
+        anchor_adaptation_plan=["Resolve in the supplied last frame."],
+        anti_flattening_constraints=["Keep cause and visible result readable."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=2,
+                frame_anchor="first_frame",
+                visual="Open on the supplied first-frame composition.",
+                cinematic_beat="legacy_setup_label",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=2,
+                end_second=8,
+                frame_anchor="transition",
+                visual="Perform the causal action and show its impact in one continuous shot.",
+                cinematic_beat="legacy_climax_label",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=3,
+                start_second=8,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last-frame result.",
+                cinematic_beat="legacy_resolution_label",
+            ),
+        ],
+    )
+
+    validate_director_coverage(storyboard, director_plan)
+
+    covered = {beat_id for scene in storyboard.scenes for beat_id in scene.cinematic_beats}
+    assert covered == {"cause", "action", "impact", "visible_result"}
+    assert any(len(scene.cinematic_beats) > 1 for scene in storyboard.scenes)
+    assert storyboard.scenes[1].cinematic_beat == "legacy_climax_label"
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() -> None:
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "narrative_objective": "Escalate observed action into a decisive visible result.",
+            "attention_path": ["opening subject", "causal action", "visible result"],
+            "tension_curve": ["setup", "trigger", "escalation", "climax", "resolution"],
+            "climax_beats": [
+                {
+                    "beat_id": "decisive_result",
+                    "stage": "climax",
+                    "source_evidence": [
+                        "The reference shows a causal action followed by a result."
+                    ],
+                    "start_ratio": 0.45,
+                    "end_ratio": 0.72,
+                    "attention_objective": "Hold attention on the result of the action.",
+                    "camera_instruction": "Use an in-shot viewpoint change to sharpen the impact.",
+                    "action_requirement": "Show the action before its visible result.",
+                    "effect_requirement": "Peak the observed effect at the causal result.",
+                    "importance": "core",
+                }
+            ],
+            "overlay_lifecycle_plan": [],
+            "anchor_adaptation_plan": ["Resolve to the exact supplied last-frame composition."],
+            "anti_flattening_constraints": [
+                "Do not collapse trigger, action, impact, and resolution into one flat move."
+            ],
+        }
+    )
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert plan.climax_beats[0].beat_id == "decisive_result"
+    content = captured[0]["input"][1]["content"]
+    assert content[1] == {"type": "input_image", "image_url": FIRST_FRAME_URL}
+    assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
+    assert '"frame_analysis"' in content[0]["text"]
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "observed evidence" in system_prompt
+    assert "director inference" in system_prompt
+    assert "post-production" in system_prompt
+    assert "identity" in system_prompt
+    assert "attention_path must be a list of plain strings" in system_prompt
+    assert "anchor_adaptation_plan must be a list of plain strings" in system_prompt
+    assert "executable final core beat set" in system_prompt
+    assert "merge adjacent causal roles" in system_prompt
+    assert "minimum readable time" in system_prompt
+    assert "does not need its own beat" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -409,8 +666,98 @@ async def test_gateway_frame_analysis_keeps_behavior_graph_and_final_overlay_map
     assert reference.behavior_graph is not None
     assert reference.behavior_graph.beats[1].must_remain_visible_until_final is True
     assert reference.behavior_graph.beats[1].locked_text == "x200,000"
-    assert reference.behavior_graph.beats[1].depends_on == ["approach"]
+    assert reference.behavior_graph.beats[1].depends_on == ["beat_001"]
 
+
+@pytest.mark.asyncio
+async def test_gateway_frame_analysis_canonicalizes_malformed_reference_behavior_timeline() -> None:
+    reference_data = _reference_video_analysis_data()
+    reference_data["behavior_graph"] = {
+        "entities": ["performer", "target", "reward"],
+        "beats": [
+            {
+                "beat_id": "intro",
+                "reference_start_second": 0,
+                "reference_end_second": 2,
+                "description": "The performer enters the frame.",
+                "visible_evidence": ["performer"],
+                "importance": "core",
+            },
+            {
+                "beat_id": "impact",
+                "reference_start_second": 2,
+                "reference_end_second": 2,
+                "description": "The central action reaches its impact.",
+                "visible_evidence": ["target reaction"],
+                "depends_on": ["intro"],
+                "importance": "core",
+            },
+            {
+                "beat_id": "",
+                "reference_start_second": "final moment",
+                "reference_end_second": "final moment",
+                "description": "The reward overlay becomes readable.",
+                "visible_evidence": ["reward"],
+                "behavior_type": "overlay",
+                "depends_on": ["missing", "impact"],
+                "must_remain_visible_until_final": True,
+                "locked_text": "x200,000",
+            },
+            {
+                "beat_id": "final",
+                "reference_start_second": 9,
+                "reference_end_second": 9,
+                "description": "The final composition settles.",
+                "visible_evidence": ["final composition"],
+                "depends_on": ["missing"],
+            },
+        ],
+    }
+    provider, captured = _gateway_provider_with_responses(
+        {
+            "first_frame": _visual_facts("opening state"),
+            "last_frame": _visual_facts("ending state"),
+            "transition_brief": {},
+            "language_analysis": {},
+            "reference_video_analysis": reference_data,
+        }
+    )
+
+    analysis = await provider.analyze_video_frame_pair(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        6,
+        "9:16",
+        reference_frames=[
+            ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA")
+        ],
+        reference_video_duration_seconds=5.8,
+        reference_video_sample_interval_seconds=2,
+    )
+
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    assert reference.behavior_graph is not None
+    beats = reference.behavior_graph.beats
+    assert [beat.beat_id for beat in beats] == [
+        "beat_001",
+        "beat_002",
+        "beat_003",
+        "beat_004",
+    ]
+    assert beats[0].depends_on == []
+    assert beats[1].depends_on == ["beat_001"]
+    assert beats[2].depends_on == ["beat_002"]
+    assert beats[3].depends_on == ["beat_003"]
+    assert all(
+        0 <= beat.reference_start_second < beat.reference_end_second <= 5.8
+        for beat in beats
+    )
+    assert beats[2].must_remain_visible_until_final is True
+    assert beats[2].locked_text == "x200,000"
+    system_prompt = captured[0]["input"][0]["content"].lower()
+    assert "strictly greater than reference_start_second" in system_prompt
+    assert "known beat_id" in system_prompt
 
 @pytest.mark.asyncio
 async def test_gateway_frame_analysis_accepts_chronological_segments_alias() -> None:
@@ -737,9 +1084,137 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "subtitle" in system_prompt
     assert "voiceover" in system_prompt
     assert "sound_effects" in system_prompt
+    assert "cinematic_beat" in system_prompt
+    assert "cinematic_beats" in system_prompt
+    assert "one continuous scene may carry multiple" in system_prompt.lower()
+    assert "exact beat_id" in system_prompt
+    assert "overlay_instruction must be null or an object" in system_prompt
     assert (
         "Do not alter or translate text that is visibly supplied by either target image"
         in system_prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_normalizes_string_sound_effects() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open from the supplied first-frame base layer.",
+                    "sound_effects": "soft cinematic rise",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 6,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "sound_effects": "golden impact burst",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].sound_effects == ["soft cinematic rise"]
+    assert storyboard.scenes[1].sound_effects == ["golden impact burst"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_normalizes_multiple_cinematic_beat_ids() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 8,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open and carry the continuous causal action.",
+                    "cinematic_beat": "legacy_single_id",
+                    "cinematic_beats": ["cause", " action ", "cause", ""],
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 8,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "cinematic_beats": "visible_result",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].cinematic_beat == "legacy_single_id"
+    assert storyboard.scenes[0].cinematic_beats == ["cause", "action"]
+    assert storyboard.scenes[1].cinematic_beats == ["visible_result"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_preserves_freeform_overlay_instruction() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open from the supplied first-frame base layer.",
+                    "overlay_instruction": "Introduce the observed interface after activation.",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 6,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "overlay_instruction": "Keep the selected overlay readable through the ending.",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].overlay_instruction == (
+        "Introduce the observed interface after activation."
+    )
+    assert storyboard.scenes[1].overlay_instruction == (
+        "Keep the selected overlay readable through the ending."
     )
 
 
@@ -936,3 +1411,93 @@ def _assert_no_legacy_content(system_prompt: str) -> None:
         "3a",
     ):
         assert forbidden not in lowered
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_normalizes_semantically_valid_object_shapes() -> None:
+    """Accept the alternate object-shaped director plan observed in the deployed worker log."""
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "narrative_objective": "Build from the supplied opening anchor to a decisive ending.",
+            "attention_path": [
+                {
+                    "time_ratio": 0.0,
+                    "focus": "opening subject and composition",
+                    "method": "establish the available target identity",
+                },
+                {
+                    "time_ratio": 0.62,
+                    "focus": "visible consequence of the central action",
+                    "method": "tighten the in-shot viewpoint and peak the effect",
+                },
+            ],
+            "tension_curve": [
+                {"phase": "setup", "start_ratio": 0.0, "end_ratio": 0.18},
+                {"phase": "trigger", "start_ratio": 0.18, "end_ratio": 0.36},
+                {"phase": "escalation", "start_ratio": 0.36, "end_ratio": 0.62},
+                {"phase": "climax", "start_ratio": 0.62, "end_ratio": 0.82},
+                {"phase": "resolution", "start_ratio": 0.82, "end_ratio": 1.0},
+            ],
+            "climax_beats": [
+                {
+                    "beat_id": "visible_impact",
+                    "start_ratio": 0.62,
+                    "end_ratio": 0.82,
+                    "source_evidence": {
+                        "observed_action": "The reference analysis records a causal action.",
+                        "observed_result": "The action produces a visible result.",
+                    },
+                    "attention_objective": "Hold attention on the visible result.",
+                    "camera_instruction": "Use an in-shot push-in at the impact.",
+                    "action_requirement": "Show action before its visible consequence.",
+                    "effect_requirement": "Peak the available effect at the consequence.",
+                    "importance": "primary",
+                    "dependencies": [],
+                }
+            ],
+            "overlay_lifecycle_plan": [
+                {
+                    "element": "observed interface layer",
+                    "observed_in": "reference ending",
+                    "observed_final_requirement": "remain readable at the ending",
+                    "decision": "persist through target ending",
+                    "lifecycle": "appear after impact and remain through the ending",
+                    "constraints": ["keep it readable without hiding target content"],
+                }
+            ],
+            "anchor_adaptation_plan": {
+                "opening_anchor": {"instruction": "Start from the supplied first frame."},
+                "transition_strategy": {"instruction": "Carry causal progression in-shot."},
+                "ending_anchor": {"instruction": "Resolve to the supplied last frame."},
+            },
+            "anti_flattening_constraints": [
+                {
+                    "constraint": "Keep cause, action, impact, and result distinct.",
+                    "application": "Peak the effect only at impact.",
+                }
+            ],
+        }
+    )
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert plan.attention_path[0].startswith("At 0%")
+    assert plan.tension_curve == ["setup", "trigger", "escalation", "climax", "resolution"]
+    assert plan.climax_beats[0].stage == "climax"
+    assert plan.climax_beats[0].importance == "core"
+    assert plan.climax_beats[0].source_evidence == [
+        "observed_action: The reference analysis records a causal action.",
+        "observed_result: The action produces a visible result.",
+    ]
+    assert plan.overlay_lifecycle_plan[0].strategy == "persist_to_final"
+    assert "opening_anchor" in plan.anchor_adaptation_plan[0]
+    assert plan.anti_flattening_constraints == [
+        "Keep cause, action, impact, and result distinct. "
+        "Application: Peak the effect only at impact."
+    ]

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,17 +213,43 @@ class StoryboardReferenceVideoService:
                 )
 
             interval = self.settings.storyboard_reference_video_sample_interval_seconds
+            change_timestamps: list[float] = []
+            if self.settings.storyboard_reference_video_adaptive_sampling_enabled:
+                try:
+                    change_timestamps = await _detect_reference_video_change_timestamps(
+                        source_path,
+                        threshold=(
+                            self.settings.storyboard_reference_video_scene_change_threshold
+                        ),
+                        max_candidates=(
+                            self.settings.storyboard_reference_video_scene_change_max_candidates
+                        ),
+                        timeout_seconds=(
+                            self.settings.storyboard_reference_video_ffmpeg_timeout_seconds
+                        ),
+                    )
+                except ProviderError:
+                    # Change detection enriches evidence only. The proven baseline sampler
+                    # must remain available when FFmpeg or the source cannot expose scene scores.
+                    change_timestamps = []
+            selected_timestamps = _adaptive_reference_frame_timestamps(
+                duration_seconds=duration_seconds,
+                interval_seconds=interval,
+                change_timestamps=change_timestamps,
+                max_frame_count=(
+                    self.settings.storyboard_reference_video_adaptive_max_frames
+                ),
+            )
             frames: list[ReferenceVideoFrame] = []
-            timestamps = _reference_frame_timestamps(duration_seconds, interval)
-            for index, timestamp_seconds in enumerate(timestamps):
+            for index, (timestamp_seconds, selection_reason) in enumerate(selected_timestamps):
                 destination = working_dir / f"reference_frame_{index:03d}.jpg"
                 extracted = await _extract_reference_video_frame(
                     source_path,
                     destination,
                     timestamp_seconds,
                     is_final=(
-                        index == len(timestamps) - 1
-                        and timestamp_seconds == duration_seconds
+                        selection_reason == "ending"
+                        and timestamp_seconds == round(duration_seconds, 6)
                     ),
                     width=self.settings.storyboard_reference_video_frame_width,
                     jpeg_quality=self.settings.storyboard_reference_video_jpeg_quality,
@@ -233,6 +261,7 @@ class StoryboardReferenceVideoService:
                     ReferenceVideoFrame(
                         timestamp_seconds=timestamp_seconds,
                         image_url=_jpeg_data_url(extracted),
+                        selection_reason=selection_reason,
                     )
                 )
 
@@ -308,6 +337,119 @@ def _reference_frame_timestamps(duration_seconds: float, interval_seconds: float
     if timestamps[-1] != final_timestamp:
         timestamps.append(final_timestamp)
     return timestamps
+
+
+def _adaptive_reference_frame_timestamps(
+    *,
+    duration_seconds: float,
+    interval_seconds: float,
+    change_timestamps: list[float],
+    max_frame_count: int,
+) -> list[tuple[float, str]]:
+    """Merge baseline coverage with bounded, evidence-rich scene-change samples."""
+    if max_frame_count < 2:
+        raise AppError("Adaptive reference video sampling requires at least two frames.")
+
+    duration = round(float(duration_seconds), 6)
+    interval = float(interval_seconds)
+    baseline = _reference_frame_timestamps(duration, interval)
+    candidates: list[tuple[float, str]] = [
+        (
+            timestamp,
+            "opening"
+            if index == 0
+            else "ending"
+            if index == len(baseline) - 1
+            else "baseline",
+        )
+        for index, timestamp in enumerate(baseline)
+    ]
+    change_merge_tolerance = max(0.01, min(0.1, interval / 10))
+    accepted_changes: list[float] = []
+
+    for timestamp in sorted(change_timestamps):
+        try:
+            normalized = round(float(timestamp), 6)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(normalized) or normalized <= 0 or normalized >= duration:
+            continue
+        if any(
+            abs(normalized - existing) <= change_merge_tolerance
+            for existing in accepted_changes
+        ):
+            continue
+        accepted_changes.append(normalized)
+        candidates.append((normalized, "high_change"))
+
+    candidates.sort(key=lambda item: item[0])
+    if len(candidates) <= max_frame_count:
+        return candidates
+
+    anchors = [item for item in candidates if item[1] in {"opening", "ending"}]
+    high_change = [item for item in candidates if item[1] == "high_change"]
+    baseline_middle = [item for item in candidates if item[1] == "baseline"]
+    retained: list[tuple[float, str]] = [*anchors]
+    for pool in (high_change, baseline_middle):
+        for item in pool:
+            if len(retained) >= max_frame_count:
+                break
+            retained.append(item)
+        if len(retained) >= max_frame_count:
+            break
+    return sorted(retained, key=lambda item: item[0])
+
+
+async def _detect_reference_video_change_timestamps(
+    source: Path,
+    *,
+    threshold: float,
+    max_candidates: int,
+    timeout_seconds: float,
+) -> list[float]:
+    """Return FFmpeg scene-change timestamps without making them a task dependency."""
+    if max_candidates <= 0:
+        return []
+    if shutil.which("ffmpeg") is None:
+        raise ProviderError("ffmpeg is unavailable; reference scene changes cannot be detected.")
+    if threshold <= 0 or threshold > 1:
+        raise AppError("Reference video scene change threshold must be within (0, 1].")
+
+    filter_expression = f"select=gt(scene\\,{threshold:.6f}),showinfo"
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-i",
+        str(source),
+        "-vf",
+        filter_expression,
+        "-an",
+        "-f",
+        "null",
+        "-",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise ProviderError("ffmpeg timed out detecting reference-video scene changes.") from exc
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="ignore").strip()[-200:]
+        suffix = f": {detail}" if detail else ""
+        raise ProviderError(f"ffmpeg could not detect reference-video scene changes{suffix}")
+
+    timestamps: list[float] = []
+    output = stderr.decode("utf-8", errors="ignore")
+    for value in re.findall(r"pts_time:([0-9]+(?:\.[0-9]+)?)", output):
+        timestamp = float(value)
+        if math.isfinite(timestamp):
+            timestamps.append(round(timestamp, 6))
+    return sorted(set(timestamps))[:max_candidates]
 
 
 async def _probe_reference_video(

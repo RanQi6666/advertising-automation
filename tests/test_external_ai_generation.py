@@ -8,7 +8,7 @@ import backend.app.services.generation_task_service as task_module
 from backend.app.api.v1.endpoints.external_ai_generation import _read_reference_video_upload
 from backend.app.core.config import get_settings
 from backend.app.core.errors import AppError, ProviderError
-from backend.app.db.base import Base
+from backend.app.db.base import Base, utcnow
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
@@ -21,7 +21,9 @@ from backend.app.integrations.llm.mock_provider import MockLLMProvider
 from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorBeat,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
@@ -49,7 +51,10 @@ from backend.app.schemas.external_ai_generation import (
     ExternalAIFrameAnchoredStoryboardCreate,
 )
 from backend.app.services import external_ai_generation_service as external_ai_service_module
-from backend.app.services.external_ai_generation_service import ExternalAIGenerationService
+from backend.app.services.external_ai_generation_service import (
+    ExternalAIGenerationService,
+    _format_frame_anchored_storyboard_text,
+)
 from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
 
@@ -320,6 +325,45 @@ class FakeExternalAILLM:
             ),
         )
 
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        self.calls.append("direct_frame_anchored_video_storyboard")
+        assert first_frame_image_url.endswith("first.png")
+        assert last_frame_image_url.endswith("last.png")
+        assert duration_seconds == 12
+        assert aspect_ratio == "9:16"
+        if frame_analysis.reference_video_analysis is not None:
+            assert frame_analysis.timeline_adaptation_plan is not None
+        return FrameAnchoredDirectorPlan(
+            narrative_objective="Drive the observed action to a distinct visible result.",
+            attention_path=["opening", "action", "impact", "ending"],
+            tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+            climax_beats=[
+                DirectorBeat(
+                    beat_id="causal_peak",
+                    stage="climax",
+                    source_evidence=["The analyzed transition contains a visible causal action."],
+                    start_ratio=0.4,
+                    end_ratio=0.72,
+                    attention_objective="Focus attention on the action result.",
+                    camera_instruction="Use an in-shot push and reframing at impact.",
+                    action_requirement="Show the action before its visible result.",
+                    effect_requirement="Peak the observed effect at the visible impact.",
+                    importance="core",
+                )
+            ],
+            anchor_adaptation_plan=["Resolve to the supplied last-frame composition."],
+            anti_flattening_constraints=[
+                "Keep trigger, action, impact, and ending as distinct readable phases."
+            ],
+        )
+
     async def generate_frame_anchored_video_storyboard(
         self,
         first_frame_image_url: str,
@@ -332,6 +376,7 @@ class FakeExternalAILLM:
         assert first_frame_image_url.endswith("first.png")
         assert last_frame_image_url.endswith("last.png")
         assert frame_analysis.first_frame.visible_text == ["START"]
+        assert frame_analysis.director_plan is not None
         if frame_analysis.reference_video_analysis is not None:
             assert (
                 frame_analysis.reference_video_analysis.adapted_constraints.subject_presence.strength
@@ -363,6 +408,12 @@ class FakeExternalAILLM:
                     transition_goal="Bridge the supplied frames.",
                     voiceover="Optional narration.",
                     sound_effects=["movement swish"],
+                    cinematic_beat="causal_peak",
+                    camera_instruction="Use an in-shot push and reframing at impact.",
+                    tension_stage="climax",
+                    action_result_requirement="Show the action before its visible result.",
+                    effect_timing="Peak the observed effect at the visible impact.",
+                    anti_flattening_requirement="Keep impact distinct from the final resolution.",
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=3,
@@ -523,6 +574,38 @@ def _storyboard_v2_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def test_frame_anchored_storyboard_text_renders_multiple_director_beats() -> None:
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=7,
+                frame_anchor="first_frame",
+                visual="Carry the continuous causal action.",
+                cinematic_beat="legacy_label",
+                cinematic_beats=["cause", "action", "impact"],
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=7,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied ending.",
+                cinematic_beats=["visible_result"],
+            ),
+        ],
+    )
+
+    storyboard_text = _format_frame_anchored_storyboard_text(storyboard)
+
+    assert "Cinematic beats: cause, action, impact" in storyboard_text
+    assert "Cinematic beats: visible_result" in storyboard_text
+    assert "Cinematic beat: legacy_label" not in storyboard_text
 
 
 def test_external_storyboard_v2_rejects_legacy_and_missing_frame_fields() -> None:
@@ -796,10 +879,13 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     assert poll_body["data"]["duration_seconds"] == 12
     assert poll_body["data"]["aspect_ratio"] == "9:16"
     assert "Scene 1" in poll_body["data"]["storyboard_text"]
+    assert "Cinematic beat: causal_peak" in poll_body["data"]["storyboard_text"]
     assert "frame_analysis" not in poll_body["data"]
+    assert "director_plan" not in poll_body["data"]
     assert "storyboard" not in poll_body["data"]
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
+        "direct_frame_anchored_video_storyboard",
         "generate_frame_anchored_video_storyboard",
     ]
 
@@ -811,6 +897,8 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         assert task.campaign_id is None
         assert task.metadata_json is not None
         assert task.metadata_json["frame_analysis"]["first_frame"]["visible_text"] == ["START"]
+        director_plan = task.metadata_json["frame_analysis"]["director_plan"]
+        assert director_plan["climax_beats"][0]["beat_id"] == "causal_peak"
         first_scene = task.metadata_json["frame_anchored_storyboard"]["scenes"][0]
         assert first_scene["frame_anchor"] == "first_frame"
 
@@ -902,6 +990,7 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     assert "reference_frames" not in poll_data
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
+        "direct_frame_anchored_video_storyboard",
         "generate_frame_anchored_video_storyboard",
     ]
 
@@ -914,6 +1003,214 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
         assert task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
             "must_remain_visible_until_final"
         ] is True
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_plan(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingOnceStoryboardLLM(FakeExternalAILLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.storyboard_attempts = 0
+
+        async def generate_frame_anchored_video_storyboard(self, *args, **kwargs):
+            self.storyboard_attempts += 1
+            if self.storyboard_attempts == 1:
+                self.calls.append("generate_frame_anchored_video_storyboard")
+                raise ProviderError("temporary final storyboard failure")
+            return await super().generate_frame_anchored_video_storyboard(*args, **kwargs)
+
+    fake_llm = FailingOnceStoryboardLLM()
+
+    class CountingReferenceVideoService:
+        prepare_calls = 0
+        cleanup_calls = 0
+
+        async def prepare(self, session, reference_video, *, task_id: str):
+            del session, reference_video, task_id
+            type(self).prepare_calls += 1
+            return PreparedReferenceVideo(
+                duration_seconds=5.8,
+                sample_interval_seconds=2.0,
+                frames=[
+                    ReferenceVideoFrame(
+                        frame_index=0,
+                        timestamp_seconds=0.0,
+                        image_url="data:image/jpeg;base64,AAA",
+                    ),
+                    ReferenceVideoFrame(
+                        frame_index=1,
+                        timestamp_seconds=2.0,
+                        image_url="data:image/jpeg;base64,BBB",
+                    ),
+                    ReferenceVideoFrame(
+                        frame_index=2,
+                        timestamp_seconds=5.8,
+                        image_url="data:image/jpeg;base64,CCC",
+                    ),
+                ],
+                working_dir=tmp_path / "cached-reference-analysis",
+            )
+
+        async def cleanup(self, prepared: PreparedReferenceVideo) -> None:
+            del prepared
+            type(self).cleanup_calls += 1
+
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "StoryboardReferenceVideoService",
+        CountingReferenceVideoService,
+    )
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        "external-ai-storyboard-v2-checkpoint.db",
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="checkpoint-storyboard-v2",
+            payload_json=_storyboard_v2_payload(
+                reference_video={
+                    "source_type": "url",
+                    "video_url": "https://cdn.example.test/reference.mp4",
+                }
+            ),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(ProviderError, match="temporary final storyboard failure"):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        await session.refresh(task)
+        assert task.metadata_json["frame_analysis"]["director_plan"] is not None
+
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert "storyboard_text" in result
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard",
+        ]
+        assert CountingReferenceVideoService.prepare_calls == 1
+        assert CountingReferenceVideoService.cleanup_calls == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_retry_reuses_cached_analysis_after_director_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingOnceDirectorLLM(FakeExternalAILLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.director_attempts = 0
+
+        async def direct_frame_anchored_video_storyboard(self, *args, **kwargs):
+            self.director_attempts += 1
+            if self.director_attempts == 1:
+                self.calls.append("direct_frame_anchored_video_storyboard")
+                raise ProviderError("temporary director failure")
+            return await super().direct_frame_anchored_video_storyboard(*args, **kwargs)
+
+    fake_llm = FailingOnceDirectorLLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        "external-ai-storyboard-v2-analysis-checkpoint.db",
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="analysis-checkpoint-storyboard-v2",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(ProviderError, match="temporary director failure"):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        await session.refresh(task)
+        assert task.metadata_json["frame_analysis"]["director_plan"] is None
+
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert "storyboard_text" in result
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
+            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard",
+        ]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_storyboard_v2_saves_candidate_before_director_coverage_validation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+
+    def reject_coverage(storyboard, plan) -> None:
+        del storyboard, plan
+        raise ValueError("missing dynamic core beat")
+
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "validate_director_coverage",
+        reject_coverage,
+    )
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        "external-ai-storyboard-v2-candidate.db",
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="candidate-storyboard-v2",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(
+            ProviderError,
+            match="does not cover the required director climax beats",
+        ):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        await session.refresh(task)
+        candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
+        assert candidate["scenes"][1]["cinematic_beat"] == "causal_peak"
+        assert "frame_anchored_storyboard" not in task.metadata_json
+
     await engine.dispose()
 
 
@@ -1333,3 +1630,35 @@ def test_frame_anchored_storyboard_does_not_export_machine_readable_final_text_l
 
     assert "[FINAL_TEXT_OVERLAY_LOCKS]" not in text
     assert "[/FINAL_TEXT_OVERLAY_LOCKS]" not in text
+
+
+def test_frame_anchored_storyboard_formats_freeform_overlay_instruction() -> None:
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=5,
+                frame_anchor="first_frame",
+                visual="Begin from the supplied first frame.",
+                overlay_instruction="Introduce the observed interface after activation.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=5,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last frame.",
+                overlay_instruction="Keep the selected overlay readable through the ending.",
+            ),
+        ],
+    )
+
+    text = external_ai_service_module._format_frame_anchored_storyboard_text(storyboard)
+
+    assert (
+        "Overlay lifecycle: Keep the selected overlay readable through the ending."
+        in text
+    )

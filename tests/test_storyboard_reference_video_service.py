@@ -19,6 +19,7 @@ from backend.app.schemas.external_ai_generation import (
 from backend.app.services.safe_public_http import DownloadedFile
 from backend.app.services.storyboard_reference_video_service import (
     StoryboardReferenceVideoService,
+    _adaptive_reference_frame_timestamps,
     _extract_reference_video_frame,
     _probe_reference_video,
     _reference_frame_timestamps,
@@ -52,6 +53,159 @@ def test_reference_frame_timestamps_include_exact_final_without_duplicates(
     expected: list[float],
 ) -> None:
     assert _reference_frame_timestamps(duration, 2.0) == expected
+
+
+def test_adaptive_reference_timestamps_keep_opening_ending_baseline_and_high_change() -> None:
+    selected = _adaptive_reference_frame_timestamps(
+        duration_seconds=8.0,
+        interval_seconds=2.0,
+        change_timestamps=[1.1, 4.2, 7.8],
+        max_frame_count=7,
+    )
+
+    assert selected[0] == (0.0, "opening")
+    assert selected[-1] == (8.0, "ending")
+    assert (4.2, "high_change") in selected
+    assert len(selected) <= 7
+
+
+def test_adaptive_reference_timestamps_deduplicate_nearby_samples() -> None:
+    selected = _adaptive_reference_frame_timestamps(
+        duration_seconds=5.0,
+        interval_seconds=2.0,
+        change_timestamps=[1.99, 2.01],
+        max_frame_count=6,
+    )
+
+    assert sum(reason == "high_change" for _, reason in selected) == 1
+
+def test_prepare_falls_back_to_baseline_when_change_detection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_download(_url: str, destination: Path, **_kwargs: object) -> DownloadedFile:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"video")
+        return DownloadedFile(
+            "https://cdn.example.test/reference.mp4",
+            "https://cdn.example.test/reference.mp4",
+            destination,
+            "video/mp4",
+            5,
+        )
+
+    async def fake_probe(_source: Path, *, timeout_seconds: float) -> dict[str, object]:
+        return {"duration_seconds": 5.0, "format": "mp4", "codec": "h264"}
+
+    async def fake_extract(
+        _source: Path,
+        destination: Path,
+        _timestamp_seconds: float,
+        **_kwargs: object,
+    ) -> Path:
+        destination.write_bytes(b"jpeg")
+        return destination
+
+    async def failing_detector(_source: Path, **_kwargs: object) -> list[float]:
+        raise ProviderError("scene scores unavailable")
+
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.download_public_http_file",
+        fake_download,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._probe_reference_video",
+        fake_probe,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._extract_reference_video_frame",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._detect_reference_video_change_timestamps",
+        failing_detector,
+    )
+
+    prepared = asyncio.run(
+        StoryboardReferenceVideoService(settings=_settings(tmp_path)).prepare(
+            None,
+            ExternalAIReferenceVideoURL(
+                source_type="url", video_url="https://cdn.example.test/reference.mp4"
+            ),
+            task_id="fallback-task",
+        )
+    )
+
+    assert [frame.timestamp_seconds for frame in prepared.frames] == [0.0, 2.0, 4.0, 5.0]
+    assert [frame.selection_reason for frame in prepared.frames] == [
+        "opening",
+        "baseline",
+        "baseline",
+        "ending",
+    ]
+
+
+def test_prepare_marks_detected_keyframe_as_high_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_download(_url: str, destination: Path, **_kwargs: object) -> DownloadedFile:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"video")
+        return DownloadedFile(
+            "https://cdn.example.test/reference.mp4",
+            "https://cdn.example.test/reference.mp4",
+            destination,
+            "video/mp4",
+            5,
+        )
+
+    async def fake_probe(_source: Path, *, timeout_seconds: float) -> dict[str, object]:
+        return {"duration_seconds": 5.0, "format": "mp4", "codec": "h264"}
+
+    async def fake_extract(
+        _source: Path,
+        destination: Path,
+        _timestamp_seconds: float,
+        **_kwargs: object,
+    ) -> Path:
+        destination.write_bytes(b"jpeg")
+        return destination
+
+    async def returning_detector(_source: Path, **_kwargs: object) -> list[float]:
+        return [2.5]
+
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service.download_public_http_file",
+        fake_download,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._probe_reference_video",
+        fake_probe,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._extract_reference_video_frame",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.storyboard_reference_video_service._detect_reference_video_change_timestamps",
+        returning_detector,
+    )
+
+    prepared = asyncio.run(
+        StoryboardReferenceVideoService(settings=_settings(tmp_path)).prepare(
+            None,
+            ExternalAIReferenceVideoURL(
+                source_type="url", video_url="https://cdn.example.test/reference.mp4"
+            ),
+            task_id="high-change-task",
+        )
+    )
+
+    assert any(
+        frame.timestamp_seconds == 2.5 and frame.selection_reason == "high_change"
+        for frame in prepared.frames
+    )
 
 
 def test_reference_video_url_is_downloaded_and_frames_are_extracted_sequentially(

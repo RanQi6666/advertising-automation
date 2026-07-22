@@ -10,7 +10,9 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm.language import build_target_language_context
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorBeat,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
@@ -80,6 +82,44 @@ class MockLLMProvider:
             ),
         )
 
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        del first_frame_image_url, last_frame_image_url, duration_seconds, aspect_ratio
+        evidence = frame_analysis.transition_brief.visual_transition
+        return FrameAnchoredDirectorPlan(
+            narrative_objective=(
+                "Turn the supplied opening into the supplied ending through a clear causal peak."
+            ),
+            attention_path=["opening state", "causal action", "visible result", "ending state"],
+            tension_curve=["setup", "trigger", "escalation", "climax", "resolution"],
+            climax_beats=[
+                DirectorBeat(
+                    beat_id="mock_causal_peak",
+                    stage="climax",
+                    source_evidence=[evidence],
+                    start_ratio=0.4,
+                    end_ratio=0.72,
+                    attention_objective="Focus attention on the visible consequence of the action.",
+                    camera_instruction="Use an in-shot camera change to emphasize the peak.",
+                    action_requirement="Show the causal action before its visible result.",
+                    effect_requirement="Peak the observed transition effect at the causal result.",
+                    importance="core",
+                )
+            ],
+            anchor_adaptation_plan=[
+                "Begin from the supplied first frame and resolve to the supplied last frame."
+            ],
+            anti_flattening_constraints=[
+                "Keep trigger, action, impact, and resolution as distinct readable phases."
+            ],
+        )
+
     async def generate_frame_anchored_video_storyboard(
         self,
         first_frame_image_url: str,
@@ -88,7 +128,19 @@ class MockLLMProvider:
         duration_seconds: int,
         aspect_ratio: str,
     ) -> FrameAnchoredStoryboard:
-        del first_frame_image_url, last_frame_image_url, frame_analysis
+        del first_frame_image_url, last_frame_image_url
+        director_beat = next(
+            (
+                beat
+                for beat in (
+                    frame_analysis.director_plan.climax_beats
+                    if frame_analysis.director_plan
+                    else []
+                )
+                if beat.importance == "core"
+            ),
+            None,
+        )
         first_end = max(1, duration_seconds // 4)
         last_start = max(first_end + 1, duration_seconds - max(1, duration_seconds // 4))
         return FrameAnchoredStoryboard(
@@ -116,6 +168,20 @@ class MockLLMProvider:
                         "Maintain visual continuity while approaching the ending state."
                     ),
                     sound_effects=["Transition whoosh."],
+                    cinematic_beat=director_beat.beat_id if director_beat else None,
+                    camera_instruction=(
+                        director_beat.camera_instruction if director_beat else None
+                    ),
+                    tension_stage=director_beat.stage if director_beat else None,
+                    action_result_requirement=(
+                        director_beat.action_requirement if director_beat else None
+                    ),
+                    effect_timing=director_beat.effect_requirement if director_beat else None,
+                    anti_flattening_requirement=(
+                        "Keep the action and its visible result as separate phases."
+                        if director_beat
+                        else None
+                    ),
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=3,

@@ -29,6 +29,7 @@ from backend.app.services.creative_safety_prompts import (
     creative_safety_prompt_block,
     sanitize_creative_safety_text,
 )
+from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.landing_page_service import LandingPageService, snapshot_to_context
 from backend.app.services.landing_visual_reference import merge_landing_visual_reference
@@ -687,14 +688,22 @@ class VideoService:
                 "Please create a supported duration task."
             )
 
-        creative_strategy = _strategy_from_metadata(video.metadata_json)
-        prompt = (
-            _prompt_with_creative_strategy(video.prompt, creative_strategy)
-            or _storyboard_to_prompt(
-                video.storyboard or [],
-                creative_strategy=creative_strategy,
-            )
-        ).strip()
+        is_external_video = _is_external_video_generation(video)
+        creative_strategy = (
+            None if is_external_video else _strategy_from_metadata(video.metadata_json)
+        )
+        if is_external_video:
+            prompt = (video.prompt or "").strip()
+        else:
+            prompt = (
+                _prompt_with_creative_strategy(video.prompt, creative_strategy)
+                or _storyboard_to_prompt(
+                    video.storyboard or [],
+                    creative_strategy=creative_strategy,
+                )
+            ).strip()
+        if not prompt:
+            raise AppError("Video prompt is required.")
         return VideoGenerationRequest(
             prompt=prompt,
             source_images=source_images,
@@ -1494,6 +1503,11 @@ def _strategy_from_metadata(metadata: Any) -> dict | None:
         return None
     strategy = metadata.get("creative_strategy")
     return strategy if isinstance(strategy, dict) else None
+
+
+def _is_external_video_generation(video: VideoAsset) -> bool:
+    metadata = video.metadata_json or {}
+    return metadata.get("source") == EXTERNAL_VIDEO_GENERATION_SOURCE
 
 
 def _ensure_storyboard_source_asset_notes(text: str, assets: list[CreativeAsset]) -> str:

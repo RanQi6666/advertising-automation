@@ -1,33 +1,10 @@
 import { createServer } from "node:http";
 import { scrapeAds } from "../../src/lib/scraper";
-import type { Ad } from "../../src/types/ads";
-import type { CollectRequest, CollectorAd } from "./contracts";
+import type { CollectRequest } from "./contracts";
+import { buildSearchParams, normalizeEligibleAd } from "./selection";
 
 const MAX_LIMIT = 50;
 const port = Number(process.env.PORT ?? "8090");
-
-function normalize(ad: Ad): CollectorAd {
-  return {
-    ad_library_id: ad.id,
-    advertiser_name: ad.advertiser_name || null,
-    status: ad.status || null,
-    days_running: typeof ad.days_running === "number" ? ad.days_running : null,
-    text_variants: Array.isArray(ad.body_variants) ? ad.body_variants : [],
-    headline: ad.headline || null,
-    cta_text: ad.cta_text || null,
-    landing_url: ad.link_url || null,
-    video_url: ad.video_urls?.[0] || null,
-    thumbnail_url: ad.media_urls?.[0] || null,
-    duration_seconds: null,
-    platforms: Array.isArray(ad.platforms) ? ad.platforms : [],
-    ad_snapshot_url: ad.ad_snapshot_url || null,
-    reported_spend_range: {
-      min: ad.spend_min ?? null,
-      max: ad.spend_max ?? null,
-      currency: ad.spend_currency ?? null,
-    },
-  };
-}
 
 function sendLine(response: import("node:http").ServerResponse, value: unknown): void {
   response.write(`${JSON.stringify(value)}\n`);
@@ -69,16 +46,15 @@ createServer(async (request, response) => {
   });
   let count = 0;
   try {
-    for await (const batch of scrapeAds({
+    for await (const batch of scrapeAds(buildSearchParams({
       keyword: input.query,
       country: input.country,
-      status: "ACTIVE",
-      ad_type: "video",
       limit: input.limit,
-      fetch_details: false,
-    }, input.request_id)) {
+    }), input.request_id)) {
       for (const ad of batch) {
-        sendLine(response, { type: "ad", ad: normalize(ad) });
+        const eligible = normalizeEligibleAd(ad);
+        if (!eligible) continue;
+        sendLine(response, { type: "ad", ad: eligible });
         count += 1;
       }
     }

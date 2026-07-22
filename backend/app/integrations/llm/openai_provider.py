@@ -24,6 +24,7 @@ from backend.app.schemas.ad_performance import AdPerformanceOptimizationWorkOrde
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     FrameAnalysis,
+    FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
     ImageBrief,
     ReferenceVideoFrame,
@@ -521,7 +522,33 @@ class OpenAILLMProvider:
                 reference_frames=reference_frames,
             ),
         )
-        return _frame_analysis_from_data(data)
+        return _frame_analysis_from_data(
+            data,
+            reference_video_duration_seconds=reference_video_duration_seconds,
+            reference_video_sample_interval_seconds=reference_video_sample_interval_seconds,
+        )
+
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        data = await self._vision_json_completion(
+            system=_frame_anchored_director_system_prompt(),
+            user=_frame_pair_user_content(
+                first_frame_image_url,
+                last_frame_image_url,
+                {
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                    "frame_analysis": frame_analysis.model_dump(mode="json"),
+                },
+            ),
+        )
+        return _frame_anchored_director_plan_from_data(data)
 
     async def generate_frame_anchored_video_storyboard(
         self,
@@ -1811,8 +1838,10 @@ def _frame_analysis_system_prompt() -> str:
         "reference_start_second, reference_end_second, description, visible_evidence, "
         "behavior_type (action, state, or overlay), importance (core, supporting, or decorative), "
         "minimum_readable_duration_seconds, depends_on, must_remain_visible_until_final, and "
-        "locked_text. Use reference seconds only to "
-        "describe observed order and duration; they are not target-generation seconds. "
+        "locked_text. Use numeric seconds only. reference_end_second must be strictly greater "
+        "than reference_start_second. Every beat_id must be non-empty and unique. depends_on "
+        "may only contain a known beat_id from the same behavior_graph. Use reference seconds "
+        "only to describe observed order and duration; they are not target-generation seconds. "
         "Set must_remain_visible_until_final=true only for a non-diegetic visual overlay such as "
         "readable reward text, logo, label, or UI layer that remains visible at the reference end. "
         "Never mark a character, prop, setting, camera move, action, transformation, hit, or "
@@ -1837,13 +1866,70 @@ def _frame_analysis_system_prompt() -> str:
     )
 
 
+def _frame_anchored_director_system_prompt() -> str:
+    return (
+        "You are the director of a high-end game cinematic and commercial film. Create a private "
+        "evidence-backed director plan for one frame-anchored generated video. Return valid JSON "
+        "only with narrative_objective, attention_path, tension_curve, climax_beats, "
+        "overlay_lifecycle_plan, anchor_adaptation_plan, and anti_flattening_constraints. "
+        "Use the exact primitive field shapes: narrative_objective must be a plain string; "
+        "attention_path must be a list of plain strings, not objects; tension_curve must be a "
+        "list using only setup, trigger, escalation, climax, and resolution; every climax_beats "
+        "item must use stage=climax, source_evidence as a list of plain strings, importance as "
+        "core, supporting, or decorative, and depends_on as a list of beat ids. Each "
+        "overlay_lifecycle_plan item must use reference_element, strategy, timing_instruction, "
+        "and final_frame_requirement. anchor_adaptation_plan must be a list of plain strings, "
+        "and anti_flattening_constraints must be a list of plain strings. Do not substitute "
+        "nested objects for any of those fields. "
+        "First distinguish observed evidence from director inference: source_evidence for every "
+        "climax beat must describe visible facts from the supplied target frames or the supplied "
+        "reference-video analysis; all camera, timing, performance, and effects proposals are "
+        "director inference grounded in that evidence. Do not present an unsupported inference as "
+        "an observed fact. The supplied first frame is the exact opening visual anchor and the "
+        "supplied last frame is the exact final visual anchor, including its visible composition, "
+        "text, brand, product, reward, character appearance, and setting. Reference-video analysis "
+        "can transfer observed action, action-result causality, entry or staging, camera language, "
+        "timing, effects timing, and overlay lifecycle. Do not copy a reference-specific identity, "
+        "brand, logo, product, character, text, reward, or setting unless its equivalent is "
+        "visibly "
+        "provided by a target frame or the existing visual identity mapping explicitly permits it. "
+        "Plan the experience as one generated clip: camera changes, reframing, push-ins, reveals, "
+        "or viewpoint changes must happen in-shot. Do not require post-production editing, multi-"
+        "segment generation, stitching, or external compositing. Build a tension_curve in "
+        "ascending "
+        "setup, trigger, escalation, climax, resolution order. Return the executable final "
+        "core beat set for the supplied target duration, not an unlimited list of candidate "
+        "moments. Include one or more evidence-backed climax_beats. Each climax beat must have "
+        "a stable beat_id, a 0-to-1 start_ratio and end_ratio, source_evidence, "
+        "attention_objective, camera_instruction, action_requirement, effect_requirement, "
+        "importance, and dependency ids when needed. Adapt the number and width of core beats "
+        "to both the observed reference duration and the requested target duration. When time "
+        "is short, merge adjacent causal roles into one executable beat and downgrade repeated "
+        "or decorative moments before weakening the causal climax. Cause, action, impact, and "
+        "visible result must remain readable as a causal chain, but each role does not need its "
+        "own beat. Do not create a core beat set whose combined minimum readable time exceeds "
+        "target duration. For each observed overlay or UI element, decide dynamically whether to "
+        "inherit it, replace it with the target equivalent, persist it to the final frame, or omit "
+        "it; state the final-frame requirement without inventing a fixed overlay rule. Provide "
+        "non-empty anti_flattening_constraints that preserve causal readability, the effect peak, "
+        "and the ending anchor."
+    )
+
+
 def _frame_anchored_storyboard_system_prompt() -> str:
     return (
         "You create a frame-anchored video storyboard from two supplied endpoint images "
         "and their visual analysis. Return valid JSON only with duration_seconds, "
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
-        "transition_goal, subtitle, voiceover, sound_effects, and notes. The first scene "
+        "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
+        "cinematic_beats, camera_instruction, tension_stage, action_result_requirement, "
+        "effect_timing, "
+        "overlay_instruction, and anti_flattening_requirement. overlay_instruction must be "
+        "null or an object with reference_element, strategy, timing_instruction, and "
+        "final_frame_requirement; strategy must be exactly inherit, replace_with_target, "
+        "persist_to_final, or omit. Do not return overlay_instruction as a plain string. "
+        "The first scene "
         "must use frame_anchor first_frame and begin from the actual supplied first-frame "
         "base layer. Every middle scene must use frame_anchor transition. The final scene "
         "must use frame_anchor last_frame and arrive at the actual supplied last-frame base "
@@ -1858,7 +1944,12 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "time to core causal beats; compress repeated or decorative material first and extend "
         "readability or the final state when the target duration is longer. "
         "For each core behavior beat, describe the actual available actors, objects, action, "
-        "interaction, causal change, and visible result from the analysis. Do not replace a "
+        "interaction, causal change, and visible result from the analysis. When frame_analysis "
+        "contains a director_plan, every core climax beat must be assigned verbatim using either "
+        "cinematic_beat for a legacy single id or cinematic_beats for a list of exact beat_id "
+        "values. One continuous scene may carry multiple core beat ids when its target time "
+        "window performs those roles without a cut. Use neither a stage name nor a new freeform "
+        "label. Do not replace a "
         "specific observed causal action with a generic effect, passive pose, or static result. "
         "Reference characters, appearance, props, products, brands, text, rewards, UI, settings, "
         "camera, transitions, and effects may be preserved when their visual_identity_mappings "
@@ -1914,7 +2005,12 @@ def _frame_pair_user_content(
     return content
 
 
-def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
+def _frame_analysis_from_data(
+    data: dict[str, Any],
+    *,
+    reference_video_duration_seconds: float | None = None,
+    reference_video_sample_interval_seconds: float | None = None,
+) -> FrameAnalysis:
     try:
         first_frame = data.get("first_frame")
         last_frame = data.get("last_frame")
@@ -1972,7 +2068,9 @@ def _frame_analysis_from_data(data: dict[str, Any]) -> FrameAnalysis:
         }
         if isinstance(data.get("reference_video_analysis"), dict):
             normalized["reference_video_analysis"] = _reference_video_analysis_from_data(
-                data["reference_video_analysis"]
+                data["reference_video_analysis"],
+                reference_duration_seconds=reference_video_duration_seconds,
+                reference_sample_interval_seconds=reference_video_sample_interval_seconds,
             )
         return FrameAnalysis.model_validate(normalized)
     except (TypeError, ValidationError, ValueError) as exc:
@@ -2044,8 +2142,26 @@ def _frame_language_list(value: Any) -> list[str]:
     return values
 
 
-def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
+def _reference_video_analysis_from_data(
+    data: dict[str, Any],
+    *,
+    reference_duration_seconds: float | None = None,
+    reference_sample_interval_seconds: float | None = None,
+) -> dict[str, Any]:
     normalized = dict(data)
+    reliable_duration = _positive_finite_float(reference_duration_seconds)
+    reported_duration = _positive_finite_float(data.get("duration_seconds"))
+    duration_seconds = reliable_duration or reported_duration
+    if duration_seconds is not None:
+        normalized["duration_seconds"] = duration_seconds
+
+    reliable_sample_interval = _positive_finite_float(reference_sample_interval_seconds)
+    reported_sample_interval = _positive_finite_float(data.get("sample_interval_seconds"))
+    if reliable_sample_interval is not None:
+        normalized["sample_interval_seconds"] = reliable_sample_interval
+    elif reported_sample_interval is not None:
+        normalized["sample_interval_seconds"] = reported_sample_interval
+
     segments = data.get("segments")
     if segments is None:
         segments = data.get("chronological_segments")
@@ -2066,14 +2182,11 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
 
     behavior_graph = data.get("behavior_graph")
     if isinstance(behavior_graph, dict):
-        normalized["behavior_graph"] = {
-            "entities": _frame_string_list(behavior_graph.get("entities")),
-            "beats": [
-                _reference_behavior_beat_from_data(beat)
-                for beat in behavior_graph.get("beats", [])
-                if isinstance(beat, dict)
-            ],
-        }
+        normalized["behavior_graph"] = _normalize_reference_behavior_graph(
+            behavior_graph,
+            duration_seconds=duration_seconds,
+            segments=normalized.get("segments"),
+        )
 
     constraints = data.get("adapted_constraints")
     if isinstance(constraints, dict):
@@ -2097,6 +2210,175 @@ def _reference_video_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
         }
     return normalized
 
+
+def _normalize_reference_behavior_graph(
+    behavior_graph: dict[str, Any],
+    *,
+    duration_seconds: float | None,
+    segments: Any,
+) -> dict[str, Any]:
+    raw_beats = [beat for beat in behavior_graph.get("beats", []) if isinstance(beat, dict)]
+    normalized_beats = [_reference_behavior_beat_from_data(beat) for beat in raw_beats]
+    if not normalized_beats:
+        return {
+            "entities": _frame_string_list(behavior_graph.get("entities")),
+            "beats": [],
+        }
+
+    duration = duration_seconds or _behavior_graph_fallback_duration(normalized_beats)
+    anchors = _reference_timeline_anchors(segments, duration)
+    fallback_window = min(0.5, max(0.1, duration / max(len(normalized_beats) + 1, 2)))
+    prepared: list[dict[str, Any]] = []
+    previous_end = 0.0
+
+    for source_index, beat in enumerate(normalized_beats):
+        start = _finite_float_or_none(beat.get("reference_start_second"))
+        end = _finite_float_or_none(beat.get("reference_end_second"))
+        window = _normalize_reference_behavior_window(
+            start=start,
+            end=end,
+            duration=duration,
+            anchors=anchors,
+            previous_end=previous_end,
+            fallback_window=fallback_window,
+        )
+        beat["reference_start_second"], beat["reference_end_second"] = window
+        if beat["must_remain_visible_until_final"]:
+            beat["reference_end_second"] = duration
+        beat["description"] = (
+            _coerce_optional_text(beat.get("description"))
+            or f"Observed reference behavior {source_index + 1}."
+        )
+        readable_duration = _positive_finite_float(
+            beat.get("minimum_readable_duration_seconds")
+        )
+        beat["minimum_readable_duration_seconds"] = readable_duration or 0.5
+        prepared.append(
+            {
+                "source_index": source_index,
+                "raw_id": _coerce_optional_text(raw_beats[source_index].get("beat_id")),
+                "raw_depends_on": _frame_string_list(raw_beats[source_index].get("depends_on")),
+                "beat": beat,
+            }
+        )
+        previous_end = max(previous_end, beat["reference_end_second"])
+
+    prepared.sort(
+        key=lambda item: (
+            item["beat"]["reference_start_second"],
+            item["beat"]["reference_end_second"],
+            item["source_index"],
+        )
+    )
+    raw_to_canonical: dict[str, str] = {}
+    for index, item in enumerate(prepared, start=1):
+        canonical_id = f"beat_{index:03d}"
+        item["canonical_id"] = canonical_id
+        raw_id = item["raw_id"]
+        if raw_id and raw_id not in raw_to_canonical:
+            raw_to_canonical[raw_id] = canonical_id
+
+    canonical_beats: list[dict[str, Any]] = []
+    for index, item in enumerate(prepared):
+        beat = item["beat"]
+        canonical_id = item["canonical_id"]
+        allowed_prior_ids = {previous["beat_id"] for previous in canonical_beats}
+        declared_dependencies = item["raw_depends_on"]
+        dependencies: list[str] = []
+        for raw_dependency in declared_dependencies:
+            canonical_dependency = raw_to_canonical.get(raw_dependency)
+            if (
+                canonical_dependency
+                and canonical_dependency != canonical_id
+                and canonical_dependency in allowed_prior_ids
+                and canonical_dependency not in dependencies
+            ):
+                dependencies.append(canonical_dependency)
+        if index == 0:
+            dependencies = []
+        elif declared_dependencies and not dependencies:
+            dependencies = [canonical_beats[-1]["beat_id"]]
+        beat["beat_id"] = canonical_id
+        beat["depends_on"] = dependencies
+        canonical_beats.append(beat)
+
+    return {
+        "entities": _frame_string_list(behavior_graph.get("entities")),
+        "beats": canonical_beats,
+    }
+
+
+def _normalize_reference_behavior_window(
+    *,
+    start: float | None,
+    end: float | None,
+    duration: float,
+    anchors: list[float],
+    previous_end: float,
+    fallback_window: float,
+) -> tuple[float, float]:
+    clamped_start = _clamp_reference_second(start, duration)
+    clamped_end = _clamp_reference_second(end, duration)
+    if clamped_start is not None and clamped_end is not None and clamped_end > clamped_start:
+        return clamped_start, clamped_end
+
+    preferred_start = max(previous_end, clamped_start or 0.0)
+    if preferred_start >= duration:
+        return max(0.0, duration - fallback_window), duration
+    anchored_end = next((anchor for anchor in anchors if anchor > preferred_start), None)
+    repaired_end = anchored_end or min(duration, preferred_start + fallback_window)
+    if repaired_end <= preferred_start:
+        repaired_end = min(duration, preferred_start + fallback_window)
+    if repaired_end <= preferred_start:
+        return max(0.0, duration - fallback_window), duration
+    return preferred_start, repaired_end
+
+
+def _reference_timeline_anchors(segments: Any, duration: float) -> list[float]:
+    anchors = {0.0, duration}
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            for key in ("start_second", "end_second"):
+                second = _clamp_reference_second(_finite_float_or_none(segment.get(key)), duration)
+                if second is not None:
+                    anchors.add(second)
+    return sorted(anchors)
+
+
+def _behavior_graph_fallback_duration(beats: list[dict[str, Any]]) -> float:
+    observed_seconds = [
+        second
+        for beat in beats
+        for second in (
+            _finite_float_or_none(beat.get("reference_start_second")),
+            _finite_float_or_none(beat.get("reference_end_second")),
+        )
+        if second is not None and second > 0
+    ]
+    return max(1.0, min(30.0, max(observed_seconds, default=1.0)))
+
+
+def _clamp_reference_second(second: float | None, duration: float) -> float | None:
+    if second is None:
+        return None
+    return max(0.0, min(second, duration))
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    number = _finite_float_or_none(value)
+    return number if number is not None and number > 0 else None
 
 def _reference_visual_identity_mapping_from_data(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
@@ -2205,6 +2487,312 @@ def _reference_constraint_from_data(value: Any, *, strength: str) -> dict[str, s
     }
 
 
+_DIRECTOR_STAGE_ORDER = {
+    "setup": 0,
+    "trigger": 1,
+    "escalation": 2,
+    "climax": 3,
+    "resolution": 4,
+}
+
+
+def _director_items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else ([] if value is None else [value])
+
+
+def _director_text(value: Any) -> str:
+    """Keep semantic content when the model uses an object for a text field."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "; ".join(text for item in value if (text := _director_text(item)))
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{key}: {text}"
+            for key, item in value.items()
+            if (text := _director_text(item))
+        )
+    return _coerce_text(value).strip()
+
+
+def _director_first_text(data: dict[str, Any], *keys: str) -> str:
+    return next((text for key in keys if (text := _director_text(data.get(key)))), "")
+
+
+def _director_text_list(value: Any) -> list[str]:
+    texts: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            texts.extend(
+                f"{key}: {text}"
+                for key, raw in item.items()
+                if (text := _director_text(raw))
+            )
+        elif text := _director_text(item):
+            texts.append(text)
+    return texts
+
+
+def _director_ratio(value: Any, fallback: float) -> float:
+    ratio = _finite_float_or_none(value)
+    if ratio is None:
+        return fallback
+    if 1 < ratio <= 100:
+        ratio /= 100
+    return max(0.0, min(ratio, 1.0))
+
+
+def _director_stage(value: Any) -> str | None:
+    text = _director_text(value).lower().replace("_", " ").replace("-", " ")
+    for stage in _DIRECTOR_STAGE_ORDER:
+        if stage in text:
+            return stage
+    aliases = (
+        ("climax", ("peak", "payoff", "impact")),
+        ("resolution", ("resolve", "ending", "conclusion")),
+        ("escalation", ("escalat", "rising", "build", "intens", "develop")),
+        ("trigger", ("catalyst", "inciting", "activate", "hook")),
+        ("setup", ("opening", "establish", "intro", "begin")),
+    )
+    return next((stage for stage, words in aliases if any(word in text for word in words)), None)
+
+
+def _normalize_director_attention_path(value: Any) -> list[str]:
+    path: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            focus = _director_first_text(item, "focus", "attention", "subject", "objective")
+            method = _director_first_text(
+                item, "method", "approach", "instruction", "camera"
+            )
+            ratio = _finite_float_or_none(item.get("time_ratio"))
+            prefix = f"At {round(ratio * 100)}%: " if ratio is not None else ""
+            detail = ". ".join(part for part in (focus, method) if part)
+            text = prefix + (detail or _director_text(item))
+        else:
+            text = _director_text(item)
+        if text and text not in path:
+            path.append(text)
+    return path
+
+
+def _normalize_director_tension_curve(value: Any) -> list[str]:
+    stages = {
+        stage
+        for item in _director_items(value)
+        if (stage := _director_stage(item.get("phase") if isinstance(item, dict) else item))
+    }
+    if not stages:
+        return ["setup", "climax", "resolution"]
+    stages.add("climax")
+    return sorted(stages, key=_DIRECTOR_STAGE_ORDER.__getitem__)
+
+
+def _normalize_director_importance(value: Any) -> str:
+    text = _director_text(value).lower()
+    if any(word in text for word in ("decorative", "optional", "minor", "low")):
+        return "decorative"
+    if any(word in text for word in ("core", "primary", "main", "key", "high")):
+        return "core"
+    return "supporting"
+
+
+def _normalize_director_climax_beats(value: Any) -> list[dict[str, Any]]:
+    raw_beats = [item for item in _director_items(value) if isinstance(item, dict)]
+    normalized: list[dict[str, Any]] = []
+    id_map: dict[str, str] = {}
+    raw_dependencies: list[list[str]] = []
+    for index, raw in enumerate(raw_beats, start=1):
+        raw_id = _director_first_text(raw, "beat_id", "id", "name", "title")
+        raw_id = raw_id or f"climax_{index}"
+        beat_id = raw_id
+        suffix = 2
+        while beat_id in {item["beat_id"] for item in normalized}:
+            beat_id = f"{raw_id}_{suffix}"
+            suffix += 1
+        id_map.setdefault(raw_id, beat_id)
+        start = _director_ratio(
+            raw.get("start_ratio", raw.get("start")),
+            min(0.85, 0.45 + 0.12 * (index - 1)),
+        )
+        end = _director_ratio(
+            raw.get("end_ratio", raw.get("end")),
+            min(1.0, start + 0.18),
+        )
+        if end <= start:
+            start = min(start, 0.95)
+            end = min(1.0, max(start + 0.05, end))
+        evidence = _director_text_list(
+            raw.get("source_evidence", raw.get("visible_evidence", raw.get("evidence")))
+        )
+        if not evidence:
+            evidence = _director_text_list(
+                {
+                    key: raw[key]
+                    for key in ("observed_action", "observed_result", "description")
+                    if raw.get(key) is not None
+                }
+            )
+        normalized.append(
+            {
+                "beat_id": beat_id,
+                "stage": "climax",
+                "source_evidence": evidence,
+                "start_ratio": start,
+                "end_ratio": end,
+                "attention_objective": _director_first_text(
+                    raw, "attention_objective", "objective", "attention"
+                ),
+                "camera_instruction": _director_first_text(
+                    raw, "camera_instruction", "camera", "viewpoint"
+                ),
+                "action_requirement": _director_first_text(
+                    raw, "action_requirement", "action", "performance"
+                ),
+                "effect_requirement": _director_first_text(
+                    raw, "effect_requirement", "effects", "vfx"
+                ),
+                "importance": _normalize_director_importance(raw.get("importance")),
+            }
+        )
+        raw_dependencies.append(
+            _director_text_list(raw.get("depends_on", raw.get("dependencies")))
+        )
+    for beat, dependencies in zip(normalized, raw_dependencies, strict=True):
+        beat["depends_on"] = [
+            mapped
+            for dependency in dependencies
+            if (mapped := id_map.get(dependency)) and mapped != beat["beat_id"]
+        ]
+    return normalized
+
+
+def _normalize_director_overlay_strategy(value: Any) -> str:
+    text = _director_text(value).lower()
+    if any(word in text for word in ("persist", "remain", "through", "final", "ending")):
+        return "persist_to_final"
+    if any(word in text for word in ("replace", "target", "swap", "substitut")):
+        return "replace_with_target"
+    if any(word in text for word in ("omit", "remove", "drop", "exclude")):
+        return "omit"
+    return "inherit"
+
+
+def _normalize_director_overlay_lifecycle_plan(value: Any) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for raw in _director_items(value):
+        if not isinstance(raw, dict):
+            continue
+        element = _director_first_text(
+            raw, "reference_element", "element", "overlay", "name", "label"
+        )
+        if not element:
+            continue
+        lifecycle = _director_first_text(
+            raw, "lifecycle", "timing_instruction", "observed_in"
+        )
+        constraints = _director_text(raw.get("constraints"))
+        final_requirement = _director_first_text(
+            raw,
+            "final_frame_requirement",
+            "observed_final_requirement",
+            "final_requirement",
+        )
+        normalized.append(
+            {
+                "reference_element": element,
+                "strategy": _normalize_director_overlay_strategy(
+                    _director_first_text(raw, "strategy", "decision", "lifecycle")
+                ),
+                "timing_instruction": (
+                    ". ".join(part for part in (lifecycle, constraints) if part)
+                    or "Follow the observed overlay lifecycle."
+                ),
+                "final_frame_requirement": (
+                    final_requirement
+                    or "Respect the supplied last-frame base layer when resolving this overlay."
+                ),
+            }
+        )
+    return normalized
+
+
+def _flatten_director_anchor_plan(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, list):
+        return [line for item in value for line in _flatten_director_anchor_plan(item, prefix)]
+    if not isinstance(value, dict):
+        text = _director_text(value)
+        return [f"{prefix}: {text}" if prefix and text else text] if text else []
+    direct = _director_first_text(value, "instruction", "plan", "strategy", "requirement")
+    if direct:
+        return [f"{prefix}: {direct}" if prefix else direct]
+    return [
+        line
+        for key, item in value.items()
+        for line in _flatten_director_anchor_plan(
+            item,
+            f"{prefix}.{key}" if prefix else str(key),
+        )
+    ]
+
+
+def _normalize_director_constraints(value: Any) -> list[str]:
+    normalized: list[str] = []
+    for item in _director_items(value):
+        if isinstance(item, dict):
+            constraint = _director_first_text(item, "constraint", "instruction", "requirement")
+            application = _director_first_text(item, "application", "how", "implementation")
+            text = (
+                f"{constraint} Application: {application}"
+                if constraint and application
+                else constraint or application
+            )
+        else:
+            text = _director_text(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _frame_anchored_director_plan_from_data(
+    data: dict[str, Any],
+) -> FrameAnchoredDirectorPlan:
+    normalized = dict(data)
+    normalized["narrative_objective"] = _director_text(data.get("narrative_objective"))
+    normalized["attention_path"] = _normalize_director_attention_path(
+        data.get("attention_path")
+    )
+    normalized["tension_curve"] = _normalize_director_tension_curve(
+        data.get("tension_curve")
+    )
+    normalized["climax_beats"] = _normalize_director_climax_beats(
+        data.get("climax_beats")
+    )
+    normalized["overlay_lifecycle_plan"] = _normalize_director_overlay_lifecycle_plan(
+        data.get("overlay_lifecycle_plan")
+    )
+    normalized["anchor_adaptation_plan"] = _flatten_director_anchor_plan(
+        data.get("anchor_adaptation_plan")
+    )
+    normalized["anti_flattening_constraints"] = _normalize_director_constraints(
+        data.get("anti_flattening_constraints")
+    )
+    try:
+        return FrameAnchoredDirectorPlan.model_validate(normalized)
+    except ValidationError as exc:
+        logger.warning(
+            "Frame-anchored director-plan JSON validation failed: errors=%s response_shape=%s",
+            _frame_analysis_validation_errors(exc),
+            _frame_analysis_response_shape(data),
+        )
+        raise ProviderError("LLM returned invalid frame-anchored director-plan JSON.") from exc
+
 def _frame_anchored_storyboard_from_data(
     data: dict[str, Any],
     duration_seconds: int,
@@ -2213,6 +2801,30 @@ def _frame_anchored_storyboard_from_data(
     normalized = dict(data)
     normalized["duration_seconds"] = duration_seconds
     normalized["aspect_ratio"] = aspect_ratio
+    scenes = data.get("scenes")
+    if isinstance(scenes, list):
+        normalized["scenes"] = [
+            {
+                **scene,
+                **(
+                    {"sound_effects": _frame_string_list(scene.get("sound_effects"))}
+                    if "sound_effects" in scene
+                    else {}
+                ),
+                **(
+                    {
+                        "cinematic_beats": list(
+                            dict.fromkeys(_frame_string_list(scene.get("cinematic_beats")))
+                        )
+                    }
+                    if "cinematic_beats" in scene
+                    else {}
+                ),
+            }
+            if isinstance(scene, dict)
+            else scene
+            for scene in scenes
+        ]
     try:
         return FrameAnchoredStoryboard.model_validate(normalized)
     except ValidationError as exc:

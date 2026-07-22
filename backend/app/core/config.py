@@ -126,6 +126,14 @@ class Settings(BaseSettings):
     storyboard_reference_video_sample_interval_seconds: float = Field(
         default=2.0, ge=0.5, le=10
     )
+    storyboard_reference_video_adaptive_sampling_enabled: bool = True
+    storyboard_reference_video_adaptive_max_frames: int = Field(default=12, ge=2, le=24)
+    storyboard_reference_video_scene_change_threshold: float = Field(
+        default=0.18, ge=0.01, le=1.0
+    )
+    storyboard_reference_video_scene_change_max_candidates: int = Field(
+        default=8, ge=0, le=20
+    )
     storyboard_reference_video_frame_width: int = Field(default=768, ge=320, le=1920)
     storyboard_reference_video_jpeg_quality: int = Field(default=4, ge=2, le=31)
     storyboard_reference_video_ffprobe_timeout_seconds: float = Field(
