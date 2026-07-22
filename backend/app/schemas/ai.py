@@ -346,7 +346,8 @@ _OMISSION_NEGATIVE_STATE = (
 )
 _OMISSION_REVERSED_NEGATIVE_STATE_PATTERNS = (
     re.compile(
-        rf"\b(?:not|never)\b(?:\s+[a-z'-]+){{0,3}}\s+"
+        rf"\b(?:not|never|far\s+from|by\s+no\s+means|anything\s+but|"
+        rf"hardly|scarcely)\b(?:\s+[a-z'-]+){{0,3}}\s+"
         rf"(?:{_OMISSION_NEGATIVE_STATE})\b"
     ),
     re.compile(
@@ -388,12 +389,40 @@ _OMISSION_ABSENCE_PATTERN = re.compile(
     rf"\b(?:do|does|did|has|have|had)\s+not\s+have(?:\s+(?:a|an|any|the))?"
     rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b"
 )
-_OMISSION_NEGATED_CONFLICT_PATTERN = re.compile(
-    r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+(?:conflict\w*|incompat\w*)\b"
+_OMISSION_REVERSED_CONFLICT_PATTERNS = (
+    re.compile(
+        r"\b(?:no|not|never|without|far\s+from|by\s+no\s+means)\b"
+        r"(?:\s+[a-z'-]+){0,4}\s+(?:conflict\w*|incompat\w*)\b"
+    ),
+    re.compile(
+        r"\b(?:conflict\w*|incompatibilit(?:y|ies))\b"
+        r"(?:\s+[a-z'-]+){0,3}\s+(?:absent|missing|nonexistent|resolved)\b"
+    ),
 )
 _OMISSION_IDENTITY_CONFLICT_PATTERN = re.compile(
     r"\b(?:conflict\w*|incompat\w*|cannot\s+transfer|not\s+permitted|"
     r"would\s+change)\b"
+)
+_OMISSION_ENDPOINT_TERM = (
+    r"endpoint|final\s+(?:pose|frame|state|composition)|"
+    r"last\s+(?:pose|frame|state|composition)|"
+    r"ending\s+(?:pose|frame|state|composition)|end\s+frame"
+)
+_OMISSION_INFEASIBILITY_TERM = (
+    rf"{_OMISSION_NEGATIVE_STATE}|conflict\w*|incompat\w*"
+)
+_OMISSION_ENDPOINT_SCOPED_PATTERNS = (
+    re.compile(
+        rf"\b(?:{_OMISSION_INFEASIBILITY_TERM})\b"
+        rf"[^.;!?\u2014]{{0,80}}\b(?:only\s+)?"
+        rf"(?:in|at|from|during|on|within|for)\s+(?:the\s+)?"
+        rf"(?:{_OMISSION_ENDPOINT_TERM})\b(?:\s+only\b)?"
+    ),
+    re.compile(
+        rf"\bonly\s+(?:in|at|from|during|on|within|for)\s+(?:the\s+)?"
+        rf"(?:{_OMISSION_ENDPOINT_TERM})\b"
+        rf"[^.;!?\u2014]{{0,80}}\b(?:{_OMISSION_INFEASIBILITY_TERM})\b"
+    ),
 )
 
 
@@ -405,8 +434,10 @@ def _normalize_omission_fact_text(value: str) -> str:
 
 
 def _clause_affirms_infeasibility(clause: str, *, identity_conflict: bool) -> bool:
+    if any(pattern.search(clause) for pattern in _OMISSION_ENDPOINT_SCOPED_PATTERNS):
+        return False
     if identity_conflict:
-        if _OMISSION_NEGATED_CONFLICT_PATTERN.search(clause):
+        if any(pattern.search(clause) for pattern in _OMISSION_REVERSED_CONFLICT_PATTERNS):
             return False
         return _OMISSION_IDENTITY_CONFLICT_PATTERN.search(clause) is not None
     if any(

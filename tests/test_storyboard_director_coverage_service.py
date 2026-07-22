@@ -774,6 +774,14 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
         "The camera moves and Alex advances.",
         "The camera moves and Alex near the camera advances.",
         "The camera does not move or Alex advances.",
+        "Alex and the camera advance.",
+        "The camera and Alex advance.",
+        "Alex or the camera advances.",
+        "The camera or Alex advances.",
+        "The camera operator advances.",
+        "The camera operators advance.",
+        "The lighting technician moves.",
+        "The particle researcher turns.",
         "She moves forward.",
         "The warrior turns and advances.",
         "The package rotates and moves forward.",
@@ -797,7 +805,10 @@ def test_final_validation_accepts_general_subject_execution_text(motion: str) ->
         "The final state remains unchanged.",
         "Camera circles the subject while the subject remains static.",
         "The camera moves around the subject.",
+        "The camera advances.",
+        "The lens moves.",
         "The particles move around the product.",
+        "The particles transform.",
         "The effect transforms around the material.",
         "The warrior does not advance.",
         "The warrior does not move but the camera advances.",
@@ -1154,6 +1165,502 @@ def test_review_rejects_endpoint_only_text_under_non_endpoint_category() -> None
 
     assert review.status == "unrecoverable"
     assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+@pytest.mark.parametrize(
+    ("field_updates", "message"),
+    [
+        (
+            {
+                "omission_reason": "The mechanism is unavailable only in the final pose.",
+                "literal_infeasibility_evidence": (
+                    "The mechanism is unavailable only in the final pose."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": "The mechanism is absent from the last frame only.",
+                "literal_infeasibility_evidence": (
+                    "The mechanism is absent from the last frame only."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": (
+                    "The target mechanism is unavailable only at the endpoint."
+                ),
+                "literal_infeasibility_evidence": (
+                    "The target mechanism is unavailable only at the endpoint."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "equivalent_replacement_failure": (
+                    "An equivalent with the same causal role is unavailable only in the "
+                    "ending frame."
+                ),
+                "equivalent_infeasibility_evidence": (
+                    "An equivalent with the same causal role is unavailable only in the "
+                    "ending frame."
+                ),
+            },
+            "equivalent infeasibility category does not match",
+        ),
+    ],
+)
+def test_signature_schema_rejects_endpoint_scoped_infeasibility_claims(
+    field_updates: dict[str, str],
+    message: str,
+) -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action requires articulated target motion."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Execution is impossible because the target mechanism has no articulated parts."
+        ),
+        "equivalent_replacement_failure": (
+            "No equivalent causal mechanism exists in the target evidence."
+        ),
+        "literal_infeasibility_category": "mechanism_unavailable",
+        "literal_infeasibility_evidence": "Target evidence shows no articulated mechanism.",
+        "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+        "equivalent_infeasibility_evidence": (
+            "Target evidence shows no alternative mechanism with the same causal role."
+        ),
+        **field_updates,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        moment_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {
+            "omission_reason": "The mechanism is unavailable only in the final pose.",
+            "literal_infeasibility_evidence": (
+                "The mechanism is unavailable only in the final pose."
+            ),
+        },
+        {
+            "omission_reason": "The mechanism is absent from the last frame only.",
+            "literal_infeasibility_evidence": (
+                "The mechanism is absent from the last frame only."
+            ),
+        },
+        {
+            "omission_reason": "The target mechanism is unavailable only at the endpoint.",
+            "literal_infeasibility_evidence": (
+                "The target mechanism is unavailable only at the endpoint."
+            ),
+        },
+        {
+            "equivalent_replacement_failure": (
+                "An equivalent with the same causal role is unavailable only in the ending "
+                "frame."
+            ),
+            "equivalent_infeasibility_evidence": (
+                "An equivalent with the same causal role is unavailable only in the ending "
+                "frame."
+            ),
+        },
+    ],
+)
+def test_review_rejects_endpoint_scoped_infeasibility_claims(
+    field_updates: dict[str, str],
+) -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": (
+                "Execution is impossible because the target mechanism has no articulated "
+                "parts."
+            ),
+            "equivalent_replacement_failure": (
+                "No equivalent causal mechanism exists in the target evidence."
+            ),
+            "literal_infeasibility_category": "mechanism_unavailable",
+            "literal_infeasibility_evidence": (
+                "Target evidence shows no articulated mechanism."
+            ),
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": (
+                "Target evidence shows no alternative mechanism with the same causal role."
+            ),
+            **field_updates,
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "unrecoverable"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+@pytest.mark.parametrize(
+    ("field_updates", "message"),
+    [
+        (
+            {
+                "omission_reason": "The target identity has no identity conflict.",
+                "literal_infeasibility_category": "identity_semantics_conflict",
+                "literal_infeasibility_evidence": (
+                    "The target identity has no identity conflict."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": "The target identity conflict is absent.",
+                "literal_infeasibility_category": "identity_semantics_conflict",
+                "literal_infeasibility_evidence": (
+                    "The target identity conflict is absent."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": "The target identity is compatible with no conflict.",
+                "literal_infeasibility_category": "identity_semantics_conflict",
+                "literal_infeasibility_evidence": (
+                    "The target identity is compatible with no conflict."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": "The target mechanism is far from unavailable.",
+                "literal_infeasibility_evidence": (
+                    "The target mechanism is far from unavailable."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "omission_reason": "The target mechanism is by no means unavailable.",
+                "literal_infeasibility_evidence": (
+                    "The target mechanism is by no means unavailable."
+                ),
+            },
+            "literal infeasibility category does not match",
+        ),
+        (
+            {
+                "equivalent_replacement_failure": (
+                    "A causal equivalent with the same role is far from unavailable."
+                ),
+                "equivalent_infeasibility_evidence": (
+                    "A causal equivalent with the same role is far from unavailable."
+                ),
+            },
+            "equivalent infeasibility category does not match",
+        ),
+    ],
+)
+def test_signature_schema_rejects_reversed_infeasibility_polarity(
+    field_updates: dict[str, str],
+    message: str,
+) -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action requires articulated target motion."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Execution is impossible because the target mechanism has no articulated parts."
+        ),
+        "equivalent_replacement_failure": (
+            "No equivalent causal mechanism exists in the target evidence."
+        ),
+        "literal_infeasibility_category": "mechanism_unavailable",
+        "literal_infeasibility_evidence": "Target evidence shows no articulated mechanism.",
+        "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+        "equivalent_infeasibility_evidence": (
+            "Target evidence shows no alternative mechanism with the same causal role."
+        ),
+        **field_updates,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        moment_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {
+            "omission_reason": "The target identity has no identity conflict.",
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": "The target identity has no identity conflict.",
+        },
+        {
+            "omission_reason": "The target identity conflict is absent.",
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": "The target identity conflict is absent.",
+        },
+        {
+            "omission_reason": "The target identity is compatible with no conflict.",
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": (
+                "The target identity is compatible with no conflict."
+            ),
+        },
+        {
+            "omission_reason": "The target mechanism is far from unavailable.",
+            "literal_infeasibility_evidence": (
+                "The target mechanism is far from unavailable."
+            ),
+        },
+        {
+            "omission_reason": "The target mechanism is by no means unavailable.",
+            "literal_infeasibility_evidence": (
+                "The target mechanism is by no means unavailable."
+            ),
+        },
+        {
+            "equivalent_replacement_failure": (
+                "A causal equivalent with the same role is far from unavailable."
+            ),
+            "equivalent_infeasibility_evidence": (
+                "A causal equivalent with the same role is far from unavailable."
+            ),
+        },
+    ],
+)
+def test_review_rejects_reversed_infeasibility_polarity(
+    field_updates: dict[str, str],
+) -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": (
+                "Execution is impossible because the target mechanism has no articulated "
+                "parts."
+            ),
+            "equivalent_replacement_failure": (
+                "No equivalent causal mechanism exists in the target evidence."
+            ),
+            "literal_infeasibility_category": "mechanism_unavailable",
+            "literal_infeasibility_evidence": (
+                "Target evidence shows no articulated mechanism."
+            ),
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": (
+                "Target evidence shows no alternative mechanism with the same causal role."
+            ),
+            **field_updates,
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "unrecoverable"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {
+            "omission_reason": (
+                "The target mechanism is globally unavailable throughout the clip; it is "
+                "also absent from the final pose only."
+            ),
+            "literal_infeasibility_evidence": (
+                "The target mechanism is globally unavailable throughout the clip; it is "
+                "also absent from the final pose only."
+            ),
+        },
+        {
+            "omission_reason": (
+                "The target capability is unavailable throughout the clip; it is absent "
+                "from the final frame only."
+            ),
+            "literal_infeasibility_category": "target_capability_unavailable",
+            "literal_infeasibility_evidence": (
+                "The target capability is unavailable throughout the clip; it is absent "
+                "from the final frame only."
+            ),
+        },
+        {
+            "omission_reason": (
+                "The target identity has a semantic conflict throughout the clip; that "
+                "conflict is absent in the final frame."
+            ),
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": (
+                "The target identity has a semantic conflict throughout the clip; that "
+                "conflict is absent in the final frame."
+            ),
+        },
+        {
+            "equivalent_replacement_failure": (
+                "A causal equivalent with the same role is globally unavailable throughout "
+                "the clip; it is absent from the ending frame only."
+            ),
+            "equivalent_infeasibility_evidence": (
+                "A causal equivalent with the same role is globally unavailable throughout "
+                "the clip; it is absent from the ending frame only."
+            ),
+        },
+    ],
+)
+def test_signature_schema_accepts_independent_global_infeasibility(
+    field_updates: dict[str, str],
+) -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action requires articulated target motion."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Execution is impossible because the target mechanism has no articulated parts."
+        ),
+        "equivalent_replacement_failure": (
+            "No equivalent causal mechanism exists in the target evidence."
+        ),
+        "literal_infeasibility_category": "mechanism_unavailable",
+        "literal_infeasibility_evidence": "Target evidence shows no articulated mechanism.",
+        "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+        "equivalent_infeasibility_evidence": (
+            "Target evidence shows no alternative mechanism with the same causal role."
+        ),
+        **field_updates,
+    }
+
+    moment = moment_type.model_validate(payload)
+
+    assert moment.strategy == "omit"
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {
+            "omission_reason": (
+                "The target mechanism is globally unavailable throughout the clip; it is "
+                "also absent from the final pose only."
+            ),
+            "literal_infeasibility_evidence": (
+                "The target mechanism is globally unavailable throughout the clip; it is "
+                "also absent from the final pose only."
+            ),
+        },
+        {
+            "omission_reason": (
+                "The target capability is unavailable throughout the clip; it is absent "
+                "from the final frame only."
+            ),
+            "literal_infeasibility_category": "target_capability_unavailable",
+            "literal_infeasibility_evidence": (
+                "The target capability is unavailable throughout the clip; it is absent "
+                "from the final frame only."
+            ),
+        },
+        {
+            "omission_reason": (
+                "The target identity has a semantic conflict throughout the clip; that "
+                "conflict is absent in the final frame."
+            ),
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": (
+                "The target identity has a semantic conflict throughout the clip; that "
+                "conflict is absent in the final frame."
+            ),
+        },
+        {
+            "equivalent_replacement_failure": (
+                "A causal equivalent with the same role is globally unavailable throughout "
+                "the clip; it is absent from the ending frame only."
+            ),
+            "equivalent_infeasibility_evidence": (
+                "A causal equivalent with the same role is globally unavailable throughout "
+                "the clip; it is absent from the ending frame only."
+            ),
+        },
+    ],
+)
+def test_review_accepts_independent_global_infeasibility(
+    field_updates: dict[str, str],
+) -> None:
+    analysis = _analysis()
+    base_plan = _plan(source_ids=["core_behavior"])
+    omitted = base_plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": (
+                "Execution is impossible because the target mechanism has no articulated "
+                "parts."
+            ),
+            "equivalent_replacement_failure": (
+                "No equivalent causal mechanism exists in the target evidence."
+            ),
+            "literal_infeasibility_category": "mechanism_unavailable",
+            "literal_infeasibility_evidence": (
+                "Target evidence shows no articulated mechanism."
+            ),
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": (
+                "Target evidence shows no alternative mechanism with the same causal role."
+            ),
+            **field_updates,
+        }
+    )
+    plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "pass"
+    assert review.validly_omitted_core_behavior_beat_ids == ["core_behavior"]
 
 
 @pytest.mark.parametrize("emphasis", ["not only", "not merely"])

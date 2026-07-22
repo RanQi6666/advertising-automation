@@ -413,6 +413,47 @@ _SUPPORT_ONLY_ACTOR_TERMS = set(_SUPPORT_ONLY_MOTION_TERMS) | {
     "background",
     "lighting",
 }
+_ACTOR_ENTITY_HEAD_TERMS = {
+    "actor",
+    "artist",
+    "character",
+    "crew",
+    "designer",
+    "driver",
+    "engineer",
+    "human",
+    "operator",
+    "performer",
+    "person",
+    "pilot",
+    "researcher",
+    "scientist",
+    "specialist",
+    "subject",
+    "technician",
+    "user",
+    "worker",
+}
+_SUPPORT_COMPOUND_HEAD_TERMS = {
+    "array",
+    "background",
+    "beam",
+    "bloom",
+    "cloud",
+    "composition",
+    "effect",
+    "field",
+    "flare",
+    "frame",
+    "glow",
+    "layer",
+    "lighting",
+    "particles",
+    "rig",
+    "shot",
+    "system",
+    "trail",
+}
 
 
 def _latest_predicate_coordinator(
@@ -448,6 +489,13 @@ def _predicate_context(
     previous_predicate_negated: bool,
 ) -> tuple[str | None, bool]:
     boundary = _latest_predicate_coordinator(clause, predicate_start)
+    if boundary is not None and previous_actor_phrase is None:
+        prefix = clause[: boundary.start()]
+        prefix_has_predicate = _ACTOR_AUXILIARY_PATTERN.search(prefix) is not None or any(
+            re.search(pattern, prefix) for pattern in _SUBJECT_EXECUTION_PATTERNS
+        )
+        if not prefix_has_predicate:
+            boundary = None
     scope_start = boundary.end() if boundary is not None else 0
     local_scope = clause[scope_start:predicate_start]
     local_actor_phrase = _actor_phrase_from_scope(local_scope)
@@ -468,14 +516,34 @@ def _predicate_context(
     return actor_phrase, previous_predicate_negated if inherits_negation else False
 
 
-def _is_support_only_actor(actor_phrase: str) -> bool:
-    actor_core = _ACTOR_MODIFIER_BOUNDARY_PATTERN.split(actor_phrase, maxsplit=1)[0]
+def _actor_token_matches(token: str, terms: set[str]) -> bool:
+    return token in terms or (token.endswith("s") and token[:-1] in terms)
+
+
+def _actor_member_is_support_only(actor_member: str) -> bool:
+    actor_core = _ACTOR_MODIFIER_BOUNDARY_PATTERN.split(actor_member, maxsplit=1)[0]
     tokens = re.findall(r"[a-z][a-z'-]*", actor_core)
-    for token in tokens:
-        singular = token[:-1] if token.endswith("s") else token
-        if token in _SUPPORT_ONLY_ACTOR_TERMS or singular in _SUPPORT_ONLY_ACTOR_TERMS:
-            return True
-    return False
+    if not tokens:
+        return False
+    head = tokens[-1]
+    if _actor_token_matches(head, _ACTOR_ENTITY_HEAD_TERMS):
+        return False
+    if _actor_token_matches(head, _SUPPORT_ONLY_ACTOR_TERMS):
+        return True
+    return _actor_token_matches(head, _SUPPORT_COMPOUND_HEAD_TERMS) and any(
+        _actor_token_matches(token, _SUPPORT_ONLY_ACTOR_TERMS) for token in tokens[:-1]
+    )
+
+
+def _is_support_only_actor(actor_phrase: str) -> bool:
+    actor_members = [
+        member.strip()
+        for member in re.split(r"\b(?:and|or)\b", actor_phrase)
+        if member.strip()
+    ]
+    return bool(actor_members) and all(
+        _actor_member_is_support_only(member) for member in actor_members
+    )
 
 
 def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
