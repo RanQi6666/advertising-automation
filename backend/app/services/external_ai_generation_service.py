@@ -14,8 +14,8 @@ from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    FrameAnalysis,
     FrameAnchoredStoryboard,
-    TimelineAdaptationPlan,
     TopicCandidate,
     VideoStoryboardCandidate,
     validate_director_coverage,
@@ -390,63 +390,73 @@ class ExternalAIGenerationService:
         llm = get_llm_provider()
         reference_service = StoryboardReferenceVideoService()
         prepared_reference: PreparedReferenceVideo | None = None
+        frame_analysis = _cached_frame_anchored_analysis(task)
         try:
-            if payload.reference_video is not None:
-                prepared_reference = await reference_service.prepare(
+            if frame_analysis is None:
+                if payload.reference_video is not None:
+                    prepared_reference = await reference_service.prepare(
+                        session,
+                        payload.reference_video,
+                        task_id=task.id,
+                    )
+                async with llm_text_rate_limiter():
+                    frame_analysis = await llm.analyze_video_frame_pair(
+                        first_frame_image_url=payload.first_frame_image_url,
+                        last_frame_image_url=payload.last_frame_image_url,
+                        duration_seconds=payload.duration_seconds,
+                        aspect_ratio=payload.aspect_ratio,
+                        reference_frames=(
+                            prepared_reference.frames if prepared_reference is not None else None
+                        ),
+                        reference_video_duration_seconds=(
+                            prepared_reference.duration_seconds
+                            if prepared_reference is not None
+                            else None
+                        ),
+                        reference_video_sample_interval_seconds=(
+                            prepared_reference.sample_interval_seconds
+                            if prepared_reference is not None
+                            else None
+                        ),
+                    )
+                if (
+                    payload.reference_video is not None
+                    and frame_analysis.reference_video_analysis is None
+                ):
+                    raise ProviderError("Visual model did not return reference video analysis.")
+                if frame_analysis.reference_video_analysis is not None:
+                    frame_analysis = frame_analysis.model_copy(
+                        update={
+                            "timeline_adaptation_plan": adapt_reference_behavior_timeline(
+                                frame_analysis.reference_video_analysis,
+                                target_duration_seconds=payload.duration_seconds,
+                            )
+                        }
+                    )
+                await _store_frame_anchored_private_metadata(
                     session,
-                    payload.reference_video,
-                    task_id=task.id,
+                    task,
+                    frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
-            async with llm_text_rate_limiter():
-                frame_analysis = await llm.analyze_video_frame_pair(
-                    first_frame_image_url=payload.first_frame_image_url,
-                    last_frame_image_url=payload.last_frame_image_url,
-                    duration_seconds=payload.duration_seconds,
-                    aspect_ratio=payload.aspect_ratio,
-                    reference_frames=(
-                        prepared_reference.frames if prepared_reference is not None else None
-                    ),
-                    reference_video_duration_seconds=(
-                        prepared_reference.duration_seconds
-                        if prepared_reference is not None
-                        else None
-                    ),
-                    reference_video_sample_interval_seconds=(
-                        prepared_reference.sample_interval_seconds
-                        if prepared_reference is not None
-                        else None
-                    ),
-                )
-            if (
-                payload.reference_video is not None
-                and frame_analysis.reference_video_analysis is None
-            ):
-                raise ProviderError("Visual model did not return reference video analysis.")
-            if frame_analysis.reference_video_analysis is not None:
+
+            if frame_analysis.director_plan is None:
+                async with llm_text_rate_limiter():
+                    director_plan = await llm.direct_frame_anchored_video_storyboard(
+                        first_frame_image_url=payload.first_frame_image_url,
+                        last_frame_image_url=payload.last_frame_image_url,
+                        frame_analysis=frame_analysis,
+                        duration_seconds=payload.duration_seconds,
+                        aspect_ratio=payload.aspect_ratio,
+                    )
                 frame_analysis = frame_analysis.model_copy(
-                    update={
-                        "timeline_adaptation_plan": adapt_reference_behavior_timeline(
-                            frame_analysis.reference_video_analysis,
-                            target_duration_seconds=payload.duration_seconds,
-                        )
-                    }
+                    update={"director_plan": director_plan}
                 )
-            async with llm_text_rate_limiter():
-                director_plan = await llm.direct_frame_anchored_video_storyboard(
-                    first_frame_image_url=payload.first_frame_image_url,
-                    last_frame_image_url=payload.last_frame_image_url,
-                    frame_analysis=frame_analysis,
-                    duration_seconds=payload.duration_seconds,
-                    aspect_ratio=payload.aspect_ratio,
+                await _store_frame_anchored_private_metadata(
+                    session,
+                    task,
+                    frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
-            frame_analysis = frame_analysis.model_copy(
-                update={"director_plan": director_plan}
-            )
-            await _store_frame_anchored_private_metadata(
-                session,
-                task,
-                frame_analysis=frame_analysis.model_dump(mode="json"),
-            )
+
             async with llm_text_rate_limiter():
                 storyboard = await llm.generate_frame_anchored_video_storyboard(
                     first_frame_image_url=payload.first_frame_image_url,
@@ -455,6 +465,11 @@ class ExternalAIGenerationService:
                     duration_seconds=payload.duration_seconds,
                     aspect_ratio=payload.aspect_ratio,
                 )
+            await _store_frame_anchored_private_metadata(
+                session,
+                task,
+                storyboard_candidate=storyboard.model_dump(mode="json"),
+            )
             try:
                 validate_director_coverage(storyboard, frame_analysis.director_plan)
             except ValueError as exc:
@@ -468,10 +483,7 @@ class ExternalAIGenerationService:
             )
             return {
                 "request_id": _request_id(payload.external_request_id, task.id),
-                "storyboard_text": _format_frame_anchored_storyboard_text(
-                    storyboard,
-                    timeline_adaptation_plan=frame_analysis.timeline_adaptation_plan,
-                ),
+                "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
                 "duration_seconds": payload.duration_seconds,
                 "aspect_ratio": payload.aspect_ratio,
             }
@@ -814,16 +826,33 @@ def _format_external_storyboard_text(storyboard: VideoStoryboardCandidate) -> st
     return "\n\n".join(blocks)
 
 
+def _cached_frame_anchored_analysis(task: GenerationTask) -> FrameAnalysis | None:
+    metadata = task.metadata_json or {}
+    cached = metadata.get("frame_analysis")
+    if not isinstance(cached, dict):
+        return None
+    try:
+        return FrameAnalysis.model_validate(cached)
+    except ValueError:
+        return None
+
+
 async def _store_frame_anchored_private_metadata(
     session: AsyncSession,
     task: GenerationTask,
     *,
     frame_analysis: dict[str, Any] | None = None,
+    storyboard_candidate: dict[str, Any] | None = None,
     storyboard: dict[str, Any] | None = None,
 ) -> None:
     metadata = task.metadata_json or {}
     if frame_analysis is not None:
         metadata = {**metadata, "frame_analysis": frame_analysis}
+    if storyboard_candidate is not None:
+        metadata = {
+            **metadata,
+            "frame_anchored_storyboard_candidate": storyboard_candidate,
+        }
     if storyboard is not None:
         metadata = {**metadata, "frame_anchored_storyboard": storyboard}
     task.metadata_json = metadata
@@ -834,8 +863,6 @@ async def _store_frame_anchored_private_metadata(
 
 def _format_frame_anchored_storyboard_text(
     storyboard: FrameAnchoredStoryboard,
-    *,
-    timeline_adaptation_plan: TimelineAdaptationPlan | None = None,
 ) -> str:
     blocks = [
         f"Duration: {storyboard.duration_seconds}s",
@@ -848,7 +875,11 @@ def _format_frame_anchored_storyboard_text(
             f"Scene {scene_index} ({timing})",
             f"Anchor: {scene.frame_anchor}",
             f"Visual: {scene.visual}",
-            f"Cinematic beat: {scene.cinematic_beat or '-'}",
+            (
+                f"Cinematic beats: {', '.join(scene.cinematic_beats)}"
+                if scene.cinematic_beats
+                else f"Cinematic beat: {scene.cinematic_beat or '-'}"
+            ),
             f"Tension stage: {scene.tension_stage or '-'}",
             f"Camera and motion: {scene.motion or '-'}",
             f"Camera instruction: {scene.camera_instruction or '-'}",
@@ -882,25 +913,6 @@ def _format_frame_anchored_storyboard_text(
     )
     if storyboard.rationale:
         blocks.append(f"Overall direction: {storyboard.rationale}")
-    if timeline_adaptation_plan is not None and timeline_adaptation_plan.beats:
-        timeline_lines = [
-            "Target timeline adaptation (reference seconds are not generation seconds):"
-        ]
-        for beat in timeline_adaptation_plan.beats:
-            persistence = (
-                "; required final overlay on the target last-frame base layer"
-                if beat.must_remain_visible_until_final
-                else ""
-            )
-            timeline_lines.append(
-                f"- {beat.beat_id} ({beat.target_start_second:.2f}-{beat.target_end_second:.2f}s): "
-                f"{beat.description}. {beat.adaptation_instruction}{persistence}"
-            )
-        if timeline_adaptation_plan.adaptation_risks:
-            timeline_lines.append(
-                "Timing review: " + " ".join(timeline_adaptation_plan.adaptation_risks)
-            )
-        blocks.append("\n".join(timeline_lines))
     return "\n\n".join(blocks)
 
 

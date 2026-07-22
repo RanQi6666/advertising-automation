@@ -271,12 +271,42 @@ class DirectorOverlayInstruction(BaseModel):
     final_frame_requirement: str = Field(min_length=1)
 
 
+class DirectorSignatureMoment(BaseModel):
+    moment_id: str = Field(min_length=1)
+    moment_type: Literal["camera", "action", "effect", "result", "combined"]
+    source_evidence: list[str] = Field(min_length=1)
+    strategy: Literal["preserve", "adapt", "omit"]
+    target_adaptation: str = ""
+    assigned_beat_id: str | None = None
+    omission_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_signature_moment(self) -> "DirectorSignatureMoment":
+        if any(not evidence.strip() for evidence in self.source_evidence):
+            raise ValueError("signature moment source evidence must not be blank")
+        if self.strategy in {"preserve", "adapt"}:
+            if not self.assigned_beat_id or not self.assigned_beat_id.strip():
+                raise ValueError(
+                    "preserved or adapted signature moment requires an assigned beat"
+                )
+            if not self.target_adaptation.strip():
+                raise ValueError(
+                    "preserved or adapted signature moment requires a target adaptation"
+                )
+        if self.strategy == "omit" and (
+            self.omission_reason is None or not self.omission_reason.strip()
+        ):
+            raise ValueError("omitted signature moment requires a reason")
+        return self
+
+
 class FrameAnchoredDirectorPlan(BaseModel):
     narrative_objective: str = Field(min_length=1)
     attention_path: list[str] = Field(min_length=1)
     tension_curve: list[DirectorTensionStage] = Field(min_length=1)
     climax_beats: list[DirectorBeat] = Field(min_length=1)
     overlay_lifecycle_plan: list[DirectorOverlayInstruction] = Field(default_factory=list)
+    signature_moment_plan: list[DirectorSignatureMoment] = Field(default_factory=list)
     anchor_adaptation_plan: list[str] = Field(min_length=1)
     anti_flattening_constraints: list[str] = Field(min_length=1)
 
@@ -294,11 +324,28 @@ class FrameAnchoredDirectorPlan(BaseModel):
             raise ValueError("director tension stages must be in ascending order")
         if "climax" not in self.tension_curve:
             raise ValueError("director tension curve requires a climax stage")
+        beats_by_id = {beat.beat_id: beat for beat in self.climax_beats}
         for beat in self.climax_beats:
             if beat.stage != "climax":
                 raise ValueError("director climax beats must use climax stage")
             if not beat.source_evidence:
                 raise ValueError("climax beat requires source evidence")
+        signature_ids: set[str] = set()
+        for moment in self.signature_moment_plan:
+            if moment.moment_id in signature_ids:
+                raise ValueError("director signature moment ids must be unique")
+            signature_ids.add(moment.moment_id)
+            if moment.strategy not in {"preserve", "adapt"}:
+                continue
+            assigned_beat = beats_by_id.get(moment.assigned_beat_id or "")
+            if assigned_beat is None:
+                raise ValueError(
+                    "signature moment must reference an existing director beat"
+                )
+            if assigned_beat.importance != "core":
+                raise ValueError(
+                    "signature moment must be assigned to a core director beat"
+                )
         if any(not constraint.strip() for constraint in self.anti_flattening_constraints):
             raise ValueError("director anti-flattening constraints must not be blank")
         return self
@@ -334,6 +381,7 @@ class FrameAnchoredStoryboardScene(BaseModel):
     sound_effects: list[str] = Field(default_factory=list)
     notes: str | None = None
     cinematic_beat: str | None = None
+    cinematic_beats: list[str] = Field(default_factory=list)
     camera_instruction: str | None = None
     tension_stage: DirectorTensionStage | None = None
     action_result_requirement: str | None = None
@@ -364,24 +412,65 @@ class FrameAnchoredStoryboard(BaseModel):
         return self
 
 
+def _scene_director_beat_ids(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    valid_beat_ids: set[str] | None = None,
+) -> set[str]:
+    beat_ids = {beat_id.strip() for beat_id in scene.cinematic_beats if beat_id.strip()}
+    legacy_beat_id = (scene.cinematic_beat or "").strip()
+    if legacy_beat_id:
+        beat_ids.add(legacy_beat_id)
+    if valid_beat_ids is not None:
+        beat_ids.intersection_update(valid_beat_ids)
+    return beat_ids
+
+
+def _scene_can_carry_director_beat(scene: FrameAnchoredStoryboardScene) -> bool:
+    has_timed_window = (
+        scene.start_second is not None
+        and scene.end_second is not None
+        and scene.end_second > scene.start_second
+    )
+    has_climax_direction = any(
+        (value or "").strip()
+        for value in (
+            scene.camera_instruction,
+            scene.action_result_requirement,
+            scene.effect_timing,
+            scene.anti_flattening_requirement,
+        )
+    )
+    return (
+        has_timed_window
+        or scene.frame_anchor == "transition"
+        or scene.tension_stage == "climax"
+        or has_climax_direction
+    )
+
+
 def _assign_missing_director_beat_ids(
     storyboard: FrameAnchoredStoryboard,
     plan: FrameAnchoredDirectorPlan,
 ) -> None:
-    """Link unlabeled scenes to core director beats without changing their creative content."""
-    available_scenes = [
-        scene for scene in storyboard.scenes if not (scene.cinematic_beat or "").strip()
+    """Link core beats by target-time overlap without changing scene creative direction."""
+    valid_beat_ids = {beat.beat_id for beat in plan.climax_beats}
+    assigned_beat_ids = set().union(
+        *(
+            _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids)
+            for scene in storyboard.scenes
+        )
+    )
+    candidate_scenes = [
+        scene for scene in storyboard.scenes if _scene_can_carry_director_beat(scene)
     ]
-    duration = float(storyboard.duration_seconds)
-    assigned_beat_ids = {
-        scene.cinematic_beat for scene in storyboard.scenes if scene.cinematic_beat
-    }
+    if not candidate_scenes:
+        return
 
+    duration = float(storyboard.duration_seconds)
     for beat in plan.climax_beats:
         if beat.importance != "core" or beat.beat_id in assigned_beat_ids:
             continue
-        if not available_scenes:
-            return
 
         beat_start = beat.start_ratio * duration
         beat_end = beat.end_ratio * duration
@@ -407,10 +496,12 @@ def _assign_missing_director_beat_ids(
                 1 if scene.frame_anchor == "transition" else 0,
             )
 
-        scene = max(available_scenes, key=scene_score)
-        scene.cinematic_beat = beat.beat_id
+        scene = max(candidate_scenes, key=scene_score)
+        if beat.beat_id not in scene.cinematic_beats:
+            scene.cinematic_beats.append(beat.beat_id)
+        if not (scene.cinematic_beat or "").strip():
+            scene.cinematic_beat = beat.beat_id
         assigned_beat_ids.add(beat.beat_id)
-        available_scenes.remove(scene)
 
 
 def validate_director_coverage(
@@ -420,10 +511,17 @@ def validate_director_coverage(
     if plan is None:
         return
     _assign_missing_director_beat_ids(storyboard, plan)
+    valid_beat_ids = {beat.beat_id for beat in plan.climax_beats}
+    covered_beat_ids = set().union(
+        *(
+            _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids)
+            for scene in storyboard.scenes
+        )
+    )
     for beat in plan.climax_beats:
         if beat.importance != "core":
             continue
-        if not any(scene.cinematic_beat == beat.beat_id for scene in storyboard.scenes):
+        if beat.beat_id not in covered_beat_ids:
             raise ValueError(f"storyboard is missing required director beat: {beat.beat_id}")
 
 
