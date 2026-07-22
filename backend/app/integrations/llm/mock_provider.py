@@ -46,7 +46,10 @@ def _mock_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[Any]:
 def _mock_storyboard_boundaries(duration_seconds: int) -> tuple[int, int, int]:
     opening_end = max(1, min(duration_seconds - 3, round(duration_seconds * 0.08)))
     action_end = max(opening_end + 1, min(duration_seconds - 2, round(duration_seconds * 0.58)))
-    final_lock_start = max(action_end + 1, duration_seconds - max(1, round(duration_seconds * 0.17)))
+    final_lock_start = max(
+        action_end + 1,
+        duration_seconds - max(1, round(duration_seconds * 0.17)),
+    )
     final_lock_start = min(final_lock_start, duration_seconds - 1)
     return opening_end, action_end, final_lock_start
 
@@ -172,9 +175,15 @@ class MockLLMProvider:
                     "source_behavior_beat_ids": [primary_behavior.beat_id],
                     "transfer_role": "primary_action",
                     "strategy": "adapt",
-                    "target_adaptation": "Execute the observed causal role with the supplied target identity.",
-                    "adapted_action": "Execute the target-compatible causal action or state change.",
-                    "temporary_divergence": "Allow a different middle pose while keeping a continuous return.",
+                    "target_adaptation": (
+                        "Execute the observed causal role with the supplied target identity."
+                    ),
+                    "adapted_action": (
+                        "Execute the target-compatible causal action or state change."
+                    ),
+                    "temporary_divergence": (
+                        "Allow a different middle pose while keeping a continuous return."
+                    ),
                     "camera_support": "Reframe continuously around the execution and payoff.",
                     "effect_support": "Peak support only after the subject motion reads.",
                     "visible_payoff": "Show the visible target-state change.",
@@ -228,7 +237,11 @@ class MockLLMProvider:
         del first_frame_image_url, last_frame_image_url
         director_plan = frame_analysis.director_plan
         director_beat = next(
-            (beat for beat in (director_plan.climax_beats if director_plan else []) if beat.importance == "core"),
+            (
+                beat
+                for beat in (director_plan.climax_beats if director_plan else [])
+                if beat.importance == "core"
+            ),
             None,
         )
         signature_moment = next(
@@ -248,7 +261,9 @@ class MockLLMProvider:
         if signature_moment is not None and director_beat is not None:
             action_result_requirement = signature_moment.visible_payoff
             if correction_note:
-                action_result_requirement = f"{action_result_requirement} Corrections: {correction_note}"
+                action_result_requirement = (
+                    f"{action_result_requirement} Corrections: {correction_note}"
+                )
             action_camera_instruction = (
                 signature_moment.camera_support or director_beat.camera_instruction
             )
@@ -308,7 +323,9 @@ class MockLLMProvider:
                         frame_anchor="transition",
                         visual="Resolve the payoff and return to the ending composition.",
                         motion="Settle continuously toward the final state.",
-                        transition_goal="Restore the supplied ending pose, framing, and setting in-shot.",
+                        transition_goal=(
+                            "Restore the supplied ending pose, framing, and setting in-shot."
+                        ),
                         sound_effects=["Resolve sweep."],
                         anchor_return_instruction=return_instruction,
                     ),
@@ -363,9 +380,15 @@ class MockLLMProvider:
                         start_second=2,
                         end_second=duration_seconds,
                         frame_anchor="last_frame",
-                        visual="Resolve the payoff and lock the exact supplied last-frame visual state.",
+                        visual=(
+                            "Resolve the payoff and lock the exact supplied last-frame "
+                            "visual state."
+                        ),
                         motion="Settle into the supplied final composition.",
-                        transition_goal="Merge the return and final lock into the ending anchor without a cut.",
+                        transition_goal=(
+                            "Merge the return and final lock into the ending anchor without "
+                            "a cut."
+                        ),
                         sound_effects=["Resolve sweep.", "Ending ambience."],
                         anchor_return_instruction=return_instruction,
                     ),
@@ -388,9 +411,15 @@ class MockLLMProvider:
                         start_second=first_end,
                         end_second=final_end,
                         frame_anchor="last_frame",
-                        visual="Execute the target-compatible causal action, show the payoff, and settle into the exact final anchor.",
+                        visual=(
+                            "Execute the target-compatible causal action, show the payoff, "
+                            "and settle into the exact final anchor."
+                        ),
                         motion=signature_moment.adapted_action,
-                        transition_goal="Merge the action, return, and final lock into the ending anchor without a cut.",
+                        transition_goal=(
+                            "Merge the action, return, and final lock into the ending anchor "
+                            "without a cut."
+                        ),
                         sound_effects=["Action rise.", "Resolve sweep.", "Ending ambience."],
                         cinematic_beat=director_beat.beat_id,
                         cinematic_beats=[director_beat.beat_id],
@@ -415,7 +444,9 @@ class MockLLMProvider:
         else:
             action_result_requirement = director_beat.action_requirement if director_beat else None
             if action_result_requirement and correction_note:
-                action_result_requirement = f"{action_result_requirement} Corrections: {correction_note}"
+                action_result_requirement = (
+                    f"{action_result_requirement} Corrections: {correction_note}"
+                )
             if duration_seconds >= 3:
                 opening_end, _, _ = _mock_storyboard_boundaries(duration_seconds)
                 last_start = max(
@@ -440,10 +471,14 @@ class MockLLMProvider:
                         frame_anchor="transition",
                         visual="Bridge the two supplied visual states through continuous action.",
                         motion="Camera movement and lighting evolve toward the ending frame.",
-                        transition_goal="Maintain visual continuity while approaching the ending state.",
+                        transition_goal=(
+                            "Maintain visual continuity while approaching the ending state."
+                        ),
                         sound_effects=["Transition whoosh."],
                         cinematic_beat=director_beat.beat_id if director_beat else None,
-                        camera_instruction=director_beat.camera_instruction if director_beat else None,
+                        camera_instruction=(
+                            director_beat.camera_instruction if director_beat else None
+                        ),
                         tension_stage=director_beat.stage if director_beat else None,
                         action_result_requirement=action_result_requirement,
                         effect_timing=director_beat.effect_requirement if director_beat else None,
@@ -483,12 +518,20 @@ class MockLLMProvider:
                         start_second=first_end,
                         end_second=final_end,
                         frame_anchor="last_frame",
-                        visual="Bridge the remaining motion and arrive at the exact supplied last-frame visual state.",
-                        motion="Settle into the supplied final composition while completing the transition.",
+                        visual=(
+                            "Bridge the remaining motion and arrive at the exact supplied "
+                            "last-frame visual state."
+                        ),
+                        motion=(
+                            "Settle into the supplied final composition while completing "
+                            "the transition."
+                        ),
                         transition_goal="Preserve the ending frame without adding an end card.",
                         sound_effects=["Transition whoosh.", "Ending ambience."],
                         cinematic_beat=director_beat.beat_id if director_beat else None,
-                        camera_instruction=director_beat.camera_instruction if director_beat else None,
+                        camera_instruction=(
+                            director_beat.camera_instruction if director_beat else None
+                        ),
                         tension_stage=director_beat.stage if director_beat else None,
                         action_result_requirement=action_result_requirement,
                         effect_timing=director_beat.effect_requirement if director_beat else None,

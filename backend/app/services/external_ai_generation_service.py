@@ -494,7 +494,8 @@ class ExternalAIGenerationService:
                 )
             except ValueError as exc:
                 raise ProviderError(
-                    "LLM storyboard does not execute the required director action and final-anchor return."
+                    "LLM storyboard does not execute the required director action and "
+                    "final-anchor return."
                 ) from exc
             await _store_frame_anchored_private_metadata(
                 session,
@@ -907,7 +908,10 @@ def _format_frame_anchored_storyboard_text(
             f"Transition goal: {scene.transition_goal or '-'}",
             f"Action-result requirement: {scene.action_result_requirement or '-'}",
             f"Effect timing: {scene.effect_timing or '-'}",
-            f"Subject motion intensity: {_format_optional_intensity(scene.subject_motion_intensity)}",
+            (
+                "Subject motion intensity: "
+                f"{_format_optional_intensity(scene.subject_motion_intensity)}"
+            ),
             f"Camera intensity: {_format_optional_intensity(scene.camera_intensity)}",
             f"Effect intensity: {_format_optional_intensity(scene.effect_intensity)}",
             f"Return to final anchor: {scene.anchor_return_instruction or '-'}",

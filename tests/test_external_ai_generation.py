@@ -900,7 +900,10 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     assert "Scene 1" in data["storyboard_text"]
     assert "Cinematic beat:" not in data["storyboard_text"]
     assert "Cinematic beats:" not in data["storyboard_text"]
-    assert "Return to final anchor: Return continuously to the supplied last frame." in data["storyboard_text"]
+    assert (
+        "Return to final anchor: Return continuously to the supplied last frame."
+        in data["storyboard_text"]
+    )
     for private_field in (
         "frame_analysis",
         "director_plan",
@@ -1212,7 +1215,8 @@ async def test_storyboard_v2_stores_review_and_forwards_corrections(
             required_core_behavior_beat_ids=["core_behavior"],
             uncovered_core_behavior_beat_ids=["core_behavior"],
             correction_requirements=[
-                "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+                "Execute uncovered core behavior beat core_behavior in subject/state motion "
+                "and show its visible payoff."
             ],
         ),
     )
@@ -1240,7 +1244,8 @@ async def test_storyboard_v2_stores_review_and_forwards_corrections(
         assert result["storyboard_text"]
         assert task.metadata_json["director_action_coverage_review"]["status"] == "corrective"
         assert fake_llm.call_details[-1]["director_correction_requirements"] == [
-            "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+            "Execute uncovered core behavior beat core_behavior in subject/state motion "
+            "and show its visible payoff."
         ]
     await engine.dispose()
 
@@ -1304,7 +1309,9 @@ def test_frame_anchored_formatter_hides_private_ids() -> None:
                     "frame_anchor": "transition",
                     "visual": "Execute a target-compatible causal action.",
                     "motion": "Complete readable subject/state motion.",
-                    "camera_instruction": "Track the action payoff without losing endpoint compatibility.",
+                    "camera_instruction": (
+                        "Track the action payoff without losing endpoint compatibility."
+                    ),
                     "transition_goal": "Bridge opening cause to ending payoff.",
                     "action_result_requirement": "Show the action before the visible result.",
                     "effect_timing": "Peak after the action reads.",

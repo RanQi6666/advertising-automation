@@ -88,12 +88,36 @@ def _director_plan_payload(
                 "transfer_role": "primary_action",
                 "strategy": signature_strategy,
                 "target_adaptation": "Legacy-compatible summary.",
-                "adapted_action": "Execute the target-compatible causal action." if signature_strategy != "omit" else "",
-                "temporary_divergence": "Allow a different middle pose and composition." if signature_strategy != "omit" else "",
-                "camera_support": "Reframe continuously around execution." if signature_strategy != "omit" else "",
-                "effect_support": "Support the consequence without replacing action." if signature_strategy != "omit" else "",
-                "visible_payoff": "Show the resulting target-state change." if signature_strategy != "omit" else "",
-                "return_strategy": "Settle continuously into the exact final anchor." if signature_strategy != "omit" else "",
+                "adapted_action": (
+                    "Execute the target-compatible causal action."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
+                "temporary_divergence": (
+                    "Allow a different middle pose and composition."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
+                "camera_support": (
+                    "Reframe continuously around execution."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
+                "effect_support": (
+                    "Support the consequence without replacing action."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
+                "visible_payoff": (
+                    "Show the resulting target-state change."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
+                "return_strategy": (
+                    "Settle continuously into the exact final anchor."
+                    if signature_strategy != "omit"
+                    else ""
+                ),
                 "assigned_beat_id": assigned_beat_id,
                 "omission_reason": omission_reason,
                 "equivalent_replacement_failure": (
@@ -145,7 +169,9 @@ def _action_storyboard_response() -> dict[str, object]:
                 "frame_anchor": "transition",
                 "visual": "Resolve the payoff and return to the ending composition.",
                 "motion": "Settle continuously toward the final state.",
-                "anchor_return_instruction": "Restore final pose, framing, and camera continuously.",
+                "anchor_return_instruction": (
+                    "Restore final pose, framing, and camera continuously."
+                ),
             },
             {
                 "scene_index": 4,
@@ -195,7 +221,10 @@ def test_non_omitted_signature_allows_legacy_target_adaptation_to_be_empty() -> 
     plan = FrameAnchoredDirectorPlan.model_validate(payload)
 
     assert plan.signature_moment_plan[0].target_adaptation == ""
-    assert plan.signature_moment_plan[0].adapted_action == "Execute the target-compatible causal action."
+    assert (
+        plan.signature_moment_plan[0].adapted_action
+        == "Execute the target-compatible causal action."
+    )
 
 
 def test_director_plan_rejects_out_of_order_but_known_action_windows() -> None:
@@ -550,16 +579,22 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
                         "Execute the observed camera-action-effect relationship with target assets."
                     ),
                     "adapted_action": "Execute the observed action with target-compatible assets.",
-                    "temporary_divergence": "Allow a different middle pose while preserving the causal role.",
+                    "temporary_divergence": (
+                        "Allow a different middle pose while preserving the causal role."
+                    ),
                     "camera_support": "Reframe in-shot around the action and consequence.",
-                    "effect_support": "Peak the effect at the visible consequence without replacing the action.",
+                    "effect_support": (
+                        "Peak the effect at the visible consequence without replacing the action."
+                    ),
                     "visible_payoff": "Show the visible result of the action.",
                     "return_strategy": "Return continuously into the supplied final anchor.",
                     "assigned_beat_id": "decisive_result",
                     "omission_reason": None,
                 }
             ],
-            "final_anchor_return": "Resolve continuously into the exact supplied last-frame composition.",
+            "final_anchor_return": (
+                "Resolve continuously into the exact supplied last-frame composition."
+            ),
             "anchor_adaptation_plan": ["Resolve to the exact supplied last-frame composition."],
             "anti_flattening_constraints": [
                 "Do not collapse trigger, action, impact, and resolution into one flat move."
@@ -1467,7 +1502,8 @@ async def test_storyboard_call_receives_compact_corrections() -> None:
         12,
         "9:16",
         director_correction_requirements=[
-            "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+            "Execute uncovered core behavior beat core_behavior in subject/state motion "
+            "and show its visible payoff."
         ],
     )
 
@@ -1528,7 +1564,8 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
         duration_seconds,
         "9:16",
         director_correction_requirements=[
-            "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+            "Execute uncovered core behavior beat core_behavior in subject/state motion "
+            "and show its visible payoff."
         ],
     )
 
@@ -1871,7 +1908,9 @@ def _assert_mock_scene_timing(
         assert scene.start_second is not None
         assert scene.end_second is not None
         assert scene.end_second > scene.start_second
-    for previous_scene, scene in zip(storyboard.scenes, storyboard.scenes[1:]):
+    for previous_scene, scene in zip(
+        storyboard.scenes, storyboard.scenes[1:], strict=False
+    ):
         assert previous_scene.end_second <= scene.start_second
 
 

@@ -93,7 +93,10 @@ def _analysis(
                 }
             ],
             "adapted_constraints": {
-                "subject_presence": {"strength": "preferred", "instruction": "transfer behavior only"},
+                "subject_presence": {
+                    "strength": "preferred",
+                    "instruction": "transfer behavior only",
+                },
                 "camera_pattern": {"strength": "preferred", "instruction": "adapt camera emphasis"},
                 "transition_pattern": {"strength": "preferred", "instruction": "keep one shot"},
                 "effects_pattern": {"strength": "preferred", "instruction": "support action"},
@@ -253,7 +256,9 @@ def _valid_final_inputs() -> tuple[
                     "frame_anchor": "transition",
                     "visual": "Resolve the payoff and return to the supplied ending composition.",
                     "motion": "The subject settles toward the final state.",
-                    "anchor_return_instruction": "Continuously restore final pose, framing, and camera.",
+                    "anchor_return_instruction": (
+                        "Continuously restore final pose, framing, and camera."
+                    ),
                 },
                 {
                     "scene_index": 4,
@@ -300,7 +305,8 @@ def test_review_marks_unlinked_core_behavior_for_correction() -> None:
     assert review.status == "corrective"
     assert review.uncovered_core_behavior_beat_ids == ["core_behavior"]
     assert review.correction_requirements == [
-        "Execute uncovered core behavior beat core_behavior in subject/state motion and show its visible payoff."
+        "Execute uncovered core behavior beat core_behavior in subject/state motion "
+        "and show its visible payoff."
     ]
 
 
@@ -331,7 +337,8 @@ def test_review_rejects_effect_only_flattening() -> None:
     review = review_director_action_coverage(_analysis(), plan)
     assert review.status == "corrective"
     assert review.correction_requirements == [
-        "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
+        "Increase subject/state motion for the core action; camera or effects alone "
+        "cannot execute it."
     ]
 
 
@@ -354,7 +361,8 @@ def test_review_rejects_camera_only_flattening() -> None:
     review = review_director_action_coverage(_analysis(), plan)
     assert review.status == "corrective"
     assert review.correction_requirements == [
-        "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
+        "Increase subject/state motion for the core action; camera or effects alone "
+        "cannot execute it."
     ]
 
 

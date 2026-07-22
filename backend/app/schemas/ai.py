@@ -371,7 +371,10 @@ class DirectorSignatureMoment(BaseModel):
                 raise ValueError("non-omitted signature moment requires a visible payoff")
             if not self.return_strategy.strip():
                 raise ValueError("non-omitted signature moment requires a return strategy")
-            if self.transfer_role in {"primary_action", "interaction", "impact"} and not self.temporary_divergence.strip():
+            if (
+                self.transfer_role in {"primary_action", "interaction", "impact"}
+                and not self.temporary_divergence.strip()
+            ):
                 raise ValueError(
                     "action, interaction, and impact signature moments require temporary divergence"
                 )

@@ -93,22 +93,28 @@ def review_director_action_coverage(
         if moment.strategy == "omit":
             invalid_omission_ids.append(moment.moment_id)
             corrections.append(
-                f"Replace invalid omission {moment.moment_id} with preserve, adapt, or an equivalent target action."
+                f"Replace invalid omission {moment.moment_id} with preserve, adapt, or "
+                "an equivalent target action."
             )
             continue
 
-        has_execution = _has_execution_detail(moment) and (moment.assigned_beat_id or "") in plan_core_beat_ids
+        has_execution = (
+            _has_execution_detail(moment)
+            and (moment.assigned_beat_id or "") in plan_core_beat_ids
+        )
         has_return = bool(moment.return_strategy.strip())
 
         if not has_execution:
             missing_execution_ids.append(moment.moment_id)
             corrections.append(
-                f"Provide executable action, assigned core beat, and visible payoff for signature moment {moment.moment_id}."
+                "Provide executable action, assigned core beat, and visible payoff for "
+                f"signature moment {moment.moment_id}."
             )
         if not has_return:
             missing_return_ids.append(moment.moment_id)
             corrections.append(
-                f"State how signature moment {moment.moment_id} returns continuously to the exact last anchor."
+                f"State how signature moment {moment.moment_id} returns continuously to "
+                "the exact last anchor."
             )
         if has_execution and has_return:
             covered_id_set.update(referenced_ids)
@@ -117,18 +123,21 @@ def review_director_action_coverage(
     uncovered_ids = [beat_id for beat_id in required_ids if beat_id not in covered_id_set]
     for beat_id in uncovered_ids:
         corrections.append(
-            f"Execute uncovered core behavior beat {beat_id} in subject/state motion and show its visible payoff."
+            f"Execute uncovered core behavior beat {beat_id} in subject/state motion and "
+            "show its visible payoff."
         )
 
     if required_ids and not _has_required_arc(director_plan):
         corrections.append(
-            "Provide dynamically ordered action, return, and final_lock windows ending at ratio 1.0."
+            "Provide dynamically ordered action, return, and final_lock windows ending "
+            "at ratio 1.0."
         )
     if required_ids and not director_plan.final_anchor_return.strip():
         corrections.append("State the continuous final-anchor return before the final lock.")
     if _support_only_flattened(core_beats, director_plan):
         corrections.append(
-            "Increase subject/state motion for the core action; camera or effects alone cannot execute it."
+            "Increase subject/state motion for the core action; camera or effects alone "
+            "cannot execute it."
         )
 
     return DirectorActionCoverageReview(
