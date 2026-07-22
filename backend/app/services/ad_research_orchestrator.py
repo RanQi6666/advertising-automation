@@ -52,6 +52,8 @@ class AdResearchOrchestrator:
         await session.commit()
 
         seen: dict[str, CollectorAd] = {}
+        scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
+        classification_diagnostics_by_ad_library_id: dict[str, dict[str, Any]] = {}
         scored: list[dict[str, Any]] = []
         raw_collected = 0
         technical_qualified = 0
@@ -87,6 +89,7 @@ class AdResearchOrchestrator:
             job.stage = "technical_filtering"
             qualified = [ad for ad in candidates if await self.media.is_technically_qualified(ad)]
             technical_qualified = len(qualified)
+            scored = sorted(scored_by_ad_library_id.values(), key=_sort_key, reverse=True)
             job.progress_json = {
                 "raw_collected": raw_collected,
                 "deduplicated": len(candidates),
@@ -97,17 +100,23 @@ class AdResearchOrchestrator:
             await session.commit()
 
             job.stage = "model_classifying"
-            classifications = await self._classify_candidates(job.category, qualified)
-            scored = []
+            unclassified = [
+                ad
+                for ad in qualified
+                if ad.ad_library_id not in classification_diagnostics_by_ad_library_id
+            ]
+            classifications = await self._classify_candidates(job.category, unclassified)
             classification_failures = 0
-            for ad, classification in zip(qualified, classifications, strict=True):
+            for ad, classification in zip(unclassified, classifications, strict=True):
                 if isinstance(classification, Exception):
                     classification_failures += 1
                     continue
-                if not _keep(classification):
-                    continue
-                scored.append(_public_result(ad, classification))
-            scored.sort(key=_sort_key, reverse=True)
+                classification_diagnostics_by_ad_library_id[ad.ad_library_id] = (
+                    _classification_diagnostic(ad, classification)
+                )
+                if _keep(classification):
+                    scored_by_ad_library_id[ad.ad_library_id] = _public_result(ad, classification)
+            scored = sorted(scored_by_ad_library_id.values(), key=_sort_key, reverse=True)
             job.progress_json = {
                 **job.progress_json,
                 "model_relevant": len(scored),
@@ -117,7 +126,13 @@ class AdResearchOrchestrator:
             await session.commit()
             if len(scored) >= job.target_count:
                 selected = scored[: job.target_count]
-                summary = _summary(raw_collected, len(candidates), technical_qualified, selected)
+                summary = _summary(
+                    raw_collected,
+                    len(candidates),
+                    technical_qualified,
+                    selected,
+                    classification_diagnostics_by_ad_library_id,
+                )
                 await self.service.complete_job(
                     session, job, status="completed", ads=selected, summary=summary
                 )
@@ -139,7 +154,13 @@ class AdResearchOrchestrator:
 
         selected = scored[: job.target_count]
         summary = {
-            **_summary(raw_collected, len(seen), technical_qualified, selected),
+            **_summary(
+                raw_collected,
+                len(seen),
+                technical_qualified,
+                selected,
+                classification_diagnostics_by_ad_library_id,
+            ),
             "reason": "insufficient_qualified_ads",
             "max_rounds": MAX_ROUNDS,
             "max_raw_candidates": MAX_RAW_CANDIDATES,
@@ -234,8 +255,64 @@ def _sort_key(ad: dict[str, Any]) -> tuple[float, float, float, float]:
     )
 
 
+def _classification_diagnostic(
+    ad: CollectorAd, classification: dict[str, Any]
+) -> dict[str, Any]:
+    keep = _keep(classification)
+    return {
+        "ad_library_id": ad.ad_library_id,
+        "category_match": bool(classification["category_match"]),
+        "category_confidence": float(classification["category_confidence"]),
+        "business_type": classification["business_type"],
+        "creative_relevance_score": float(classification["creative_relevance_score"]),
+        "public_performance_signal_score": float(
+            classification["public_performance_signal_score"]
+        ),
+        "real_money_signal_score": float(classification["real_money_signal_score"]),
+        "is_obviously_unrelated": bool(classification["is_obviously_unrelated"]),
+        "recommendation": classification["recommendation"],
+        "decision": "keep" if keep else "exclude",
+        "exclusion_reasons": [] if keep else _exclusion_reasons(classification),
+        "text_evidence": classification["text_evidence"][:2],
+        "visual_evidence": classification["visual_evidence"][:2],
+        "public_signal_evidence": classification["public_signal_evidence"][:2],
+        "public_risk_signals": classification["public_risk_signals"][:2],
+    }
+
+
+def _exclusion_reasons(classification: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if classification.get("recommendation") != "keep":
+        reasons.append("recommendation_not_keep")
+    if not classification.get("category_match"):
+        reasons.append("category_not_matched")
+    if classification.get("is_obviously_unrelated"):
+        reasons.append("obviously_unrelated")
+    if float(classification.get("category_confidence") or 0) < MIN_CATEGORY_CONFIDENCE:
+        reasons.append("category_confidence_below_threshold")
+    return reasons
+
+
+def _classification_diagnostics_summary(
+    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    candidates = list(diagnostics_by_ad_library_id.values())
+    kept_count = sum(item["decision"] == "keep" for item in candidates)
+    return {
+        "classified_count": len(candidates),
+        "kept_count": kept_count,
+        "excluded_count": len(candidates) - kept_count,
+        "minimum_category_confidence": MIN_CATEGORY_CONFIDENCE,
+        "candidates": candidates,
+    }
+
+
 def _summary(
-    raw: int, deduplicated: int, qualified: int, selected: list[dict[str, Any]]
+    raw: int,
+    deduplicated: int,
+    qualified: int,
+    selected: list[dict[str, Any]],
+    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "raw_collected": raw,
@@ -243,6 +320,9 @@ def _summary(
         "technical_qualified": qualified,
         "model_relevant": len(selected),
         "selected_count": len(selected),
+        "classification_diagnostics": _classification_diagnostics_summary(
+            diagnostics_by_ad_library_id
+        ),
         "performance_signal_notice": (
             "public_performance_signal_score is a public continuity proxy, not actual spend, "
             "CPC, CPA, ROAS, or conversion data."
