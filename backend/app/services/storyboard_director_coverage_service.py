@@ -10,7 +10,6 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardScene,
     ReferenceBehaviorBeat,
-    _endpoint_mismatch_only,
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
@@ -69,17 +68,6 @@ _SUBJECT_STATE_MOTION_TERMS = (
     "material",
     "surface",
 )
-_INFEASIBILITY_TERMS = (
-    "infeasible",
-    "impossible",
-    "cannot",
-    "no compatible",
-    "no controllable",
-    "not executable",
-    "contradict",
-    "unavailable",
-    "absent",
-)
 _STATIC_EXECUTION_TERMS = (
     "hold",
     "still",
@@ -89,6 +77,9 @@ _STATIC_EXECUTION_TERMS = (
     "stabilize",
     "lock",
     "freeze",
+)
+_NEGATED_EXECUTION_PATTERN = re.compile(
+    r"\b(?:no|not|never|nothing|neither|nor|without)\b|n['?]t\b"
 )
 _SUBJECT_EXECUTION_PATTERNS = (
     r"\bexecut(?:e|es|ed|ing)\b",
@@ -176,12 +167,23 @@ def _has_execution_detail(moment: object) -> bool:
 def _valid_omission(moment: object) -> bool:
     omission_reason = str(getattr(moment, "omission_reason", "") or "").strip()
     replacement_failure = str(getattr(moment, "equivalent_replacement_failure", "") or "").strip()
-    if not omission_reason or not replacement_failure:
-        return False
-    if _endpoint_mismatch_only(omission_reason, replacement_failure):
-        return False
-    return any(term in omission_reason.casefold() for term in _INFEASIBILITY_TERMS) and any(
-        term in replacement_failure.casefold() for term in _INFEASIBILITY_TERMS
+    literal_category = getattr(moment, "literal_infeasibility_category", None)
+    literal_evidence = str(
+        getattr(moment, "literal_infeasibility_evidence", "") or ""
+    ).strip()
+    equivalent_category = getattr(moment, "equivalent_infeasibility_category", None)
+    equivalent_evidence = str(
+        getattr(moment, "equivalent_infeasibility_evidence", "") or ""
+    ).strip()
+    return bool(
+        omission_reason
+        and replacement_failure
+        and literal_category
+        and literal_category != "endpoint_constraint_only"
+        and literal_evidence
+        and equivalent_category
+        and equivalent_category != "endpoint_constraint_only"
+        and equivalent_evidence
     )
 
 
@@ -252,21 +254,6 @@ def review_director_action_coverage(
                 validly_omitted_id_set.update(referenced_ids)
             else:
                 invalid_omission_ids.append(moment.moment_id)
-                instruction = (
-                    "Replace the invalid omission with preserve, adapt, or an equivalent target "
-                    "action, or prove both execution and equivalent replacement are infeasible."
-                )
-                corrections.append(
-                    f"Replace invalid omission {moment.moment_id} with preserve, adapt, or "
-                    "an equivalent target action, or prove both execution and equivalent "
-                    "replacement are infeasible."
-                )
-                add_structured_correction(
-                    correction_type="execution",
-                    moment_ids=[moment.moment_id],
-                    source_ids=referenced_ids,
-                    instruction=instruction,
-                )
             continue
 
         assigned_core_beat = (moment.assigned_beat_id or "") in plan_core_beat_ids
@@ -306,6 +293,34 @@ def review_director_action_coverage(
             )
         if has_execution and has_return:
             covered_id_set.update(referenced_ids)
+
+    if invalid_omission_ids:
+        invalid_source_ids = {
+            source_id
+            for moment in director_plan.signature_moment_plan
+            if moment.moment_id in invalid_omission_ids
+            for source_id in moment.source_behavior_beat_ids
+            if source_id in required_ids
+        }
+        return DirectorActionCoverageReview(
+            status="unrecoverable",
+            required_core_behavior_beat_ids=required_ids,
+            covered_core_behavior_beat_ids=[
+                beat_id for beat_id in required_ids if beat_id in covered_id_set
+            ],
+            validly_omitted_core_behavior_beat_ids=[
+                beat_id for beat_id in required_ids if beat_id in validly_omitted_id_set
+            ],
+            uncovered_core_behavior_beat_ids=[
+                beat_id for beat_id in required_ids if beat_id in invalid_source_ids
+            ],
+            invalid_omission_moment_ids=invalid_omission_ids,
+            unrecoverable_reasons=[
+                f"Signature moment {moment_id} has an invalid omission contract that cannot "
+                "be repaired by storyboard generation."
+                for moment_id in invalid_omission_ids
+            ],
+        )
 
     covered_ids = [beat_id for beat_id in required_ids if beat_id in covered_id_set]
     omitted_ids = [beat_id for beat_id in required_ids if beat_id in validly_omitted_id_set]
@@ -377,6 +392,14 @@ def review_director_action_coverage(
     )
 
 
+def _cue_positions(text: str, terms: tuple[str, ...], before: int) -> list[int]:
+    return [
+        match.start()
+        for term in terms
+        for match in re.finditer(rf"\b{re.escape(term)}\b", text[:before])
+    ]
+
+
 def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
     motion = (scene.motion or "").strip().casefold()
     if not motion:
@@ -387,28 +410,30 @@ def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
         if clause.strip()
     ]
     for clause in clauses:
-        has_support_cue = any(term in clause for term in _SUPPORT_ONLY_MOTION_TERMS)
-        has_subject_cue = any(term in clause for term in _SUBJECT_STATE_MOTION_TERMS)
-        has_static_cue = any(term in clause for term in _STATIC_EXECUTION_TERMS)
         execution_matches = [
             match
             for pattern in _SUBJECT_EXECUTION_PATTERNS
             if (match := re.search(pattern, clause)) is not None
         ]
-        if has_support_cue and not execution_matches:
-            continue
-        if has_static_cue and not execution_matches:
-            continue
         for match in execution_matches:
-            prefix = clause[: match.start()]
-            subject_precedes_execution = any(
-                re.search(rf"\b{re.escape(term)}\b", prefix)
-                for term in _SUBJECT_STATE_MOTION_TERMS
+            subject_positions = _cue_positions(
+                clause, _SUBJECT_STATE_MOTION_TERMS, match.start()
             )
-            if subject_precedes_execution or not has_support_cue:
-                return True
-            if not has_subject_cue:
+            if not subject_positions:
                 continue
+            subject_position = max(subject_positions)
+            support_positions = _cue_positions(
+                clause, _SUPPORT_ONLY_MOTION_TERMS, match.start()
+            )
+            if support_positions and max(support_positions) > subject_position:
+                continue
+            execution_scope = clause[: match.start()]
+            if _NEGATED_EXECUTION_PATTERN.search(execution_scope):
+                continue
+            actor_scope = clause[subject_position : match.start()]
+            if any(term in actor_scope for term in _STATIC_EXECUTION_TERMS):
+                continue
+            return True
     return False
 
 
@@ -450,8 +475,116 @@ def _scene_links_moment(
     moment_id: str,
     source_ids: set[str],
 ) -> bool:
-    return moment_id in scene.signature_moment_ids or bool(
-        source_ids.intersection(scene.source_behavior_beat_ids)
+    del source_ids
+    return moment_id in scene.signature_moment_ids
+
+
+def _phase_window_seconds(
+    plan: FrameAnchoredDirectorPlan, phase: str, duration_seconds: float
+) -> float:
+    intervals = sorted(
+        (window.start_ratio, window.end_ratio)
+        for window in plan.action_arc_windows
+        if window.phase == phase
+    )
+    covered_ratio = 0.0
+    current_start: float | None = None
+    current_end: float | None = None
+    for start_ratio, end_ratio in intervals:
+        if current_start is None:
+            current_start, current_end = start_ratio, end_ratio
+        elif start_ratio <= float(current_end):
+            current_end = max(float(current_end), end_ratio)
+        else:
+            covered_ratio += float(current_end) - current_start
+            current_start, current_end = start_ratio, end_ratio
+    if current_start is not None and current_end is not None:
+        covered_ratio += current_end - current_start
+    return covered_ratio * duration_seconds
+
+
+def _phase_compression_required_for_duration(
+    duration_seconds: float,
+    source_ids: set[str],
+    frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
+) -> bool:
+    beats_by_id = {
+        beat.beat_id: beat for beat in _required_core_behavior_beats(frame_analysis)
+    }
+    beats = [beats_by_id[beat_id] for beat_id in source_ids if beat_id in beats_by_id]
+    if not beats:
+        return False
+
+    duration = float(duration_seconds)
+    beat_count = len(beats)
+    base_readability = (
+        sum(beat.minimum_readable_duration_seconds for beat in beats) / beat_count
+    )
+    action_readability = sum(beat.minimum_readable_duration_seconds for beat in beats)
+    preparation_units = sum(len(beat.depends_on) for beat in beats) + sum(
+        beat.behavior_type == "state" for beat in beats
+    )
+    payoff_readability = (
+        sum(
+            beat.minimum_readable_duration_seconds
+            * max(len(beat.visible_evidence), 1)
+            for beat in beats
+        )
+        / beat_count
+    )
+
+    camera_units = 0
+    effect_units = 0
+    reference = frame_analysis.reference_video_analysis
+    if reference is not None:
+        intensity_rank = {"low": 0, "medium": 1, "high": 2}
+        for segment in reference.segments:
+            movement = segment.camera.movement.strip().casefold()
+            if movement and movement not in {"none", "static", "locked", "stationary"}:
+                camera_units += 1
+            camera_units += intensity_rank.get(segment.camera.intensity.casefold(), 0)
+            effect_units += len([effect for effect in segment.effects if effect.strip()])
+
+    endpoint_units = sum(
+        first_value != last_value
+        for first_value, last_value in (
+            (
+                frame_analysis.first_frame.composition.strip().casefold(),
+                frame_analysis.last_frame.composition.strip().casefold(),
+            ),
+            (
+                frame_analysis.first_frame.camera_perspective.strip().casefold(),
+                frame_analysis.last_frame.camera_perspective.strip().casefold(),
+            ),
+            (
+                tuple(
+                    item.strip().casefold()
+                    for item in frame_analysis.first_frame.visible_subjects
+                ),
+                tuple(
+                    item.strip().casefold()
+                    for item in frame_analysis.last_frame.visible_subjects
+                ),
+            ),
+        )
+    )
+    continuity_units = len(frame_analysis.transition_brief.continuity_requirements)
+    required_seconds = {
+        "preparation": base_readability * preparation_units / beat_count,
+        "action": action_readability
+        + base_readability * max(camera_units - beat_count, 0) / beat_count,
+        "payoff": max(
+            payoff_readability,
+            base_readability * effect_units / beat_count,
+        ),
+        "return": base_readability * endpoint_units / beat_count,
+        "final_lock": base_readability * continuity_units / beat_count,
+    }
+    return any(
+        required > _phase_window_seconds(plan, phase, duration)
+        + _TIMELINE_TOLERANCE_SECONDS
+        for phase, required in required_seconds.items()
     )
 
 
@@ -459,22 +592,19 @@ def _phase_compression_required(
     storyboard: FrameAnchoredStoryboard,
     source_ids: set[str],
     frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
 ) -> bool:
-    beats = {beat.beat_id: beat for beat in _required_core_behavior_beats(frame_analysis)}
-    execution_readability = sum(
-        max(0.08, beats[beat_id].minimum_readable_duration_seconds)
-        for beat_id in source_ids
-        if beat_id in beats
+    return _phase_compression_required_for_duration(
+        float(storyboard.duration_seconds), source_ids, frame_analysis, plan
     )
-    required_readability = execution_readability + 4 * 0.8
-    return storyboard.duration_seconds <= required_readability + _TIMELINE_TOLERANCE_SECONDS
 
 
 def _director_phases_overlap(plan: FrameAnchoredDirectorPlan, left: str, right: str) -> bool:
     left_windows = [window for window in plan.action_arc_windows if window.phase == left]
     right_windows = [window for window in plan.action_arc_windows if window.phase == right]
     return any(
-        right_window.start_ratio < left_window.end_ratio
+        max(left_window.start_ratio, right_window.start_ratio)
+        < min(left_window.end_ratio, right_window.end_ratio)
         for left_window in left_windows
         for right_window in right_windows
     )
@@ -490,16 +620,12 @@ def _validate_moment_phase_order(
     linked_scene_indexes: list[int],
     execution_scene_indexes: list[int],
     final_hold_index: int,
-    allow_global_preparation: bool,
 ) -> None:
     preparation_indexes = [
         index
         for index, scene in enumerate(storyboard.scenes)
         if _scene_has_preparation(scene)
-        and (
-            _scene_links_moment(scene, moment_id, source_ids)
-            or (allow_global_preparation and not scene.signature_moment_ids)
-        )
+        and _scene_links_moment(scene, moment_id, source_ids)
     ]
     payoff_indexes = [
         index
@@ -532,7 +658,7 @@ def _validate_moment_phase_order(
         raise ValueError(f"signature moment {moment_id} has invalid phase order")
 
     compression_required = _phase_compression_required(
-        storyboard, source_ids, frame_analysis
+        storyboard, source_ids, frame_analysis, plan
     )
     phase_names = ("preparation", "action", "payoff", "return")
     for index, (left_index, right_index) in enumerate(
@@ -615,9 +741,6 @@ def validate_final_storyboard_action_coverage(
 
     executed_source_ids: set[str] = set()
     execution_scene_indexes: list[int] = []
-    executable_moments = [
-        moment for moment in plan.signature_moment_plan if moment.strategy != "omit"
-    ]
     final_hold_index = len(storyboard.scenes) - 1
     for moment in plan.signature_moment_plan:
         if moment.strategy == "omit":
@@ -676,11 +799,10 @@ def validate_final_storyboard_action_coverage(
                 frame_analysis=frame_analysis,
                 plan=plan,
                 moment_id=moment.moment_id,
-                source_ids=referenced_required_ids,
+                source_ids=executable_required_ids,
                 linked_scene_indexes=linked_scene_indexes,
                 execution_scene_indexes=moment_execution_indexes,
                 final_hold_index=final_hold_index,
-                allow_global_preparation=len(executable_moments) == 1,
             )
 
     missing_source_ids = executable_required_ids - executed_source_ids

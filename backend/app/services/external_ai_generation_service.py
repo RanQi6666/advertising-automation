@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -509,7 +510,19 @@ class ExternalAIGenerationService:
             )
             return {
                 "request_id": _request_id(payload.external_request_id, task.id),
-                "storyboard_text": _format_frame_anchored_storyboard_text(storyboard),
+                "storyboard_text": _format_frame_anchored_storyboard_text(
+                    storyboard,
+                    private_sources=(
+                        frame_analysis.model_dump(mode="json"),
+                        director_plan.model_dump(mode="json"),
+                        director_review.model_dump(mode="json"),
+                        [
+                            correction.model_dump(mode="json")
+                            for correction in director_review.structured_corrections
+                        ],
+                        storyboard.model_dump(mode="json"),
+                    ),
+                ),
                 "duration_seconds": payload.duration_seconds,
                 "aspect_ratio": payload.aspect_ratio,
             }
@@ -893,30 +906,60 @@ async def _store_frame_anchored_private_metadata(
     await session.refresh(task)
 
 
-def _private_storyboard_ids(storyboard: FrameAnchoredStoryboard) -> tuple[str, ...]:
+def _private_id_values(value: Any, *, field_name: str | None = None) -> set[str]:
     private_ids: set[str] = set()
-    for scene in storyboard.scenes:
-        private_ids.update(scene.signature_moment_ids)
-        private_ids.update(scene.source_behavior_beat_ids)
-        private_ids.update(scene.cinematic_beats)
-        if scene.cinematic_beat:
-            private_ids.add(scene.cinematic_beat)
-    return tuple(sorted((item for item in private_ids if item), key=len, reverse=True))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            private_ids.update(_private_id_values(item, field_name=str(key)))
+        return private_ids
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            private_ids.update(_private_id_values(item, field_name=field_name))
+        return private_ids
+    is_private_id_field = bool(
+        field_name
+        and (
+            field_name.endswith("_id")
+            or field_name.endswith("_ids")
+            or field_name in {"depends_on", "cinematic_beat", "cinematic_beats"}
+        )
+    )
+    if is_private_id_field and isinstance(value, str) and value.strip():
+        private_ids.add(value.strip())
+    return private_ids
+
+
+def _private_storyboard_ids(
+    storyboard: FrameAnchoredStoryboard,
+    private_sources: tuple[Any, ...] = (),
+) -> tuple[str, ...]:
+    private_ids = {
+        private_id
+        for private_id in _private_id_values(storyboard.model_dump(mode="json"))
+        if not private_id.isalpha()
+    }
+    for source in private_sources:
+        private_ids.update(_private_id_values(source))
+    return tuple(sorted(private_ids, key=len, reverse=True))
 
 
 def _scrub_private_storyboard_ids(value: str | None, private_ids: tuple[str, ...]) -> str:
     text = value or ""
     for private_id in private_ids:
-        if not any(not character.isalpha() for character in private_id):
-            continue
-        text = text.replace(private_id, "linked item")
+        text = re.sub(
+            rf"(?<![\w]){re.escape(private_id)}(?![\w])",
+            "linked item",
+            text,
+        )
     return text
 
 
 def _format_frame_anchored_storyboard_text(
     storyboard: FrameAnchoredStoryboard,
+    *,
+    private_sources: tuple[Any, ...] = (),
 ) -> str:
-    private_ids = _private_storyboard_ids(storyboard)
+    private_ids = _private_storyboard_ids(storyboard, private_sources)
 
     def clean(value: str | None) -> str:
         return _scrub_private_storyboard_ids(value, private_ids)

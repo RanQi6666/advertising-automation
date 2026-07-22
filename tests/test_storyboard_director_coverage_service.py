@@ -9,6 +9,8 @@ from backend.app.schemas.ai import (
     validate_director_coverage,
 )
 from backend.app.services.storyboard_director_coverage_service import (
+    _director_phases_overlap,
+    _phase_compression_required,
     review_director_action_coverage,
     validate_final_storyboard_action_coverage,
 )
@@ -276,6 +278,8 @@ def _valid_final_inputs() -> tuple[
                     "visual": "Hold the exact supplied opening anchor.",
                     "motion": "Prepare the subject for the continuous causal action.",
                     "transition_goal": "Prepare and depart from the opening anchor in-shot.",
+                    "signature_moment_ids": ["signature_action"],
+                    "source_behavior_beat_ids": ["core_behavior"],
                 },
                 {
                     "scene_index": 2,
@@ -645,6 +649,14 @@ def test_valid_double_infeasibility_omit_passes_without_scene_source_id() -> Non
                 "No target-compatible equivalent can preserve the causal role because the "
                 "available target evidence contains no controllable replacement state."
             ),
+            "literal_infeasibility_category": "target_capability_unavailable",
+            "literal_infeasibility_evidence": (
+                "Target evidence contains no controllable subject or state for literal execution."
+            ),
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": (
+                "Target evidence contains no replacement state with the required causal role."
+            ),
         }
     )
     plan = base_plan.model_copy(
@@ -701,7 +713,7 @@ def test_endpoint_mismatch_only_omit_remains_corrective() -> None:
 
     review = review_director_action_coverage(analysis, plan)
 
-    assert review.status == "corrective"
+    assert review.status == "unrecoverable"
     assert review.invalid_omission_moment_ids == ["signature_action"]
 
 
@@ -758,6 +770,9 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
 @pytest.mark.parametrize(
     "motion",
     [
+        "No subject moves.",
+        "Nothing changes.",
+        "The subject remains still while the composition shifts.",
         "The subject holds perfectly still.",
         "The final state remains unchanged.",
         "Camera circles the subject while the subject remains static.",
@@ -795,6 +810,58 @@ def test_signature_schema_rejects_endpoint_only_omit_wrapped_as_infeasible() -> 
 
     with pytest.raises(ValidationError, match="endpoint mismatch"):
         moment_type.model_validate(payload)
+
+
+def test_signature_schema_rejects_endpoint_keyword_injection_without_structured_causes() -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action has a distinct endpoint."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Literal execution cannot match the final pose because no controllable final "
+            "composition is allowed."
+        ),
+        "equivalent_replacement_failure": (
+            "No equivalent can preserve the ending framing because no controllable endpoint "
+            "composition is allowed."
+        ),
+    }
+
+    with pytest.raises(ValidationError, match="structured literal infeasibility"):
+        moment_type.model_validate(payload)
+
+
+def test_signature_schema_accepts_separate_mechanism_infeasibility_causes() -> None:
+    moment_type = type(_plan(source_ids=["core_behavior"]).signature_moment_plan[0])
+    payload = {
+        "moment_id": "signature_action",
+        "moment_type": "combined",
+        "source_evidence": ["The reference action requires articulated target motion."],
+        "source_behavior_beat_ids": ["core_behavior"],
+        "transfer_role": "primary_action",
+        "strategy": "omit",
+        "omission_reason": (
+            "Execution is impossible because the target mechanism has no articulated parts, "
+            "and the final pose must remain exact."
+        ),
+        "equivalent_replacement_failure": (
+            "An equivalent causal action is impossible because no alternative controllable "
+            "mechanism exists in the target evidence."
+        ),
+        "literal_infeasibility_category": "mechanism_unavailable",
+        "literal_infeasibility_evidence": "Target evidence shows no articulated mechanism.",
+        "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+        "equivalent_infeasibility_evidence": (
+            "Target evidence shows no alternative mechanism with the same causal role."
+        ),
+    }
+
+    moment = moment_type.model_validate(payload)
+    assert moment.strategy == "omit"
 
 
 def test_signature_schema_rejects_when_only_equivalent_reason_is_endpoint_mismatch() -> None:
@@ -843,7 +910,7 @@ def test_review_rejects_endpoint_only_omit_wrapped_as_infeasible() -> None:
 
     review = review_director_action_coverage(analysis, plan)
 
-    assert review.status == "corrective"
+    assert review.status == "unrecoverable"
     assert review.invalid_omission_moment_ids == ["signature_action"]
 
 
@@ -1022,3 +1089,265 @@ def test_long_storyboard_allows_return_and_final_hold_scene_when_director_window
     )
 
     validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+@pytest.mark.parametrize(
+    ("left_range", "right_range", "expected"),
+    [
+        ((0.1, 0.4), (0.3, 0.6), True),
+        ((0.1, 0.2), (0.8, 0.9), False),
+        ((0.8, 0.9), (0.1, 0.2), False),
+        ((0.1, 0.2), (0.2, 0.4), False),
+    ],
+)
+def test_director_phase_overlap_uses_strict_interval_intersection(
+    left_range: tuple[float, float],
+    right_range: tuple[float, float],
+    expected: bool,
+) -> None:
+    plan = _plan(source_ids=["core_behavior"])
+    windows = [
+        window.model_copy(update={"start_ratio": left_range[0], "end_ratio": left_range[1]})
+        if window.phase == "action"
+        else window.model_copy(
+            update={"start_ratio": right_range[0], "end_ratio": right_range[1]}
+        )
+        if window.phase == "payoff"
+        else window
+        for window in plan.action_arc_windows
+    ]
+    plan = plan.model_copy(update={"action_arc_windows": windows})
+
+    assert _director_phases_overlap(plan, "action", "payoff") is expected
+
+
+def test_phase_compression_changes_with_evidence_complexity_at_same_duration() -> None:
+    storyboard, low_analysis, _ = _valid_short_final_inputs()
+    low_plan = low_analysis.director_plan
+    assert low_plan is not None
+    reference = low_analysis.reference_video_analysis
+    assert reference is not None and reference.behavior_graph is not None
+    low_beat = reference.behavior_graph.beats[0].model_copy(
+        update={
+            "minimum_readable_duration_seconds": 0.2,
+            "visible_evidence": ["A single visible result."],
+        }
+    )
+    low_segments = [
+        segment.model_copy(
+            update={
+                "camera": segment.camera.model_copy(
+                    update={"movement": "static", "intensity": "low"}
+                ),
+                "effects": [],
+            }
+        )
+        for segment in reference.segments
+    ]
+    aligned_last = low_analysis.last_frame.model_copy(
+        update={
+            "composition": low_analysis.first_frame.composition,
+            "camera_perspective": low_analysis.first_frame.camera_perspective,
+            "visible_subjects": low_analysis.first_frame.visible_subjects,
+        }
+    )
+    low_analysis = low_analysis.model_copy(
+        update={
+            "last_frame": aligned_last,
+            "transition_brief": low_analysis.transition_brief.model_copy(
+                update={"continuity_requirements": []}
+            ),
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "segments": low_segments,
+                    "behavior_graph": reference.behavior_graph.model_copy(
+                        update={"beats": [low_beat]}
+                    ),
+                }
+            ),
+            "director_plan": low_plan,
+        }
+    )
+
+    high_reference = low_analysis.reference_video_analysis
+    assert high_reference is not None and high_reference.behavior_graph is not None
+    high_beat = high_reference.behavior_graph.beats[0].model_copy(
+        update={
+            "minimum_readable_duration_seconds": 0.3,
+            "visible_evidence": [
+                "The layered visible consequence remains readable after execution.",
+                "The resulting state persists clearly before return.",
+                "A second payoff layer reveals a causal result.",
+            ]
+        }
+    )
+    high_segments = [
+        segment.model_copy(
+            update={
+                "camera": segment.camera.model_copy(
+                    update={"movement": "orbit and track", "intensity": "high"}
+                ),
+                "effects": ["layered persistent readable payoff"],
+            }
+        )
+        for segment in high_reference.segments
+    ]
+    high_analysis = low_analysis.model_copy(
+        update={
+            "last_frame": low_analysis.last_frame.model_copy(
+                update={
+                    "composition": "different ending composition",
+                    "camera_perspective": "different ending perspective",
+                    "visible_subjects": ["different ending arrangement"],
+                }
+            ),
+            "reference_video_analysis": high_reference.model_copy(
+                update={
+                    "segments": high_segments,
+                    "behavior_graph": high_reference.behavior_graph.model_copy(
+                        update={"beats": [high_beat]}
+                    ),
+                }
+            ),
+            "director_plan": low_plan,
+        }
+    )
+
+    assert not _phase_compression_required(
+        storyboard, {"core_behavior"}, low_analysis, low_plan
+    )
+    assert _phase_compression_required(
+        storyboard, {"core_behavior"}, high_analysis, low_plan
+    )
+
+
+def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_moment() -> None:
+    analysis = _analysis()
+    first_moment = _plan(source_ids=["core_behavior"]).signature_moment_plan[0]
+    second_moment = first_moment.model_copy(
+        update={
+            "moment_id": "signature_state",
+            "adapted_action": "Execute another target-compatible state change.",
+            "visible_payoff": "Show the other moment's result.",
+            "return_strategy": "Return the other moment to the final anchor.",
+        }
+    )
+    plan = _plan(source_ids=["core_behavior"])
+    plan = plan.model_copy(
+        update={
+            "signature_moment_plan": [first_moment, second_moment],
+            "action_arc_windows": [
+                window.model_copy(update={"end_ratio": 0.65})
+                if window.phase == "action"
+                else window.model_copy(update={"start_ratio": 0.55})
+                if window.phase == "payoff"
+                else window
+                for window in plan.action_arc_windows
+            ],
+        }
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    storyboard = FrameAnchoredStoryboard.model_validate(
+        {
+            "duration_seconds": 10,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 1,
+                    "frame_anchor": "first_frame",
+                    "visual": "Prepare the first moment.",
+                    "motion": "Prepare the subject for the first action.",
+                    "signature_moment_ids": ["signature_action"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 1,
+                    "end_second": 3,
+                    "frame_anchor": "transition",
+                    "visual": "Execute only the first moment.",
+                    "motion": "The subject performs the first state-changing action.",
+                    "signature_moment_ids": ["signature_action"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                    "camera_instruction": "Support the first action.",
+                    "effect_timing": "Keep effects subordinate.",
+                },
+                {
+                    "scene_index": 3,
+                    "start_second": 3,
+                    "end_second": 4,
+                    "frame_anchor": "transition",
+                    "visual": "Prepare the second moment.",
+                    "motion": "Prepare the subject for the second action.",
+                    "signature_moment_ids": ["signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                },
+                {
+                    "scene_index": 4,
+                    "start_second": 4,
+                    "end_second": 7,
+                    "frame_anchor": "transition",
+                    "visual": "Execute and reveal the second moment.",
+                    "motion": "The subject performs the second state-changing action.",
+                    "action_result_requirement": "Show only the second moment's payoff.",
+                    "signature_moment_ids": ["signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                    "camera_instruction": "Support the second action.",
+                    "effect_timing": "Reveal the second payoff.",
+                },
+                {
+                    "scene_index": 5,
+                    "start_second": 7,
+                    "end_second": 9,
+                    "frame_anchor": "transition",
+                    "visual": "Return only the second moment.",
+                    "anchor_return_instruction": "Return the second moment continuously.",
+                    "signature_moment_ids": ["signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                },
+                {
+                    "scene_index": 6,
+                    "start_second": 9,
+                    "end_second": 10,
+                    "frame_anchor": "last_frame",
+                    "visual": "Hold and lock the exact supplied last frame.",
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="signature_action lacks visible payoff"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_review_marks_invalid_omit_as_unrecoverable() -> None:
+    analysis = _analysis()
+    plan = _plan(source_ids=["core_behavior"])
+    invalid_omit = plan.signature_moment_plan[0].model_copy(
+        update={
+            "strategy": "omit",
+            "adapted_action": "",
+            "temporary_divergence": "",
+            "camera_support": "",
+            "effect_support": "",
+            "visible_payoff": "",
+            "return_strategy": "",
+            "assigned_beat_id": None,
+            "omission_reason": "The action cannot match the final pose.",
+            "equivalent_replacement_failure": "No equivalent preserves the ending framing.",
+            "literal_infeasibility_category": "endpoint_constraint_only",
+            "literal_infeasibility_evidence": "Only the final pose differs.",
+            "equivalent_infeasibility_category": "endpoint_constraint_only",
+            "equivalent_infeasibility_evidence": "Only the ending framing differs.",
+        }
+    )
+    plan = plan.model_copy(update={"signature_moment_plan": [invalid_omit]})
+
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "unrecoverable"
+    assert review.invalid_omission_moment_ids == ["signature_action"]
+    assert review.structured_corrections == []

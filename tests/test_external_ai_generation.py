@@ -482,6 +482,13 @@ class FakeExternalAILLM:
                     motion="Prepare the subject for the continuous causal action.",
                     transition_goal="Preparation begins at the supplied first frame.",
                     sound_effects=["soft room tone"],
+                    signature_moment_ids=["signature_action", "custom_signature_id"],
+                    source_behavior_beat_ids=[
+                        "approach",
+                        "core_behavior",
+                        "core_state_change",
+                        "custom_behavior_beat",
+                    ],
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=2,
@@ -2080,3 +2087,195 @@ def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> N
 
     for private_id in private_ids:
         assert private_id not in text
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_invalid_omit_stops_after_call2(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    original_analyze = fake_llm.analyze_video_frame_pair
+    original_direct = fake_llm.direct_frame_anchored_video_storyboard
+
+    async def analyze_with_required_core_behavior(
+        first_frame_image_url,
+        last_frame_image_url,
+        duration_seconds,
+        aspect_ratio,
+        **kwargs,
+    ):
+        del kwargs
+        return await original_analyze(
+            first_frame_image_url,
+            last_frame_image_url,
+            duration_seconds,
+            aspect_ratio,
+            reference_frames=[
+                ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA"),
+                ReferenceVideoFrame(timestamp_seconds=2, image_url="data:image/jpeg;base64,BBB"),
+                ReferenceVideoFrame(timestamp_seconds=5.8, image_url="data:image/jpeg;base64,CCC"),
+            ],
+            reference_video_duration_seconds=5.8,
+            reference_video_sample_interval_seconds=2.0,
+        )
+
+    async def invalid_omit_director(*args, **kwargs):
+        plan = await original_direct(*args, **kwargs)
+        moment = plan.signature_moment_plan[0].model_copy(
+            update={
+                "strategy": "omit",
+                "adapted_action": "",
+                "temporary_divergence": "",
+                "camera_support": "",
+                "effect_support": "",
+                "visible_payoff": "",
+                "return_strategy": "",
+                "assigned_beat_id": None,
+                "omission_reason": "The action cannot match the final pose.",
+                "equivalent_replacement_failure": (
+                    "No equivalent preserves the ending framing."
+                ),
+                "literal_infeasibility_category": "endpoint_constraint_only",
+                "literal_infeasibility_evidence": "Only the final pose differs.",
+                "equivalent_infeasibility_category": "endpoint_constraint_only",
+                "equivalent_infeasibility_evidence": "Only the ending framing differs.",
+            }
+        )
+        return plan.model_copy(update={"signature_moment_plan": [moment]})
+
+    fake_llm.analyze_video_frame_pair = analyze_with_required_core_behavior
+    fake_llm.direct_frame_anchored_video_storyboard = invalid_omit_director
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    engine, session_factory = await _session_factory(
+        tmp_path, "storyboard-v2-invalid-omit.db"
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-invalid-omit",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(ProviderError, match="unrecoverable before storyboard generation"):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
+        ]
+
+    await engine.dispose()
+
+
+def test_formatter_scrubs_full_private_namespace_and_preserves_other_language() -> None:
+    private_ids = ("analysisid", "directorid", "reviewid", "correctionid", "candidateid")
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=4,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=1,
+                frame_anchor="first_frame",
+                visual="Opening anchor.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=1,
+                end_second=4,
+                frame_anchor="last_frame",
+                visual=(
+                    "analysisid directorid reviewid correctionid candidateid; "
+                    "ordinary subject motion remains visible."
+                ),
+            ),
+        ],
+    )
+
+    text = _format_frame_anchored_storyboard_text(
+        storyboard,
+        private_sources=(
+            {"behavior_graph": {"beats": [{"beat_id": "analysisid"}]}},
+            {"action_arc_windows": [{"window_id": "directorid"}]},
+            {"required_core_behavior_beat_ids": ["reviewid"]},
+            {"structured_corrections": [{"signature_moment_ids": ["correctionid"]}]},
+            {"scenes": [{"cinematic_beats": ["candidateid"]}]},
+        ),
+    )
+
+    for private_id in private_ids:
+        assert private_id not in text
+    assert "ordinary subject motion remains visible" in text
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_polling_scrubs_prose_only_pure_alpha_private_id(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    original_direct = fake_llm.direct_frame_anchored_video_storyboard
+    original_generate = fake_llm.generate_frame_anchored_video_storyboard
+
+    async def private_namespace_director(*args, **kwargs):
+        plan = await original_direct(*args, **kwargs)
+        old_id = plan.action_arc_windows[0].window_id
+        renamed = [
+            window.model_copy(
+                update={
+                    "window_id": (
+                        "privatewindow" if window.window_id == old_id else window.window_id
+                    ),
+                    "depends_on": [
+                        "privatewindow" if dependency == old_id else dependency
+                        for dependency in window.depends_on
+                    ],
+                }
+            )
+            for window in plan.action_arc_windows
+        ]
+        return plan.model_copy(update={"action_arc_windows": renamed})
+
+    async def prose_only_candidate(*args, **kwargs):
+        storyboard = await original_generate(*args, **kwargs)
+        scene = storyboard.scenes[1]
+        scene.visual = (
+            f"{scene.visual} privatewindow; ordinary subject motion remains visible."
+        )
+        return storyboard
+
+    fake_llm.direct_frame_anchored_video_storyboard = private_namespace_director
+    fake_llm.generate_frame_anchored_video_storyboard = prose_only_candidate
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="external-ai-storyboard-v2-private-namespace.db",
+    )
+    try:
+        created = client.post(
+            "/api/v1/integrations/ai/storyboard-v2",
+            headers=_authorized_headers(),
+            json=_storyboard_v2_payload(),
+        ).json()
+        polled = client.get(
+            f"/api/v1/integrations/ai/jobs/{created['data']['job_id']}",
+            headers=_authorized_headers(),
+        ).json()["data"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert polled["status"] == "succeeded"
+    assert "privatewindow" not in polled["storyboard_text"]
+    assert "ordinary subject motion remains visible" in polled["storyboard_text"]
+    await engine.dispose()

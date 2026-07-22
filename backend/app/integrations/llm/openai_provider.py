@@ -1891,8 +1891,11 @@ def _frame_anchored_director_system_prompt() -> str:
         "timing_instruction, and final_frame_requirement. Each signature_moment_plan item must "
         "use moment_id, moment_type, source_evidence, source_behavior_beat_ids, transfer_role, "
         "strategy, target_adaptation, adapted_action, temporary_divergence, camera_support, "
-        "effect_support, visible_payoff, return_strategy, assigned_beat_id, omission_reason, and "
-        "equivalent_replacement_failure. moment_type must be camera, action, effect, result, or a "
+        "effect_support, visible_payoff, return_strategy, assigned_beat_id, omission_reason, "
+        "equivalent_replacement_failure, literal_infeasibility_category, "
+        "literal_infeasibility_evidence, equivalent_infeasibility_category, and "
+        "equivalent_infeasibility_evidence. moment_type must be camera, action, effect, result, "
+        "or a "
         "combination represented by combined; strategy must be preserve, adapt, "
         "replace_with_equivalent, or omit. final_anchor_return must be a plain string. "
         "anchor_adaptation_plan must be a list of plain strings, and "
@@ -1915,7 +1918,10 @@ def _frame_anchored_director_system_prompt() -> str:
         "visibly provided by a target frame or the existing visual identity mapping explicitly "
         "permits it. For each core action or state change, choose preserve, then adapt, then "
         "replace_with_equivalent, and omit only when literal/adapted and equivalent-intensity "
-        "execution are infeasible. Generic glow, particles, passive posing, or camera drift cannot "
+        "execution are independently infeasible. For omit, classify each cause with the structured "
+        "infeasibility category and evidence fields; endpoint pose, framing, composition, or scale "
+        "mismatch alone must use endpoint_constraint_only and is invalid. Do not infer categories "
+        "from injectable wording. Generic glow, particles, passive posing, or camera drift cannot "
         "replace physical or state-changing action. Plan subject motion, camera motion, and effect "
         "intensity independently. Select action_arc_windows dynamically from target duration, "
         "action complexity, endpoint difference, camera travel, effect readability, and "
@@ -2698,6 +2704,8 @@ def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
         "return_strategy",
         "omission_reason",
         "equivalent_replacement_failure",
+        "literal_infeasibility_evidence",
+        "equivalent_infeasibility_evidence",
     )
     result: list[dict[str, Any]] = []
     for item in _director_items(value):
@@ -2712,6 +2720,14 @@ def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
             "strategy": _director_first_text(item, "strategy", "decision"),
             "target_adaptation": _director_first_text(item, "target_adaptation", "adaptation"),
             "assigned_beat_id": _director_first_text(item, "assigned_beat_id") or None,
+            "literal_infeasibility_category": _director_first_text(
+                item, "literal_infeasibility_category"
+            )
+            or None,
+            "equivalent_infeasibility_category": _director_first_text(
+                item, "equivalent_infeasibility_category"
+            )
+            or None,
         }
         normalized.update({field: _director_text(item.get(field)) or None for field in fields})
         result.append(normalized)

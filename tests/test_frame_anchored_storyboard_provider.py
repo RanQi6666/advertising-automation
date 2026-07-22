@@ -637,6 +637,8 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "preserve or adapt" in system_prompt
     assert "generic endpoint lock" in system_prompt
     assert "omit only when" in system_prompt
+    assert "structured infeasibility category and evidence fields" in system_prompt
+    assert "endpoint_constraint_only" in system_prompt
     assert "assigned core beat" in system_prompt
 
 
@@ -1583,7 +1585,7 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
 
     _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
 
-    execution_scene = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    execution_scene = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
     assert execution_scene.signature_moment_ids == [
         moment.moment_id for moment in director_plan.signature_moment_plan
     ]
@@ -1662,7 +1664,7 @@ async def test_mock_director_and_storyboard_cover_every_core_behavior() -> None:
     storyboard = await provider.generate_frame_anchored_video_storyboard(
         FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 8, "9:16"
     )
-    execution = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    execution = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
     assert set(execution.signature_moment_ids) == {
         moment.moment_id for moment in plan.signature_moment_plan
     }
@@ -1694,7 +1696,7 @@ async def test_mock_short_storyboard_shares_scene_for_all_core_behaviors() -> No
         FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 2, "9:16"
     )
 
-    execution = next(scene for scene in storyboard.scenes if scene.signature_moment_ids)
+    execution = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
     assert set(execution.source_behavior_beat_ids) == {
         "core_behavior",
         "core_state_change",
@@ -2299,11 +2301,12 @@ async def test_mock_payoff_budget_changes_with_payoff_readability_evidence() -> 
     readable_beat = beat.model_copy(
         update={
             "visible_evidence": [
-                "A layered visible consequence must remain readable after execution.",
-                "The resulting target state persists clearly before the return.",
+                "A layered visible consequence remains readable after execution.",
+                "The resulting state persists clearly before return.",
             ]
         }
     )
+    assert len(readable_beat.visible_evidence) == len(beat.visible_evidence)
     readable = base.model_copy(
         update={
             "reference_video_analysis": reference.model_copy(
@@ -2323,8 +2326,8 @@ async def test_mock_payoff_budget_changes_with_payoff_readability_evidence() -> 
         FIRST_FRAME_URL, LAST_FRAME_URL, readable, 12, "9:16"
     )
 
-    assert _phase_seconds(readable_plan, "payoff", 12) != pytest.approx(
-        _phase_seconds(base_plan, "payoff", 12)
+    assert _phase_seconds(readable_plan, "payoff", 12) > _phase_seconds(
+        base_plan, "payoff", 12
     )
 
 

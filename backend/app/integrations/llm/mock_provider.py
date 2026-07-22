@@ -129,10 +129,9 @@ def _mock_allocation_evidence(
     }
 
 
-def _mock_phase_durations(
+def _mock_desired_phase_durations(
     frame_analysis: FrameAnalysis,
     core_beats: list[Any],
-    duration_seconds: int,
 ) -> dict[str, float]:
     action_count = sum(beat.behavior_type == "action" for beat in core_beats)
     state_count = sum(beat.behavior_type == "state" for beat in core_beats)
@@ -150,7 +149,7 @@ def _mock_phase_durations(
         * (1.0 if beat.behavior_type == "action" else 0.85)
         for beat in core_beats
     )
-    desired = {
+    return {
         "preparation": 0.3 + 0.08 * len(core_beats) + 0.06 * state_count,
         "action": (
             readable_execution
@@ -174,6 +173,25 @@ def _mock_phase_durations(
         ),
         "final_lock": 0.3 + 0.04 * len(transition.continuity_requirements),
     }
+
+
+def _mock_phase_durations(
+    frame_analysis: FrameAnalysis,
+    core_beats: list[Any],
+    duration_seconds: int,
+) -> dict[str, float]:
+    action_count = sum(beat.behavior_type == "action" for beat in core_beats)
+    state_count = sum(beat.behavior_type == "state" for beat in core_beats)
+    evidence_items = sum(len(beat.visible_evidence) for beat in core_beats)
+    transition = frame_analysis.transition_brief
+    endpoint_evidence = (
+        len(transition.shared_visual_facts)
+        + len(transition.continuity_requirements)
+        + bool(transition.visual_transition.strip())
+        + bool(transition.narrative_arc.strip())
+    )
+    allocation = _mock_allocation_evidence(frame_analysis, core_beats)
+    desired = _mock_desired_phase_durations(frame_analysis, core_beats)
     minimums = {
         "preparation": 0.08 + 0.02 * state_count,
         "action": sum(
@@ -291,16 +309,17 @@ def _mock_phase_boundary(
 
 def _mock_requires_phase_compression(
     frame_analysis: FrameAnalysis,
+    director_plan: FrameAnchoredDirectorPlan,
     source_ids: set[str],
     duration_seconds: int,
 ) -> bool:
-    beats = {beat.beat_id: beat for beat in _mock_core_behavior_beats(frame_analysis)}
-    execution_readability = sum(
-        max(0.08, beats[beat_id].minimum_readable_duration_seconds)
-        for beat_id in source_ids
-        if beat_id in beats
+    from backend.app.services.storyboard_director_coverage_service import (
+        _phase_compression_required_for_duration,
     )
-    return duration_seconds <= execution_readability + 4 * 0.8
+
+    return _phase_compression_required_for_duration(
+        float(duration_seconds), source_ids, frame_analysis, director_plan
+    )
 
 
 class MockLLMProvider:
@@ -429,8 +448,8 @@ class MockLLMProvider:
                             f"Adapt core {behavior.behavior_type} behavior {index} to target facts."
                         ),
                         "adapted_action": (
-                            f"Execute readable target subject/state motion for core "
-                            f"{behavior.behavior_type} behavior {index}."
+                            f"The target subject or state performs the readable core "
+                            f"{behavior.behavior_type} change {index}."
                         ),
                         "temporary_divergence": (
                             "Allow a distinct middle pose or state before the continuous return."
@@ -615,7 +634,7 @@ class MockLLMProvider:
             }
 
             compression_required = _mock_requires_phase_compression(
-                frame_analysis, set(source_ids), duration_seconds
+                frame_analysis, director_plan, set(source_ids), duration_seconds
             )
             if not compression_required:
                 action_fields = dict(common_execution)
@@ -634,6 +653,7 @@ class MockLLMProvider:
                         motion="Prepare each linked subject/state action before execution.",
                         transition_goal="Preparation leads continuously into linked execution.",
                         sound_effects=["Soft preparation ambience."],
+                        signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -710,6 +730,7 @@ class MockLLMProvider:
                         ),
                         transition_goal="Preparation leads continuously into execution.",
                         sound_effects=["Soft preparation ambience."],
+                        signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -762,6 +783,7 @@ class MockLLMProvider:
                         motion="Prepare subject/state motion and depart from the opening hold.",
                         transition_goal="Preparation leads directly into execution.",
                         sound_effects=["Soft preparation ambience."],
+                        signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -802,6 +824,7 @@ class MockLLMProvider:
                         motion="Prepare subject/state motion and depart from the opening hold.",
                         transition_goal="Preparation leads directly into shared execution.",
                         sound_effects=["Soft preparation ambience."],
+                        signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                     ),
                     FrameAnchoredStoryboardScene(

@@ -295,36 +295,13 @@ DirectorSignatureTransferRole = Literal[
 ]
 
 
-_ENDPOINT_TERMS = ("final", "last frame", "endpoint", "ending")
-_ENDPOINT_MATCH_TERMS = ("pose", "position", "orientation", "framing", "composition", "scale")
-_NON_ENDPOINT_INFEASIBILITY_EVIDENCE = (
-    "no controllable",
-    "lacks a controllable",
-    "lacks controllable",
-    "no target-compatible entity",
-    "no compatible entity",
-    "not present in the target",
-    "absent from the target",
-    "unavailable in the target",
-    "would contradict target identity",
-    "would violate target semantics",
-)
-
-
-def _endpoint_mismatch_only(*reasons: str) -> bool:
-    for reason in reasons:
-        text = reason.casefold().strip()
-        if not text:
-            continue
-        has_endpoint_constraint = any(term in text for term in _ENDPOINT_TERMS) and any(
-            term in text for term in _ENDPOINT_MATCH_TERMS
-        )
-        has_independent_infeasibility = any(
-            term in text for term in _NON_ENDPOINT_INFEASIBILITY_EVIDENCE
-        )
-        if has_endpoint_constraint and not has_independent_infeasibility:
-            return True
-    return False
+DirectorOmissionInfeasibilityCategory = Literal[
+    "target_capability_unavailable",
+    "mechanism_unavailable",
+    "identity_semantics_conflict",
+    "causal_equivalent_unavailable",
+    "endpoint_constraint_only",
+]
 
 
 class DirectorActionArcWindow(BaseModel):
@@ -392,6 +369,10 @@ class DirectorSignatureMoment(BaseModel):
     assigned_beat_id: str | None = None
     omission_reason: str | None = None
     equivalent_replacement_failure: str | None = None
+    literal_infeasibility_category: DirectorOmissionInfeasibilityCategory | None = None
+    literal_infeasibility_evidence: str | None = None
+    equivalent_infeasibility_category: DirectorOmissionInfeasibilityCategory | None = None
+    equivalent_infeasibility_evidence: str | None = None
 
     @model_validator(mode="after")
     def validate_signature_moment(self) -> "DirectorSignatureMoment":
@@ -429,12 +410,31 @@ class DirectorSignatureMoment(BaseModel):
                 raise ValueError(
                     "omitted signature moment requires equivalent replacement failure"
                 )
-            if _endpoint_mismatch_only(
-                self.omission_reason,
-                self.equivalent_replacement_failure,
+            if (
+                self.literal_infeasibility_category is None
+                or self.literal_infeasibility_evidence is None
+                or not self.literal_infeasibility_evidence.strip()
             ):
                 raise ValueError(
-                    "omitted signature moment cannot use endpoint mismatch as the omission reason"
+                    "omitted signature moment requires structured literal infeasibility; "
+                    "endpoint mismatch is insufficient"
+                )
+            if (
+                self.equivalent_infeasibility_category is None
+                or self.equivalent_infeasibility_evidence is None
+                or not self.equivalent_infeasibility_evidence.strip()
+            ):
+                raise ValueError(
+                    "omitted signature moment requires structured equivalent infeasibility; "
+                    "endpoint mismatch is insufficient"
+                )
+            if self.literal_infeasibility_category == "endpoint_constraint_only":
+                raise ValueError(
+                    "literal omission infeasibility cannot be endpoint mismatch only"
+                )
+            if self.equivalent_infeasibility_category == "endpoint_constraint_only":
+                raise ValueError(
+                    "equivalent omission infeasibility cannot be endpoint mismatch only"
                 )
         return self
 
