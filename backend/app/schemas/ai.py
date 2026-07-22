@@ -305,42 +305,126 @@ DirectorOmissionInfeasibilityCategory = Literal[
 ]
 
 
-_OMISSION_CATEGORY_TEXT_REQUIREMENTS: dict[str, tuple[tuple[str, ...], ...]] = {
+_OMISSION_CATEGORY_CONTEXT_REQUIREMENTS: dict[
+    str, tuple[tuple[str, ...], ...]
+] = {
     "target_capability_unavailable": (
         ("target", "subject", "state", "entity", "object", "asset"),
-        ("unavailable", "no ", "cannot", "lack", "without", "absent", "controll"),
     ),
     "mechanism_unavailable": (
         ("mechanism", "articulat", "actuator", "component", "movable part"),
-        ("unavailable", "no ", "cannot", "lack", "without", "absent", "impossible"),
     ),
     "identity_semantics_conflict": (
         ("identity", "semantic", "brand", "logo", "text", "meaning"),
-        ("conflict", "incompat", "cannot transfer", "not permitted", "would change"),
     ),
     "causal_equivalent_unavailable": (
         ("equivalent", "alternative", "replacement"),
         ("causal", "same role", "same effect", "same intensity", "required role"),
-        ("unavailable", "no ", "cannot", "lack", "without", "absent", "impossible"),
     ),
 }
 _OMISSION_FACT_CLAUSE_SPLIT_PATTERN = re.compile(
-    r"[.;]|\b(?:but|however|although|though|yet)\b"
+    r"[.;!?]|\u2014+|--+|\b(?:and|but|however|although|though|yet)\b"
 )
-_OMISSION_NEGATED_INFEASIBILITY_PATTERNS = (
+_OMISSION_CONTRACTION_REPLACEMENTS = (
+    (re.compile(r"\bisn't\b"), "is not"),
+    (re.compile(r"\baren't\b"), "are not"),
+    (re.compile(r"\bwasn't\b"), "was not"),
+    (re.compile(r"\bweren't\b"), "were not"),
+    (re.compile(r"\bcan't\b"), "cannot"),
+    (re.compile(r"\bcouldn't\b"), "could not"),
+    (re.compile(r"\bwon't\b"), "will not"),
+    (re.compile(r"\bwouldn't\b"), "would not"),
+    (re.compile(r"\bdoesn't\b"), "does not"),
+    (re.compile(r"\bdon't\b"), "do not"),
+    (re.compile(r"\bdidn't\b"), "did not"),
+    (re.compile(r"\bhasn't\b"), "has not"),
+    (re.compile(r"\bhaven't\b"), "have not"),
+    (re.compile(r"\bhadn't\b"), "had not"),
+)
+_OMISSION_NEGATIVE_STATE = (
+    r"unavailable|impossible|absent|infeasible|missing|lacking"
+)
+_OMISSION_REVERSED_NEGATIVE_STATE_PATTERNS = (
     re.compile(
-        r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+"
-        r"(?:unavailable|impossible|absent|infeasible|lacking)\b"
+        rf"\b(?:not|never)\b(?:\s+[a-z'-]+){{0,3}}\s+"
+        rf"(?:{_OMISSION_NEGATIVE_STATE})\b"
     ),
     re.compile(
-        r"\bno\b[^.;]{0,80}\b(?:is|are|was|were|remains?|seems?)\b"
-        r"[^.;]{0,40}\b(?:unavailable|impossible|absent|infeasible|lacking)\b"
+        rf"\b(?:cannot|could not|will not|would not)\b"
+        rf"(?:\s+[a-z'-]+){{0,2}}\s+be\s+"
+        rf"(?:{_OMISSION_NEGATIVE_STATE})\b"
     ),
+    re.compile(
+        rf"\bno\b[^.;!?\u2014]{{0,80}}\b"
+        rf"(?:is|are|was|were|remains?|seems?)\b"
+        rf"[^.;!?\u2014]{{0,40}}\b(?:{_OMISSION_NEGATIVE_STATE})\b"
+    ),
+    re.compile(r"\b(?:do|does|did|has|have|had)\s+not\s+lack(?:s|ed|ing)?\b"),
 )
+_OMISSION_NEGATIVE_STATE_PATTERN = re.compile(
+    rf"\b(?:{_OMISSION_NEGATIVE_STATE})\b"
+)
+_OMISSION_NEGATED_AVAILABILITY_PATTERN = re.compile(
+    r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+available\b"
+)
+_OMISSION_INABILITY_PATTERN = re.compile(
+    r"\b(?:cannot|could not|will not|would not)\b(?:\s+[a-z'-]+){0,2}\s+"
+    r"(?:execute|perform|move|articulate|operate|actuate|transform|change|rotate|"
+    r"interact|support|produce|create|replicate|transfer|fulfill|control)\w*\b"
+)
+_OMISSION_RESOURCE_NOUN = (
+    r"capabilit(?:y|ies)|subjects?|states?|entities|entity|objects?|assets?|mechanisms?|"
+    r"articulations?|actuators?|components?|parts?|equivalents?|alternatives?|replacements?"
+)
+_OMISSION_ABSENCE_PATTERN = re.compile(
+    rf"\b(?:has|have|had|contains?|shows?|provides?|offers?|includes?)\s+no"
+    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b|"
+    rf"\bno(?:\s+[a-z'-]+){{0,4}}\s+(?:{_OMISSION_RESOURCE_NOUN})"
+    rf"(?:\s+[a-z'-]+){{0,4}}\s+(?:exists?|is\s+available|are\s+available)\b|"
+    rf"\bwithout(?:\s+(?:a|an|any|the))?(?:\s+[a-z'-]+){{0,3}}\s+"
+    rf"(?:{_OMISSION_RESOURCE_NOUN})\b|"
+    rf"\black(?:s|ed|ing)?(?:\s+(?:a|an|any|the))?"
+    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b|"
+    rf"\b(?:do|does|did|has|have|had)\s+not\s+have(?:\s+(?:a|an|any|the))?"
+    rf"(?:\s+[a-z'-]+){{0,3}}\s+(?:{_OMISSION_RESOURCE_NOUN})\b"
+)
+_OMISSION_NEGATED_CONFLICT_PATTERN = re.compile(
+    r"\b(?:not|never)\b(?:\s+[a-z'-]+){0,3}\s+(?:conflict\w*|incompat\w*)\b"
+)
+_OMISSION_IDENTITY_CONFLICT_PATTERN = re.compile(
+    r"\b(?:conflict\w*|incompat\w*|cannot\s+transfer|not\s+permitted|"
+    r"would\s+change)\b"
+)
+
+
+def _normalize_omission_fact_text(value: str) -> str:
+    normalized = value.strip().casefold().replace("\u2019", "'")
+    for pattern, replacement in _OMISSION_CONTRACTION_REPLACEMENTS:
+        normalized = pattern.sub(replacement, normalized)
+    return re.sub(r"\bnot\s+(?:only|merely)\b", "emphatically", normalized)
+
+
+def _clause_affirms_infeasibility(clause: str, *, identity_conflict: bool) -> bool:
+    if identity_conflict:
+        if _OMISSION_NEGATED_CONFLICT_PATTERN.search(clause):
+            return False
+        return _OMISSION_IDENTITY_CONFLICT_PATTERN.search(clause) is not None
+    if any(
+        pattern.search(clause)
+        for pattern in _OMISSION_REVERSED_NEGATIVE_STATE_PATTERNS
+    ):
+        return False
+    return bool(
+        _OMISSION_NEGATIVE_STATE_PATTERN.search(clause)
+        or _OMISSION_NEGATED_AVAILABILITY_PATTERN.search(clause)
+        or _OMISSION_INABILITY_PATTERN.search(clause)
+        or _OMISSION_ABSENCE_PATTERN.search(clause)
+    )
 
 
 def _has_affirmative_local_infeasibility_fact(
     normalized: str,
+    category: str,
     requirements: tuple[tuple[str, ...], ...],
 ) -> bool:
     clauses = [
@@ -351,9 +435,11 @@ def _has_affirmative_local_infeasibility_fact(
     for clause in clauses:
         if not all(any(term in clause for term in alternatives) for alternatives in requirements):
             continue
-        if any(pattern.search(clause) for pattern in _OMISSION_NEGATED_INFEASIBILITY_PATTERNS):
-            continue
-        return True
+        if _clause_affirms_infeasibility(
+            clause,
+            identity_conflict=category == "identity_semantics_conflict",
+        ):
+            return True
     return False
 
 
@@ -368,13 +454,14 @@ def omission_infeasibility_matches_category(
         return False
     if literal and category == "causal_equivalent_unavailable":
         return False
-    requirements = _OMISSION_CATEGORY_TEXT_REQUIREMENTS.get(category)
+    requirements = _OMISSION_CATEGORY_CONTEXT_REQUIREMENTS.get(category)
     if requirements is None:
         return False
     for value in (reason, evidence):
-        normalized = (value or "").strip().casefold()
+        normalized = _normalize_omission_fact_text(value or "")
         if not normalized or not _has_affirmative_local_infeasibility_fact(
             normalized,
+            category,
             requirements,
         ):
             return False

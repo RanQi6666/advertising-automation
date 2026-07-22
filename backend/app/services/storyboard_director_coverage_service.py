@@ -377,7 +377,11 @@ _ACTOR_AUXILIARY_PATTERN = re.compile(
     r"\b(?:do|does|did|is|are|was|were|has|have|had|will|would|shall|should|"
     r"can|could|may|might|must)\b"
 )
-_PREDICATE_NEGATION_RESET_PATTERN = re.compile(r"\b(?:and|but|then)\b")
+_PREDICATE_COORDINATOR_PATTERN = re.compile(r"\b(?:and|but|then|or)\b")
+_ACTOR_MODIFIER_BOUNDARY_PATTERN = re.compile(
+    r"\b(?:near|beside|behind|before|after|around|inside|outside|under|over|"
+    r"against|toward|towards|from|with|without|next\s+to|in\s+front\s+of)\b"
+)
 _NON_ACTOR_TOKENS = {
     "a",
     "an",
@@ -411,14 +415,17 @@ _SUPPORT_ONLY_ACTOR_TERMS = set(_SUPPORT_ONLY_MOTION_TERMS) | {
 }
 
 
-def _predicate_is_locally_negated(clause: str, predicate_start: int) -> bool:
-    scope_start = 0
-    for boundary in _PREDICATE_NEGATION_RESET_PATTERN.finditer(clause[:predicate_start]):
-        scope_start = boundary.end()
-    return _NEGATED_EXECUTION_PATTERN.search(clause[scope_start:predicate_start]) is not None
+def _latest_predicate_coordinator(
+    clause: str,
+    predicate_start: int,
+) -> re.Match[str] | None:
+    boundary = None
+    for match in _PREDICATE_COORDINATOR_PATTERN.finditer(clause[:predicate_start]):
+        boundary = match
+    return boundary
 
 
-def _actor_head_from_scope(actor_scope: str) -> str | None:
+def _actor_phrase_from_scope(actor_scope: str) -> str | None:
     actor_scope = actor_scope.strip()
     if not actor_scope:
         return None
@@ -431,32 +438,44 @@ def _actor_head_from_scope(actor_scope: str) -> str | None:
         for token in tokens
         if token not in _NON_ACTOR_TOKENS and not token.endswith("ly")
     ]
-    return candidates[-1] if candidates else None
+    return " ".join(candidates) or None
 
 
-def _predicate_actor_head(
+def _predicate_context(
     clause: str,
     predicate_start: int,
-    previous_actor_head: str | None,
-) -> str | None:
-    boundary = None
-    for match in _PREDICATE_NEGATION_RESET_PATTERN.finditer(clause[:predicate_start]):
-        boundary = match
+    previous_actor_phrase: str | None,
+    previous_predicate_negated: bool,
+) -> tuple[str | None, bool]:
+    boundary = _latest_predicate_coordinator(clause, predicate_start)
     scope_start = boundary.end() if boundary is not None else 0
-    actor_head = _actor_head_from_scope(clause[scope_start:predicate_start])
-    if actor_head is not None:
-        return actor_head
-    if previous_actor_head is not None:
-        return previous_actor_head
-    if boundary is not None:
-        return _actor_head_from_scope(clause[: boundary.start()])
-    return None
+    local_scope = clause[scope_start:predicate_start]
+    local_actor_phrase = _actor_phrase_from_scope(local_scope)
+    if local_actor_phrase is not None:
+        actor_phrase = local_actor_phrase
+    elif previous_actor_phrase is not None:
+        actor_phrase = previous_actor_phrase
+    elif boundary is not None:
+        actor_phrase = _actor_phrase_from_scope(clause[: boundary.start()])
+    else:
+        actor_phrase = None
+
+    locally_negated = _NEGATED_EXECUTION_PATTERN.search(local_scope) is not None
+    if locally_negated or local_actor_phrase is not None or boundary is None:
+        return actor_phrase, locally_negated
+    coordinator = boundary.group(0)
+    inherits_negation = coordinator in {"and", "or"} and previous_actor_phrase is not None
+    return actor_phrase, previous_predicate_negated if inherits_negation else False
 
 
-def _is_support_only_actor(actor_head: str) -> bool:
-    if actor_head in _SUPPORT_ONLY_ACTOR_TERMS:
-        return True
-    return actor_head.endswith("s") and actor_head[:-1] in _SUPPORT_ONLY_ACTOR_TERMS
+def _is_support_only_actor(actor_phrase: str) -> bool:
+    actor_core = _ACTOR_MODIFIER_BOUNDARY_PATTERN.split(actor_phrase, maxsplit=1)[0]
+    tokens = re.findall(r"[a-z][a-z'-]*", actor_core)
+    for token in tokens:
+        singular = token[:-1] if token.endswith("s") else token
+        if token in _SUPPORT_ONLY_ACTOR_TERMS or singular in _SUPPORT_ONLY_ACTOR_TERMS:
+            return True
+    return False
 
 
 def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
@@ -479,19 +498,22 @@ def _scene_has_subject_execution(scene: FrameAnchoredStoryboardScene) -> bool:
         )
         if not execution_matches:
             continue
-        previous_actor_head: str | None = None
+        previous_actor_phrase: str | None = None
+        previous_predicate_negated = False
         for match in execution_matches:
-            actor_head = _predicate_actor_head(
+            actor_phrase, predicate_negated = _predicate_context(
                 clause,
                 match.start(),
-                previous_actor_head,
+                previous_actor_phrase,
+                previous_predicate_negated,
             )
-            if actor_head is not None:
-                previous_actor_head = actor_head
+            if actor_phrase is not None:
+                previous_actor_phrase = actor_phrase
+            previous_predicate_negated = predicate_negated
             if (
-                actor_head is not None
-                and not _is_support_only_actor(actor_head)
-                and not _predicate_is_locally_negated(clause, match.start())
+                actor_phrase is not None
+                and not _is_support_only_actor(actor_phrase)
+                and not predicate_negated
             ):
                 return True
     return False
