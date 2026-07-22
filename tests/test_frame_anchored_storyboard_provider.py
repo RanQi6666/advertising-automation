@@ -952,6 +952,45 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_storyboard_normalizes_string_sound_effects() -> None:
+    provider, _captured = _gateway_provider_with_responses(
+        {
+            "duration_seconds": 12,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 6,
+                    "frame_anchor": "first_frame",
+                    "visual": "Open from the supplied first-frame base layer.",
+                    "sound_effects": "soft cinematic rise",
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 6,
+                    "end_second": 12,
+                    "frame_anchor": "last_frame",
+                    "visual": "Resolve at the supplied last-frame base layer.",
+                    "sound_effects": "golden impact burst",
+                },
+            ],
+        }
+    )
+
+    storyboard = await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert storyboard.scenes[0].sound_effects == ["soft cinematic rise"]
+    assert storyboard.scenes[1].sound_effects == ["golden impact burst"]
+
+
+@pytest.mark.asyncio
 async def test_gateway_storyboard_prioritizes_target_truth_and_reference_constraints() -> None:
     provider, captured = _gateway_provider_with_responses(
         {

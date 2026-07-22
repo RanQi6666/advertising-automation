@@ -2783,6 +2783,17 @@ def _frame_anchored_storyboard_from_data(
     normalized = dict(data)
     normalized["duration_seconds"] = duration_seconds
     normalized["aspect_ratio"] = aspect_ratio
+    scenes = data.get("scenes")
+    if isinstance(scenes, list):
+        normalized["scenes"] = [
+            {
+                **scene,
+                "sound_effects": _frame_string_list(scene.get("sound_effects")),
+            }
+            if isinstance(scene, dict) and "sound_effects" in scene
+            else scene
+            for scene in scenes
+        ]
     try:
         return FrameAnchoredStoryboard.model_validate(normalized)
     except ValidationError as exc:
