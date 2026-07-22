@@ -22,14 +22,17 @@ from backend.app.services import external_video_generation_service as external_v
 from backend.app.services import generation_task_service as task_module
 from backend.app.services import video_service as video_service_module
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.external_sources import (
+    EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+    EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+)
 from backend.app.services.external_video_generation_service import ExternalVideoGenerationService
 from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
 from backend.app.services.video_service import VideoService
 
 EXTERNAL_SOURCE = "external_video_generation"
 ONE_PIXEL_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-    "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
 
 
@@ -248,6 +251,53 @@ async def test_volcengine_video_request_error_includes_exception_type(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image_input", ["omitted", "empty"])
+async def test_external_video_generation_creates_text_mode_without_assets(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_input: str,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        lambda task_id, queue_name, priority, countdown_seconds=0: None,
+    )
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    payload = _video_payload(external_request_id=f"external-text-{image_input}")
+    if image_input == "omitted":
+        payload.pop("images")
+    else:
+        payload["images"] = []
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    assert response.json()["code"] == 1001
+    assert "generation_mode" not in response.json()["data"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert assets == []
+    assert len(videos) == 1
+    assert videos[0].source_asset_ids == []
+    assert (
+        videos[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    )
+    assert len(tasks) == 1
+    assert tasks[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_external_video_generation_create_returns_job_without_starting_provider(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -302,11 +352,13 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert create_body["code"] == 1001
     assert create_body["message"] == "processing"
     assert created["status"] == "processing"
+    assert "generation_mode" not in created
     assert poll_response.status_code == 200
     assert poll_body["code"] == 1001
     assert poll_body["message"] == "processing"
     assert polled["job_id"] == created["job_id"]
     assert polled["status"] == "processing"
+    assert "generation_mode" not in polled
     assert "url" not in polled
     assert len(enqueued) == 1
     start_task_id, start_queue_name, _priority = enqueued[0]
@@ -336,6 +388,10 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert videos[0].provider_job_id is None
     assert videos[0].metadata_json["source"] == EXTERNAL_SOURCE
     assert videos[0].metadata_json["external_request_id"] == "external-video-1"
+    assert (
+        videos[0].metadata_json["generation_mode"]
+        == EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME
+    )
     assert len(tasks) == 1
     assert tasks[0].id == start_task_id
     assert tasks[0].queue_name == VIDEO_QUEUE_NAME
@@ -345,6 +401,9 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert tasks[0].payload_json == {"video_id": videos[0].id}
     assert tasks[0].metadata_json["source"] == EXTERNAL_SOURCE
     assert tasks[0].metadata_json["external_request_id"] == "external-video-1"
+    assert (
+        tasks[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME
+    )
 
     await engine.dispose()
 
@@ -396,6 +455,7 @@ async def test_external_video_generation_does_not_persist_legacy_final_text_over
     assert "final_text_overlay_locks" not in (video.metadata_json or {})
     await engine.dispose()
 
+
 @pytest.mark.asyncio
 async def test_video_transfer_does_not_apply_legacy_final_text_overlay_locks(
     tmp_path,
@@ -433,6 +493,7 @@ async def test_video_transfer_does_not_apply_legacy_final_text_overlay_locks(
     assert "final_text_overlay_status" not in (transferred.metadata_json or {})
     assert "final_text_overlay_applied_locks" not in (transferred.metadata_json or {})
     await engine.dispose()
+
 
 @pytest.mark.asyncio
 async def test_external_video_generation_start_task_then_polling_returns_url(
@@ -578,9 +639,7 @@ Continue the exact first-frame action, then resolve into the supplied last frame
                 "creative_strategy": {
                     "style_pack_id": "must-not-be-injected",
                     "style_pack": {"visual_direction": "must-not-be-injected"},
-                    "market_game_style_pack": {
-                        "video_guidance": "must-not-be-injected"
-                    },
+                    "market_game_style_pack": {"video_guidance": "must-not-be-injected"},
                 },
             }
             await session.commit()
@@ -819,7 +878,10 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
     assert video.status == VideoStatus.GENERATED.value
     assert video.url is None
     assert video.metadata_json["implementation_status"] == "pending_transfer"
-    assert video.metadata_json["provider_video_url"] == "https://volcengine.example.test/video-output.mp4"
+    assert (
+        video.metadata_json["provider_video_url"]
+        == "https://volcengine.example.test/video-output.mp4"
+    )
 
     await GenerationTaskService().process_task(transfer_task_id)
 
@@ -873,20 +935,21 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
 
 
 @pytest.mark.asyncio
-async def test_external_video_generation_rejects_image_counts_other_than_two(
+@pytest.mark.parametrize(
+    "images",
+    [[ONE_PIXEL_PNG_BASE64], [ONE_PIXEL_PNG_BASE64] * 3],
+)
+async def test_external_video_generation_rejects_unsupported_image_counts(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    images: list[str],
 ) -> None:
-    client, engine, app, _session_factory = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        token="video-token",
-    )
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
     try:
         response = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=_video_payload(images=[ONE_PIXEL_PNG_BASE64]),
+            json=_video_payload(images=images),
         )
     finally:
         app.dependency_overrides.clear()
@@ -895,7 +958,30 @@ async def test_external_video_generation_rejects_image_counts_other_than_two(
 
     assert response.status_code == 400
     assert response.json()["code"] == 4001
-    assert "exactly 2" in response.json()["message"]
+    assert response.json()["message"] == (
+        "images must be omitted, empty, or contain exactly 2 base64 images"
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_rejects_null_images(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(images=None),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,11 @@ from backend.app.schemas.external_video_generation import (
     ExternalVideoGenerationCreate,
     ExternalVideoGenerationJobRead,
 )
-from backend.app.services.external_sources import EXTERNAL_VIDEO_GENERATION_SOURCE
+from backend.app.services.external_sources import (
+    EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+    EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+    EXTERNAL_VIDEO_GENERATION_SOURCE,
+)
 from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
 from backend.app.services.image_storage_service import ImageStorageService
 from backend.app.services.video_service import VideoService
@@ -54,8 +58,7 @@ class ExternalVideoGenerationService:
         storyboard_text = payload.storyboard_text.strip()
         if not storyboard_text:
             raise AppError("storyboard_text is required")
-        if len(payload.images) != 2:
-            raise AppError("images must contain exactly 2 base64 images")
+        generation_mode = _generation_mode_for_images(payload.images)
 
         existing = await self._find_existing_video(session, payload.external_request_id)
         if existing:
@@ -145,6 +148,7 @@ class ExternalVideoGenerationService:
                     "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
                     "external_request_id": payload.external_request_id,
                     "storyboard_text": storyboard_text,
+                    "generation_mode": generation_mode,
                     "duration_seconds": payload.duration_seconds,
                     "aspect_ratio": payload.aspect_ratio,
                     "implementation_status": "configured",
@@ -167,6 +171,7 @@ class ExternalVideoGenerationService:
                 metadata={
                     "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
                     "external_request_id": payload.external_request_id,
+                    "generation_mode": generation_mode,
                 },
             )
             await session.refresh(video)
@@ -318,6 +323,7 @@ class ExternalVideoGenerationService:
             return None
 
         metadata = video.metadata_json or {}
+        generation_mode = metadata.get("generation_mode")
         retry_count = _external_retry_count(metadata)
         if retry_count >= EXTERNAL_VIDEO_FAILED_REQUEUE_LIMIT:
             return None
@@ -343,6 +349,7 @@ class ExternalVideoGenerationService:
             metadata={
                 "source": EXTERNAL_VIDEO_GENERATION_SOURCE,
                 "external_request_id": external_request_id,
+                "generation_mode": generation_mode,
                 "requeued_after_provider_start_failed": True,
                 "external_retry_count": retry_count + 1,
             },
@@ -403,6 +410,14 @@ class ExternalVideoGenerationService:
                 if delay > 0:
                     await asyncio.sleep(delay)
         raise RuntimeError("video start retry loop exhausted unexpectedly")
+
+
+def _generation_mode_for_images(images: list[str]) -> str:
+    if len(images) == 0:
+        return EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    if len(images) == 2:
+        return EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME
+    raise AppError("images must be omitted, empty, or contain exactly 2 base64 images")
 
 
 def _decode_base64_image(value: str) -> DecodedImage:
