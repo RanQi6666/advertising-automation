@@ -136,6 +136,79 @@ def test_non_omitted_signature_requires_action_payoff_and_return() -> None:
         FrameAnchoredDirectorPlan.model_validate(payload)
 
 
+def test_non_omitted_signature_allows_legacy_target_adaptation_to_be_empty() -> None:
+    payload = _director_plan_payload()
+    payload["signature_moment_plan"][0]["target_adaptation"] = ""
+
+    plan = FrameAnchoredDirectorPlan.model_validate(payload)
+
+    assert plan.signature_moment_plan[0].target_adaptation == ""
+    assert plan.signature_moment_plan[0].adapted_action == "Execute the target-compatible causal action."
+
+
+def test_director_plan_rejects_out_of_order_but_known_action_windows() -> None:
+    payload = _director_plan_payload()
+    payload["action_arc_windows"] = [
+        {
+            "window_id": "depart",
+            "phase": "departure",
+            "start_ratio": 0.0,
+            "end_ratio": 0.25,
+            "objective": "Leave the supplied first-frame hold.",
+            "subject_motion_intensity": 0.3,
+            "camera_intensity": 0.2,
+            "effect_intensity": 0.1,
+        },
+        {
+            "window_id": "action_window",
+            "phase": "action",
+            "start_ratio": 0.4,
+            "end_ratio": 0.72,
+            "objective": "Execute the evidence-backed action.",
+            "subject_motion_intensity": 0.8,
+            "camera_intensity": 0.5,
+            "effect_intensity": 0.3,
+            "depends_on": ["depart"],
+        },
+        {
+            "window_id": "payoff",
+            "phase": "payoff",
+            "start_ratio": 0.2,
+            "end_ratio": 0.35,
+            "objective": "Reveal the visible consequence before the final return.",
+            "subject_motion_intensity": 0.4,
+            "camera_intensity": 0.2,
+            "effect_intensity": 0.2,
+            "depends_on": ["depart"],
+        },
+    ]
+
+    with pytest.raises(ValidationError, match="chronological order"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_director_plan_requires_final_anchor_return_when_non_omitted_signature_exists() -> None:
+    payload = _director_plan_payload()
+    payload["action_arc_windows"] = []
+    payload["final_anchor_return"] = ""
+
+    with pytest.raises(ValidationError, match="final anchor return"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
+def test_director_plan_requires_final_anchor_return_when_action_arc_exists() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="Literal and adapted execution contradict target facts.",
+    )
+    payload["signature_moment_plan"] = []
+    payload["final_anchor_return"] = ""
+
+    with pytest.raises(ValidationError, match="final anchor return"):
+        FrameAnchoredDirectorPlan.model_validate(payload)
+
+
 def test_equivalent_replacement_is_valid() -> None:
     payload = _director_plan_payload(signature_strategy="replace_with_equivalent")
     assert FrameAnchoredDirectorPlan.model_validate(payload).signature_moment_plan[0].strategy == (
@@ -434,6 +507,7 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
                     "omission_reason": None,
                 }
             ],
+            "final_anchor_return": "Resolve continuously into the exact supplied last-frame composition.",
             "anchor_adaptation_plan": ["Resolve to the exact supplied last-frame composition."],
             "anti_flattening_constraints": [
                 "Do not collapse trigger, action, impact, and resolution into one flat move."

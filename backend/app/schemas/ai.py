@@ -365,8 +365,6 @@ class DirectorSignatureMoment(BaseModel):
         if self.strategy != "omit":
             if not self.assigned_beat_id or not self.assigned_beat_id.strip():
                 raise ValueError("non-omitted signature moment requires an assigned beat")
-            if not self.target_adaptation.strip():
-                raise ValueError("non-omitted signature moment requires a target adaptation")
             if not self.adapted_action.strip():
                 raise ValueError("non-omitted signature moment requires an adapted action")
             if not self.visible_payoff.strip():
@@ -434,12 +432,29 @@ class FrameAnchoredDirectorPlan(BaseModel):
             if not beat.source_evidence:
                 raise ValueError("climax beat requires source evidence")
         known_window_ids: set[str] = set()
+        previous_window: DirectorActionArcWindow | None = None
         for window in self.action_arc_windows:
             if window.window_id in known_window_ids:
                 raise ValueError("action arc windows must use unique ordered ids")
             if any(dependency not in known_window_ids for dependency in window.depends_on):
                 raise ValueError("action arc dependencies must reference earlier known windows")
+            if previous_window is not None and (
+                window.start_ratio < previous_window.start_ratio
+                or (
+                    window.start_ratio == previous_window.start_ratio
+                    and window.end_ratio < previous_window.end_ratio
+                )
+            ):
+                raise ValueError("action arc windows must be declared in chronological order")
             known_window_ids.add(window.window_id)
+            previous_window = window
+        requires_final_anchor_return = bool(self.action_arc_windows) or any(
+            moment.strategy != "omit" for moment in self.signature_moment_plan
+        )
+        if requires_final_anchor_return and not self.final_anchor_return.strip():
+            raise ValueError(
+                "director plan requires a final anchor return when action execution is declared"
+            )
         signature_ids: set[str] = set()
         for moment in self.signature_moment_plan:
             if moment.moment_id in signature_ids:
