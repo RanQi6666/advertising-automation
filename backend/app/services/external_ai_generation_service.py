@@ -42,6 +42,10 @@ from backend.app.services.generation_task_service import (
     GenerationTaskService,
 )
 from backend.app.services.llm_rate_limit import ExternalAIIdempotencyLock, llm_text_rate_limiter
+from backend.app.services.storyboard_director_coverage_service import (
+    review_director_action_coverage,
+    validate_final_storyboard_action_coverage,
+)
 from backend.app.services.storyboard_reference_video_service import (
     PreparedReferenceVideo,
     StoryboardReferenceVideoService,
@@ -457,6 +461,16 @@ class ExternalAIGenerationService:
                     frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
 
+            director_plan = frame_analysis.director_plan
+            if director_plan is None:
+                raise ProviderError("Frame-anchored director plan is missing.")
+            director_review = review_director_action_coverage(frame_analysis, director_plan)
+            await _store_frame_anchored_private_metadata(
+                session,
+                task,
+                director_action_coverage_review=director_review.model_dump(mode="json"),
+            )
+
             async with llm_text_rate_limiter():
                 storyboard = await llm.generate_frame_anchored_video_storyboard(
                     first_frame_image_url=payload.first_frame_image_url,
@@ -464,6 +478,7 @@ class ExternalAIGenerationService:
                     frame_analysis=frame_analysis,
                     duration_seconds=payload.duration_seconds,
                     aspect_ratio=payload.aspect_ratio,
+                    director_correction_requirements=director_review.correction_requirements,
                 )
             await _store_frame_anchored_private_metadata(
                 session,
@@ -471,10 +486,15 @@ class ExternalAIGenerationService:
                 storyboard_candidate=storyboard.model_dump(mode="json"),
             )
             try:
-                validate_director_coverage(storyboard, frame_analysis.director_plan)
+                validate_director_coverage(storyboard, director_plan)
+                validate_final_storyboard_action_coverage(
+                    storyboard,
+                    frame_analysis,
+                    director_review,
+                )
             except ValueError as exc:
                 raise ProviderError(
-                    "LLM storyboard does not cover the required director climax beats."
+                    "LLM storyboard does not execute the required director action and final-anchor return."
                 ) from exc
             await _store_frame_anchored_private_metadata(
                 session,
@@ -842,12 +862,18 @@ async def _store_frame_anchored_private_metadata(
     task: GenerationTask,
     *,
     frame_analysis: dict[str, Any] | None = None,
+    director_action_coverage_review: dict[str, Any] | None = None,
     storyboard_candidate: dict[str, Any] | None = None,
     storyboard: dict[str, Any] | None = None,
 ) -> None:
     metadata = task.metadata_json or {}
     if frame_analysis is not None:
         metadata = {**metadata, "frame_analysis": frame_analysis}
+    if director_action_coverage_review is not None:
+        metadata = {
+            **metadata,
+            "director_action_coverage_review": director_action_coverage_review,
+        }
     if storyboard_candidate is not None:
         metadata = {
             **metadata,
@@ -875,17 +901,16 @@ def _format_frame_anchored_storyboard_text(
             f"Scene {scene_index} ({timing})",
             f"Anchor: {scene.frame_anchor}",
             f"Visual: {scene.visual}",
-            (
-                f"Cinematic beats: {', '.join(scene.cinematic_beats)}"
-                if scene.cinematic_beats
-                else f"Cinematic beat: {scene.cinematic_beat or '-'}"
-            ),
             f"Tension stage: {scene.tension_stage or '-'}",
             f"Camera and motion: {scene.motion or '-'}",
             f"Camera instruction: {scene.camera_instruction or '-'}",
             f"Transition goal: {scene.transition_goal or '-'}",
             f"Action-result requirement: {scene.action_result_requirement or '-'}",
             f"Effect timing: {scene.effect_timing or '-'}",
+            f"Subject motion intensity: {_format_optional_intensity(scene.subject_motion_intensity)}",
+            f"Camera intensity: {_format_optional_intensity(scene.camera_intensity)}",
+            f"Effect intensity: {_format_optional_intensity(scene.effect_intensity)}",
+            f"Return to final anchor: {scene.anchor_return_instruction or '-'}",
             f"Anti-flattening requirement: {scene.anti_flattening_requirement or '-'}",
             f"Subtitle: {scene.subtitle or '-'}",
             f"Voiceover: {scene.voiceover or '-'}",
@@ -914,6 +939,12 @@ def _format_frame_anchored_storyboard_text(
     if storyboard.rationale:
         blocks.append(f"Overall direction: {storyboard.rationale}")
     return "\n\n".join(blocks)
+
+
+def _format_optional_intensity(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def _scene_timing(start_second: float | None, end_second: float | None) -> str:
