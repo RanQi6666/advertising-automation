@@ -489,6 +489,16 @@ class FakeExternalAILLM:
             )
             assert frame_analysis.timeline_adaptation_plan is not None
             assert frame_analysis.timeline_adaptation_plan.beats[-1].must_remain_visible_until_final
+
+        def phase_evidence(phase: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "phase": phase,
+                    "signature_moment_ids": [signature_moment.moment_id],
+                    "source_behavior_beat_ids": list(signature_moment.source_behavior_beat_ids),
+                }
+            ]
+
         return FrameAnchoredStoryboard(
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
@@ -504,6 +514,7 @@ class FakeExternalAILLM:
                     sound_effects=["soft room tone"],
                     signature_moment_ids=signature_moment_ids,
                     source_behavior_beat_ids=source_behavior_beat_ids,
+                    phase_evidence=phase_evidence("preparation"),
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=2,
@@ -536,6 +547,7 @@ class FakeExternalAILLM:
                     camera_intensity=0.6,
                     effect_intensity=0.4,
                     anti_flattening_requirement="Keep action distinct from its result.",
+                    phase_evidence=phase_evidence("action"),
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=3,
@@ -563,6 +575,7 @@ class FakeExternalAILLM:
                         + " only through their visible results."
                     ),
                     effect_timing="Peak the observed effect at the visible impact.",
+                    phase_evidence=phase_evidence("payoff"),
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=4,
@@ -574,9 +587,8 @@ class FakeExternalAILLM:
                     transition_goal="Restore the final anchor in the same shot.",
                     signature_moment_ids=signature_moment_ids,
                     source_behavior_beat_ids=source_behavior_beat_ids,
-                    anchor_return_instruction=(
-                        "Return continuously to the supplied last frame."
-                    ),
+                    anchor_return_instruction=("Return continuously to the supplied last frame."),
+                    phase_evidence=phase_evidence("return"),
                 ),
                 FrameAnchoredStoryboardScene(
                     scene_index=5,
@@ -587,6 +599,9 @@ class FakeExternalAILLM:
                     motion="Settle and stabilize the subject in the final composition.",
                     transition_goal="End and hold on the supplied last frame.",
                     sound_effects=["music resolve"],
+                    signature_moment_ids=signature_moment_ids,
+                    source_behavior_beat_ids=source_behavior_beat_ids,
+                    phase_evidence=phase_evidence("final_hold"),
                 ),
             ],
             sound_design=StoryboardSoundDesign(music="gentle build", ambience="room tone"),
@@ -775,9 +790,7 @@ def test_frame_anchored_storyboard_text_hides_multiple_director_beats() -> None:
 
 
 def test_external_storyboard_v2_rejects_legacy_and_missing_frame_fields() -> None:
-    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(
-        _storyboard_v2_payload()
-    )
+    request = ExternalAIFrameAnchoredStoryboardCreate.model_validate(_storyboard_v2_payload())
 
     assert request.first_frame_image_url.endswith("first.png")
 
@@ -1191,12 +1204,18 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         task = await session.get(GenerationTask, job_id)
         assert task is not None
-        assert task.metadata_json["frame_analysis"]["reference_video_analysis"][
-            "adapted_constraints"
-        ]["subject_presence"]["strength"] == "preferred"
-        assert task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
-            "must_remain_visible_until_final"
-        ] is True
+        assert (
+            task.metadata_json["frame_analysis"]["reference_video_analysis"]["adapted_constraints"][
+                "subject_presence"
+            ]["strength"]
+            == "preferred"
+        )
+        assert (
+            task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
+                "must_remain_visible_until_final"
+            ]
+            is True
+        )
         assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
     await engine.dispose()
 
@@ -1481,9 +1500,7 @@ async def test_storyboard_v2_uncached_success_uses_exactly_three_llm_calls(
 ) -> None:
     fake_llm = FakeExternalAILLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    engine, session_factory = await _session_factory(
-        tmp_path, "storyboard-v2-three-calls.db"
-    )
+    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-three-calls.db")
     service = ExternalAIGenerationService()
     async with session_factory() as session:
         task = GenerationTask(
@@ -2053,10 +2070,8 @@ def test_frame_anchored_storyboard_formats_freeform_overlay_instruction() -> Non
 
     text = external_ai_service_module._format_frame_anchored_storyboard_text(storyboard)
 
-    assert (
-        "Overlay lifecycle: Keep the selected overlay readable through the ending."
-        in text
-    )
+    assert "Overlay lifecycle: Keep the selected overlay readable through the ending." in text
+
 
 def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> None:
     private_ids = (
@@ -2110,7 +2125,7 @@ def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> N
                         "source_behavior_beat_ids": ["core_behavior"],
                     }
                 ],
-            )
+            ),
         ],
         sound_design=StoryboardSoundDesign(music=leaked, ambience=leaked),
         rationale=leaked,
@@ -2166,9 +2181,7 @@ async def test_storyboard_v2_invalid_omit_stops_after_call2(
                 "return_strategy": "",
                 "assigned_beat_id": None,
                 "omission_reason": "The action cannot match the final pose.",
-                "equivalent_replacement_failure": (
-                    "No equivalent preserves the ending framing."
-                ),
+                "equivalent_replacement_failure": ("No equivalent preserves the ending framing."),
                 "literal_infeasibility_category": "endpoint_constraint_only",
                 "literal_infeasibility_evidence": "Only the final pose differs.",
                 "equivalent_infeasibility_category": "endpoint_constraint_only",
@@ -2180,9 +2193,7 @@ async def test_storyboard_v2_invalid_omit_stops_after_call2(
     fake_llm.analyze_video_frame_pair = analyze_with_required_core_behavior
     fake_llm.direct_frame_anchored_video_storyboard = invalid_omit_director
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    engine, session_factory = await _session_factory(
-        tmp_path, "storyboard-v2-invalid-omit.db"
-    )
+    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-invalid-omit.db")
     service = ExternalAIGenerationService()
     async with session_factory() as session:
         task = GenerationTask(
@@ -2269,7 +2280,6 @@ def test_formatter_scrubs_only_safe_private_ids_and_preserves_natural_language()
     assert natural_sentence in rendered
 
 
-
 @pytest.mark.asyncio
 async def test_private_namespace_normalization_revalidates_nested_models() -> None:
     fake_llm = FakeExternalAILLM()
@@ -2294,9 +2304,7 @@ async def test_private_namespace_normalization_revalidates_nested_models() -> No
             ]
         }
     )
-    invalid_analysis = frame_analysis.model_copy(
-        update={"director_plan": duplicate_moment_plan}
-    )
+    invalid_analysis = frame_analysis.model_copy(update={"director_plan": duplicate_moment_plan})
 
     with pytest.raises(ValidationError, match="signature moment ids must be unique"):
         _normalize_private_storyboard_namespace(invalid_analysis)
@@ -2400,8 +2408,7 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
         ]
         natural_sentence = "The camera follows the action while the subject moves."
         storyboard.scenes[1].visual = (
-            f"{' '.join(private_ids.values())} primary-claim __sbv2_claim_001__; "
-            f"{natural_sentence}"
+            f"{' '.join(private_ids.values())} primary-claim __sbv2_claim_001__; {natural_sentence}"
         )
         storyboard.scenes[1].motion = natural_sentence
         return storyboard
@@ -2458,22 +2465,17 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
             "__sbv2_beat_002__",
             "__sbv2_beat_001__",
         ]
-        assert director_plan["signature_moment_plan"][0][
-            "source_behavior_beat_ids"
-        ] == ["__sbv2_behavior_001__"]
-        assert director_plan["action_arc_windows"][0]["window_id"] == (
-            "__sbv2_window_001__"
-        )
-        assert director_plan["signature_moment_plan"][0]["moment_id"] == (
-            "__sbv2_moment_001__"
-        )
+        assert director_plan["signature_moment_plan"][0]["source_behavior_beat_ids"] == [
+            "__sbv2_behavior_001__"
+        ]
+        assert director_plan["action_arc_windows"][0]["window_id"] == ("__sbv2_window_001__")
+        assert director_plan["signature_moment_plan"][0]["moment_id"] == ("__sbv2_moment_001__")
         assert director_plan["signature_moment_plan"][0]["assigned_beat_id"] == (
             "__sbv2_beat_002__"
         )
         candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
         assert [
-            evidence["claim_id"]
-            for evidence in candidate["scenes"][1]["execution_evidence"]
+            evidence["claim_id"] for evidence in candidate["scenes"][1]["execution_evidence"]
         ] == ["__sbv2_claim_002__", "__sbv2_claim_001__"]
 
     await engine.dispose()
@@ -2491,8 +2493,7 @@ def test_claim_alias_replacement_is_longest_single_pass_and_unicode_safe() -> No
         {
             "claim_id": "primary-claim-extra",
             "visual": (
-                "执行primary-claim动作；動作primary-claim-extra完了；"
-                "primary-claimant 保持原样。"
+                "执行primary-claim动作；動作primary-claim-extra完了；primary-claimant 保持原样。"
             ),
             "motion": "first-id",
         },
@@ -2501,8 +2502,7 @@ def test_claim_alias_replacement_is_longest_single_pass_and_unicode_safe() -> No
 
     assert normalized["claim_id"] == "__sbv2_claim_002__"
     assert normalized["visual"] == (
-        "执行__sbv2_claim_001__动作；動作__sbv2_claim_002__完了；"
-        "primary-claimant 保持原样。"
+        "执行__sbv2_claim_001__动作；動作__sbv2_claim_002__完了；primary-claimant 保持原样。"
     )
     assert normalized["motion"] == "second-id"
 
@@ -2583,12 +2583,8 @@ async def test_storyboard_v2_prefix_overlapping_claim_aliases_are_order_independ
             evidence.model_copy(
                 update={
                     "claim_id": claim_id,
-                    "executor_kind": (
-                        "target_subject" if index == 0 else "target_object"
-                    ),
-                    "action_or_state_change": (
-                        f"target action {index + 1} completes visibly"
-                    ),
+                    "executor_kind": ("target_subject" if index == 0 else "target_object"),
+                    "action_or_state_change": (f"target action {index + 1} completes visibly"),
                 }
             )
             for index, claim_id in enumerate(ordered_claim_ids)
@@ -2604,9 +2600,7 @@ async def test_storyboard_v2_prefix_overlapping_claim_aliases_are_order_independ
         )
         scene.effect_timing = f"{scene.effect_timing or ''} 丙{short_claim}丁"
         final_scene = storyboard.scenes[-1]
-        final_scene.notes = (
-            f"{final_scene.notes or ''} 收__sbv2_claim_001__束"
-        )
+        final_scene.notes = f"{final_scene.notes or ''} 收__sbv2_claim_001__束"
         return storyboard
 
     fake_llm.generate_frame_anchored_video_storyboard = overlapping_claim_candidate
@@ -2674,8 +2668,7 @@ async def test_storyboard_v2_prefix_overlapping_claim_aliases_are_order_independ
             candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
             normalized_storyboard = FrameAnchoredStoryboard.model_validate(candidate)
             normalized_claim_ids = [
-                evidence.claim_id
-                for evidence in normalized_storyboard.scenes[1].execution_evidence
+                evidence.claim_id for evidence in normalized_storyboard.scenes[1].execution_evidence
             ]
             assert normalized_claim_ids == [
                 "__sbv2_claim_001__",
@@ -2717,10 +2710,13 @@ def test_raw_private_id_replacement_respects_complete_safe_token_boundaries(
     source: str,
     expected: str,
 ) -> None:
-    assert _replace_private_ids_in_text(
-        source,
-        {"primary-claim": "__sbv2_claim_001__"},
-    ) == expected
+    assert (
+        _replace_private_ids_in_text(
+            source,
+            {"primary-claim": "__sbv2_claim_001__"},
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -2753,10 +2749,13 @@ def test_canonical_private_id_scrub_respects_complete_safe_token_boundaries(
     source: str,
     expected: str,
 ) -> None:
-    assert _replace_private_ids_in_text(
-        source,
-        {"__sbv2_claim_001__": "linked item"},
-    ) == expected
+    assert (
+        _replace_private_ids_in_text(
+            source,
+            {"__sbv2_claim_001__": "linked item"},
+        )
+        == expected
+    )
 
 
 @pytest.mark.asyncio
@@ -2860,9 +2859,7 @@ async def test_storyboard_v2_polling_preserves_unregistered_longer_private_id_to
             candidate = FrameAnchoredStoryboard.model_validate(
                 task.metadata_json["frame_anchored_storyboard_candidate"]
             )
-            assert candidate.scenes[1].execution_evidence[0].claim_id == (
-                "__sbv2_claim_001__"
-            )
+            assert candidate.scenes[1].execution_evidence[0].claim_id == ("__sbv2_claim_001__")
     finally:
         app.dependency_overrides.clear()
         client.close()

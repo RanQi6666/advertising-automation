@@ -12,20 +12,6 @@ from backend.app.schemas.ai import (
 )
 
 _TIMELINE_TOLERANCE_SECONDS = 1e-6
-_PREPARATION_TERMS = (
-    "prepare",
-    "preparation",
-    "setup",
-    "ready",
-    "initiate",
-    "begin",
-    "depart",
-    "anticipat",
-    "wind up",
-    "gather",
-    "trigger",
-)
-_FINAL_HOLD_TERMS = ("hold", "lock", "stable", "stabilize", "settle", "freeze")
 _DIVERGENCE_TERMS = (
     "diverge",
     "divergence",
@@ -34,7 +20,6 @@ _DIVERGENCE_TERMS = (
     "leave the opening",
     "away from",
 )
-
 
 
 def _required_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[ReferenceBehaviorBeat]:
@@ -123,9 +108,7 @@ def _valid_omission_fact(fact: object, *, literal: bool) -> bool:
     scope = _structured_value(fact, "scope")
     detail = str(_structured_value(fact, "detail", "") or "").strip()
     allowed_categories = (
-        _LITERAL_OMISSION_CATEGORIES
-        if literal
-        else {"causal_equivalent_unavailable"}
+        _LITERAL_OMISSION_CATEGORIES if literal else {"causal_equivalent_unavailable"}
     )
     return bool(
         category in allowed_categories
@@ -407,16 +390,70 @@ def _scene_text(scene: FrameAnchoredStoryboardScene) -> str:
     ).casefold()
 
 
-def _scene_has_preparation(scene: FrameAnchoredStoryboardScene) -> bool:
-    text = _scene_text(scene)
-    return any(term in text for term in _PREPARATION_TERMS)
-
-
-def _scene_has_final_hold(scene: FrameAnchoredStoryboardScene) -> bool:
-    if scene.frame_anchor != "last_frame":
+def _scene_has_structured_phase(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    phase: str,
+    moment_id: str | None = None,
+    source_ids: set[str] | None = None,
+) -> bool:
+    scene_moment_ids = {
+        str(value).strip() for value in scene.signature_moment_ids if str(value).strip()
+    }
+    scene_source_ids = {
+        str(value).strip() for value in scene.source_behavior_beat_ids if str(value).strip()
+    }
+    if moment_id is not None and moment_id not in scene_moment_ids:
         return False
-    text = _scene_text(scene)
-    return any(term in text for term in _FINAL_HOLD_TERMS)
+    if source_ids and not source_ids.issubset(scene_source_ids):
+        return False
+    for evidence in scene.phase_evidence:
+        if _structured_value(evidence, "phase") != phase:
+            continue
+        evidence_moment_ids = {
+            str(value).strip()
+            for value in (_structured_value(evidence, "signature_moment_ids", []) or [])
+            if str(value).strip()
+        }
+        evidence_source_ids = {
+            str(value).strip()
+            for value in (_structured_value(evidence, "source_behavior_beat_ids", []) or [])
+            if str(value).strip()
+        }
+        if moment_id is not None and evidence_moment_ids != {moment_id}:
+            continue
+        if source_ids and evidence_source_ids != source_ids:
+            continue
+        return True
+    return False
+
+
+def _scene_has_preparation(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    moment_id: str | None = None,
+    source_ids: set[str] | None = None,
+) -> bool:
+    return _scene_has_structured_phase(
+        scene,
+        phase="preparation",
+        moment_id=moment_id,
+        source_ids=source_ids,
+    )
+
+
+def _scene_has_final_hold(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    moment_id: str | None = None,
+    source_ids: set[str] | None = None,
+) -> bool:
+    return scene.frame_anchor == "last_frame" and _scene_has_structured_phase(
+        scene,
+        phase="final_hold",
+        moment_id=moment_id,
+        source_ids=source_ids,
+    )
 
 
 def _scene_has_temporary_divergence(scene: FrameAnchoredStoryboardScene) -> bool:
@@ -432,18 +469,14 @@ def _scene_links_moment(
     source_ids: set[str],
 ) -> bool:
     scene_source_ids = {
-        str(value).strip()
-        for value in scene.source_behavior_beat_ids
-        if str(value).strip()
+        str(value).strip() for value in scene.source_behavior_beat_ids if str(value).strip()
     }
     return moment_id in scene.signature_moment_ids and (
         not source_ids or source_ids.issubset(scene_source_ids)
     )
 
 
-def _scene_carries_director_beat(
-    scene: FrameAnchoredStoryboardScene, beat_id: str
-) -> bool:
+def _scene_carries_director_beat(scene: FrameAnchoredStoryboardScene, beat_id: str) -> bool:
     return beat_id in {
         *(value.strip() for value in scene.cinematic_beats if value.strip()),
         (scene.cinematic_beat or "").strip(),
@@ -488,32 +521,26 @@ def _phase_window_seconds(
     return covered_ratio * duration_seconds
 
 
-def _phase_compression_required_for_duration(
+def _phase_readability_requirements(
     duration_seconds: float,
     source_ids: set[str],
     frame_analysis: FrameAnalysis,
     plan: FrameAnchoredDirectorPlan,
-) -> bool:
-    beats_by_id = {
-        beat.beat_id: beat for beat in _required_core_behavior_beats(frame_analysis)
-    }
+) -> dict[str, float]:
+    beats_by_id = {beat.beat_id: beat for beat in _required_core_behavior_beats(frame_analysis)}
     beats = [beats_by_id[beat_id] for beat_id in source_ids if beat_id in beats_by_id]
     if not beats:
-        return False
+        return {}
 
-    duration = float(duration_seconds)
     beat_count = len(beats)
-    base_readability = (
-        sum(beat.minimum_readable_duration_seconds for beat in beats) / beat_count
-    )
+    base_readability = sum(beat.minimum_readable_duration_seconds for beat in beats) / beat_count
     action_readability = sum(beat.minimum_readable_duration_seconds for beat in beats)
     preparation_units = sum(len(beat.depends_on) for beat in beats) + sum(
         beat.behavior_type == "state" for beat in beats
     )
     payoff_readability = (
         sum(
-            beat.minimum_readable_duration_seconds
-            * max(len(beat.visible_evidence), 1)
+            beat.minimum_readable_duration_seconds * max(len(beat.visible_evidence), 1)
             for beat in beats
         )
         / beat_count
@@ -544,18 +571,16 @@ def _phase_compression_required_for_duration(
             ),
             (
                 tuple(
-                    item.strip().casefold()
-                    for item in frame_analysis.first_frame.visible_subjects
+                    item.strip().casefold() for item in frame_analysis.first_frame.visible_subjects
                 ),
                 tuple(
-                    item.strip().casefold()
-                    for item in frame_analysis.last_frame.visible_subjects
+                    item.strip().casefold() for item in frame_analysis.last_frame.visible_subjects
                 ),
             ),
         )
     )
     continuity_units = len(frame_analysis.transition_brief.continuity_requirements)
-    required_seconds = {
+    return {
         "preparation": base_readability * preparation_units / beat_count,
         "action": action_readability
         + base_readability * max(camera_units - beat_count, 0) / beat_count,
@@ -566,10 +591,21 @@ def _phase_compression_required_for_duration(
         "return": base_readability * endpoint_units / beat_count,
         "final_lock": base_readability * continuity_units / beat_count,
     }
+
+
+def _phase_compression_required_for_duration(
+    duration_seconds: float,
+    source_ids: set[str],
+    frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
+) -> bool:
+    requirements = _phase_readability_requirements(
+        duration_seconds, source_ids, frame_analysis, plan
+    )
     return any(
-        required > _phase_window_seconds(plan, phase, duration)
-        + _TIMELINE_TOLERANCE_SECONDS
-        for phase, required in required_seconds.items()
+        required
+        > _phase_window_seconds(plan, phase, float(duration_seconds)) + _TIMELINE_TOLERANCE_SECONDS
+        for phase, required in requirements.items()
     )
 
 
@@ -581,6 +617,29 @@ def _phase_compression_required(
 ) -> bool:
     return _phase_compression_required_for_duration(
         float(storyboard.duration_seconds), source_ids, frame_analysis, plan
+    )
+
+
+def _phase_pair_compression_required(
+    storyboard: FrameAnchoredStoryboard,
+    source_ids: set[str],
+    frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
+    left_phase: str,
+    right_phase: str,
+) -> bool:
+    requirements = _phase_readability_requirements(
+        float(storyboard.duration_seconds), source_ids, frame_analysis, plan
+    )
+    phase_names = {
+        left_phase,
+        "final_lock" if right_phase == "final_hold" else right_phase,
+    }
+    return any(
+        requirements.get(phase, 0.0)
+        > _phase_window_seconds(plan, phase, float(storyboard.duration_seconds))
+        + _TIMELINE_TOLERANCE_SECONDS
+        for phase in phase_names
     )
 
 
@@ -604,67 +663,101 @@ def _validate_moment_phase_order(
     source_ids: set[str],
     linked_scene_indexes: list[int],
     execution_scene_indexes: list[int],
-    final_hold_index: int,
 ) -> None:
     preparation_indexes = [
         index
         for index, scene in enumerate(storyboard.scenes)
-        if _scene_has_preparation(scene)
-        and _scene_links_moment(scene, moment_id, source_ids)
+        if _scene_has_preparation(scene, moment_id=moment_id, source_ids=source_ids)
+    ]
+    action_indexes = [
+        index
+        for index in execution_scene_indexes
+        if _scene_has_structured_phase(
+            storyboard.scenes[index],
+            phase="action",
+            moment_id=moment_id,
+            source_ids=source_ids,
+        )
     ]
     payoff_indexes = [
         index
         for index in linked_scene_indexes
-        if (storyboard.scenes[index].action_result_requirement or "").strip()
+        if _scene_has_structured_phase(
+            storyboard.scenes[index],
+            phase="payoff",
+            moment_id=moment_id,
+            source_ids=source_ids,
+        )
+        and (storyboard.scenes[index].action_result_requirement or "").strip()
     ]
     return_indexes = [
         index
         for index in linked_scene_indexes
-        if (storyboard.scenes[index].anchor_return_instruction or "").strip()
+        if _scene_has_structured_phase(
+            storyboard.scenes[index],
+            phase="return",
+            moment_id=moment_id,
+            source_ids=source_ids,
+        )
+        and (storyboard.scenes[index].anchor_return_instruction or "").strip()
+    ]
+    final_hold_indexes = [
+        index
+        for index, scene in enumerate(storyboard.scenes)
+        if _scene_has_final_hold(scene, moment_id=moment_id, source_ids=source_ids)
     ]
     if not preparation_indexes:
         raise ValueError(
-            f"storyboard is missing preparation evidence for signature moment {moment_id}"
+            "storyboard is missing structured preparation evidence for signature "
+            f"moment {moment_id}"
         )
+    if not action_indexes:
+        raise ValueError(f"signature moment {moment_id} lacks structured action evidence")
     if not payoff_indexes:
         raise ValueError(f"signature moment {moment_id} lacks visible payoff")
     if not return_indexes:
         raise ValueError(f"signature moment {moment_id} lacks linked anchor return")
+    if not final_hold_indexes:
+        raise ValueError(
+            f"signature moment {moment_id} lacks structured final hold at the last-frame endpoint"
+        )
 
     phase_indexes = (
         min(preparation_indexes),
-        min(execution_scene_indexes),
+        min(action_indexes),
         min(payoff_indexes),
         min(return_indexes),
+        min(final_hold_indexes),
     )
-    if not (
-        phase_indexes[0] <= phase_indexes[1] <= phase_indexes[2] <= phase_indexes[3]
-    ):
+    if phase_indexes != tuple(sorted(phase_indexes)):
         raise ValueError(f"signature moment {moment_id} has invalid phase order")
 
-    compression_required = _phase_compression_required(
-        storyboard, source_ids, frame_analysis, plan
-    )
-    phase_names = ("preparation", "action", "payoff", "return")
-    for index, (left_index, right_index) in enumerate(
-        zip(phase_indexes, phase_indexes[1:], strict=False)
+    phase_names = ("preparation", "action", "payoff", "return", "final_hold")
+    for left_name, right_name, left_index, right_index in zip(
+        phase_names,
+        phase_names[1:],
+        phase_indexes,
+        phase_indexes[1:],
+        strict=False,
     ):
         if left_index != right_index:
             continue
-        if compression_required or _director_phases_overlap(
-            plan, phase_names[index], phase_names[index + 1]
+        if _phase_pair_compression_required(
+            storyboard,
+            source_ids,
+            frame_analysis,
+            plan,
+            left_name,
+            right_name,
+        ) or _director_phases_overlap(
+            plan,
+            "final_lock" if left_name == "final_hold" else left_name,
+            "final_lock" if right_name == "final_hold" else right_name,
         ):
             continue
         raise ValueError(
-            f"signature moment {moment_id} uses unsupported same-scene phase sharing"
+            f"signature moment {moment_id} uses unsupported {left_name}/{right_name} phase sharing"
         )
-    return_and_hold_may_share = compression_required or _director_phases_overlap(
-        plan, "return", "final_lock"
-    )
-    if phase_indexes[3] > final_hold_index or (
-        phase_indexes[3] == final_hold_index and not return_and_hold_may_share
-    ):
-        raise ValueError(f"signature moment {moment_id} return must precede final hold")
 
 
 def _validate_timeline(storyboard: FrameAnchoredStoryboard) -> None:
@@ -714,9 +807,7 @@ def validate_final_storyboard_action_coverage(
     graph = reference.behavior_graph if reference is not None else None
     moment_source_ids_by_id = {
         moment.moment_id: {
-            str(value).strip()
-            for value in moment.source_behavior_beat_ids
-            if str(value).strip()
+            str(value).strip() for value in moment.source_behavior_beat_ids if str(value).strip()
         }
         for moment in plan.signature_moment_plan
         if moment.strategy != "omit"
@@ -751,7 +842,6 @@ def validate_final_storyboard_action_coverage(
 
     executed_source_ids: set[str] = set()
     execution_scene_indexes: list[int] = []
-    final_hold_index = len(storyboard.scenes) - 1
     for moment in plan.signature_moment_plan:
         if moment.strategy == "omit":
             continue
@@ -790,11 +880,7 @@ def validate_final_storyboard_action_coverage(
                 duration_seconds=float(storyboard.duration_seconds),
             )
         ]
-        execution_matches = [
-            (scene, evidence)
-            for scene, evidence in execution_matches
-            if evidence
-        ]
+        execution_matches = [(scene, evidence) for scene, evidence in execution_matches if evidence]
         requires_execution = bool(moment_source_ids) or moment.transfer_role in {
             "primary_action",
             "interaction",
@@ -812,9 +898,7 @@ def validate_final_storyboard_action_coverage(
             for evidence in matching_evidence:
                 evidence_source_ids = {
                     str(value).strip()
-                    for value in (
-                        _structured_value(evidence, "source_behavior_beat_ids", []) or []
-                    )
+                    for value in (_structured_value(evidence, "source_behavior_beat_ids", []) or [])
                     if str(value).strip()
                 }
                 executed_source_ids.update(
@@ -843,7 +927,6 @@ def validate_final_storyboard_action_coverage(
                 source_ids=moment_source_ids,
                 linked_scene_indexes=linked_scene_indexes,
                 execution_scene_indexes=moment_execution_indexes,
-                final_hold_index=final_hold_index,
             )
 
     missing_source_ids = executable_required_ids - executed_source_ids
@@ -852,15 +935,3 @@ def validate_final_storyboard_action_coverage(
             "storyboard is missing executed source behavior beats: "
             + ", ".join(sorted(missing_source_ids))
         )
-
-    if executable_required_ids:
-        latest_execution_index = max(execution_scene_indexes, default=0)
-        if not any(
-            _scene_has_preparation(scene)
-            for scene in storyboard.scenes[: latest_execution_index + 1]
-        ):
-            raise ValueError("storyboard is missing preparation evidence")
-        if not any((scene.anchor_return_instruction or "").strip() for scene in storyboard.scenes):
-            raise ValueError("storyboard is missing anchor return instruction")
-        if not _scene_has_final_hold(storyboard.scenes[-1]):
-            raise ValueError("storyboard is missing final hold evidence")

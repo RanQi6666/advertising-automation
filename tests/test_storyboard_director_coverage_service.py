@@ -16,6 +16,16 @@ from backend.app.services.storyboard_director_coverage_service import (
 )
 
 
+def _phase(
+    phase: str, *, moment_id: str = "signature_action", source_ids: list[str] | None = None
+) -> dict[str, object]:
+    return {
+        "phase": phase,
+        "signature_moment_ids": [moment_id],
+        "source_behavior_beat_ids": source_ids or ["core_behavior"],
+    }
+
+
 def _analysis(
     *,
     include_reference: bool = True,
@@ -280,6 +290,13 @@ def _valid_final_inputs() -> tuple[
                     "transition_goal": "Prepare and depart from the opening anchor in-shot.",
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [
+                        {
+                            "phase": "preparation",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": ["core_behavior"],
+                        }
+                    ],
                 },
                 {
                     "scene_index": 2,
@@ -294,6 +311,18 @@ def _valid_final_inputs() -> tuple[
                     "effect_timing": "Peak only after the causal motion reads.",
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [
+                        {
+                            "phase": "action",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": ["core_behavior"],
+                        },
+                        {
+                            "phase": "payoff",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": ["core_behavior"],
+                        },
+                    ],
                     "execution_evidence": [
                         {
                             "claim_id": "execution_claim",
@@ -320,6 +349,13 @@ def _valid_final_inputs() -> tuple[
                     ),
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [
+                        {
+                            "phase": "return",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": ["core_behavior"],
+                        }
+                    ],
                 },
                 {
                     "scene_index": 4,
@@ -327,6 +363,15 @@ def _valid_final_inputs() -> tuple[
                     "end_second": 10,
                     "frame_anchor": "last_frame",
                     "visual": "Lock the exact supplied last frame.",
+                    "signature_moment_ids": ["signature_action"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [
+                        {
+                            "phase": "final_hold",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": ["core_behavior"],
+                        }
+                    ],
                 },
             ],
         }
@@ -350,6 +395,7 @@ def _valid_short_final_inputs() -> tuple[
                         "start_second": 0.5,
                         "end_second": 3.25,
                         "anchor_return_instruction": "Return continuously after the payoff.",
+                        "phase_evidence": [_phase("action"), _phase("payoff"), _phase("return")],
                     }
                 ),
                 storyboard.scenes[-1].model_copy(
@@ -621,8 +667,9 @@ def test_final_validation_rejects_missing_preparation() -> None:
     storyboard.scenes[0].motion = None
     storyboard.scenes[0].transition_goal = None
     storyboard.scenes[0].visual = "Hold the exact supplied opening anchor."
+    storyboard.scenes[0].phase_evidence = []
 
-    with pytest.raises(ValueError, match="missing preparation evidence"):
+    with pytest.raises(ValueError, match="structured preparation evidence"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 
@@ -634,6 +681,7 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
     )
     shared.transition_goal = "Preparation, execution, payoff, and return remain readable in-shot."
     shared.anchor_return_instruction = "Return continuously after payoff."
+    shared.phase_evidence = [_phase("action"), _phase("payoff"), _phase("return")]
     storyboard.scenes[-1].visual = "Hold and lock the exact supplied last frame."
 
     validate_final_storyboard_action_coverage(storyboard, analysis, review)
@@ -654,14 +702,15 @@ def test_final_validation_rejects_execution_before_linked_preparation() -> None:
         }
     )
     analysis = analysis.model_copy(update={"director_plan": plan})
-    storyboard.scenes[0].visual = (
-        "Temporarily diverge and execute the linked causal action immediately."
-    )
+    storyboard.scenes[
+        0
+    ].visual = "Temporarily diverge and execute the linked causal action immediately."
     storyboard.scenes[0].motion = "The subject changes state immediately."
     storyboard.scenes[0].transition_goal = None
     storyboard.scenes[0].signature_moment_ids = ["signature_action"]
     storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
     storyboard.scenes[0].cinematic_beats = ["core_peak"]
+    storyboard.scenes[0].phase_evidence = [_phase("action")]
     storyboard.scenes[0].execution_evidence = [
         StoryboardExecutionEvidence(
             claim_id="execution_claim",
@@ -676,6 +725,7 @@ def test_final_validation_rejects_execution_before_linked_preparation() -> None:
     storyboard.scenes[1].cinematic_beats = []
     storyboard.scenes[1].visual = "Prepare after the action has already started."
     storyboard.scenes[1].motion = "Prepare the subject after execution begins."
+    storyboard.scenes[1].phase_evidence = [_phase("preparation"), _phase("payoff")]
 
     with pytest.raises(ValueError, match="phase order"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
@@ -688,6 +738,8 @@ def test_final_validation_rejects_payoff_before_execution() -> None:
     storyboard.scenes[0].action_result_requirement = "Show the payoff before execution."
     storyboard.scenes[0].signature_moment_ids = ["signature_action"]
     storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+    storyboard.scenes[0].phase_evidence = [_phase("preparation"), _phase("payoff")]
+    storyboard.scenes[1].phase_evidence = [_phase("action")]
 
     with pytest.raises(ValueError, match="phase order"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
@@ -698,7 +750,9 @@ def test_final_validation_rejects_return_before_execution() -> None:
     storyboard.scenes[0].signature_moment_ids = ["signature_action"]
     storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
     storyboard.scenes[0].anchor_return_instruction = "Return before execution begins."
+    storyboard.scenes[0].phase_evidence = [_phase("preparation"), _phase("return")]
     storyboard.scenes[2].anchor_return_instruction = None
+    storyboard.scenes[2].phase_evidence = []
 
     with pytest.raises(ValueError, match="phase order"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
@@ -817,6 +871,7 @@ def test_long_storyboard_rejects_all_action_phases_in_one_scene() -> None:
                 "visual": "Hold the exact supplied opening anchor.",
                 "motion": None,
                 "transition_goal": None,
+                "phase_evidence": [],
             }
         ),
         storyboard.scenes[1].model_copy(
@@ -829,6 +884,12 @@ def test_long_storyboard_rejects_all_action_phases_in_one_scene() -> None:
                     "Preparation, execution, payoff, and return all share this scene."
                 ),
                 "anchor_return_instruction": "Return continuously after the payoff.",
+                "phase_evidence": [
+                    _phase("preparation"),
+                    _phase("action"),
+                    _phase("payoff"),
+                    _phase("return"),
+                ],
             }
         ),
         storyboard.scenes[-1].model_copy(
@@ -838,6 +899,7 @@ def test_long_storyboard_rejects_all_action_phases_in_one_scene() -> None:
 
     with pytest.raises(ValueError, match="phase sharing"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
 
 def test_long_storyboard_allows_return_and_final_hold_scene_when_director_windows_overlap() -> None:
     storyboard, analysis, review = _valid_final_inputs()
@@ -857,9 +919,13 @@ def test_long_storyboard_allows_return_and_final_hold_scene_when_director_window
     storyboard.scenes[2].anchor_return_instruction = None
     storyboard.scenes[-1].signature_moment_ids = ["signature_action"]
     storyboard.scenes[-1].source_behavior_beat_ids = ["core_behavior"]
-    storyboard.scenes[-1].anchor_return_instruction = (
+    storyboard.scenes[
+        -1
+    ].anchor_return_instruction = (
         "Return continuously, then hold and lock the exact supplied final frame."
     )
+    storyboard.scenes[2].phase_evidence = []
+    storyboard.scenes[-1].phase_evidence = [_phase("return"), _phase("final_hold")]
 
     validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
@@ -882,9 +948,7 @@ def test_director_phase_overlap_uses_strict_interval_intersection(
     windows = [
         window.model_copy(update={"start_ratio": left_range[0], "end_ratio": left_range[1]})
         if window.phase == "action"
-        else window.model_copy(
-            update={"start_ratio": right_range[0], "end_ratio": right_range[1]}
-        )
+        else window.model_copy(update={"start_ratio": right_range[0], "end_ratio": right_range[1]})
         if window.phase == "payoff"
         else window
         for window in plan.action_arc_windows
@@ -951,7 +1015,7 @@ def test_phase_compression_changes_with_evidence_complexity_at_same_duration() -
                 "The layered visible consequence remains readable after execution.",
                 "The resulting state persists clearly before return.",
                 "A second payoff layer reveals a causal result.",
-            ]
+            ],
         }
     )
     high_segments = [
@@ -986,12 +1050,8 @@ def test_phase_compression_changes_with_evidence_complexity_at_same_duration() -
         }
     )
 
-    assert not _phase_compression_required(
-        storyboard, {"core_behavior"}, low_analysis, low_plan
-    )
-    assert _phase_compression_required(
-        storyboard, {"core_behavior"}, high_analysis, low_plan
-    )
+    assert not _phase_compression_required(storyboard, {"core_behavior"}, low_analysis, low_plan)
+    assert _phase_compression_required(storyboard, {"core_behavior"}, high_analysis, low_plan)
 
 
 def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_moment() -> None:
@@ -1035,6 +1095,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "motion": "Prepare the subject for the first action.",
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [_phase("preparation")],
                 },
                 {
                     "scene_index": 2,
@@ -1046,6 +1107,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
                     "cinematic_beats": ["core_peak"],
+                    "phase_evidence": [_phase("action")],
                     "execution_evidence": [
                         {
                             "claim_id": "first_signature_claim",
@@ -1068,6 +1130,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "motion": "Prepare the subject for the second action.",
                     "signature_moment_ids": ["signature_state"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [_phase("preparation", moment_id="signature_state")],
                 },
                 {
                     "scene_index": 4,
@@ -1080,6 +1143,10 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "signature_moment_ids": ["signature_state"],
                     "source_behavior_beat_ids": ["core_behavior"],
                     "cinematic_beats": ["core_peak"],
+                    "phase_evidence": [
+                        _phase("action", moment_id="signature_state"),
+                        _phase("payoff", moment_id="signature_state"),
+                    ],
                     "execution_evidence": [
                         {
                             "claim_id": "second_signature_claim",
@@ -1104,6 +1171,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "anchor_return_instruction": "Return the second moment continuously.",
                     "signature_moment_ids": ["signature_state"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [_phase("return", moment_id="signature_state")],
                 },
                 {
                     "scene_index": 6,
@@ -1111,6 +1179,12 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "end_second": 10,
                     "frame_anchor": "last_frame",
                     "visual": "Hold and lock the exact supplied last frame.",
+                    "signature_moment_ids": ["signature_action", "signature_state"],
+                    "source_behavior_beat_ids": ["core_behavior"],
+                    "phase_evidence": [
+                        _phase("final_hold"),
+                        _phase("final_hold", moment_id="signature_state"),
+                    ],
                 },
             ],
         }
@@ -1246,9 +1320,7 @@ def _structured_omit_update(
 def test_structured_omission_facts_ignore_misleading_prose() -> None:
     analysis = _analysis()
     base_plan = _plan(source_ids=["core_behavior"])
-    omitted = base_plan.signature_moment_plan[0].model_copy(
-        update=_structured_omit_update()
-    )
+    omitted = base_plan.signature_moment_plan[0].model_copy(update=_structured_omit_update())
     plan = base_plan.model_copy(update={"signature_moment_plan": [omitted]})
 
     review = review_director_action_coverage(analysis, plan)
@@ -1285,7 +1357,6 @@ def test_structured_omission_rejects_endpoint_or_negated_fact_despite_positive_p
 
     assert review.status == "unrecoverable"
     assert review.invalid_omission_moment_ids == ["signature_action"]
-
 
 
 def _two_moment_exact_binding_inputs() -> tuple[
@@ -1338,6 +1409,18 @@ def _two_moment_exact_binding_inputs() -> tuple[
                     "motion": "Prepare the subject for both continuous causal actions.",
                     "signature_moment_ids": shared_moment_ids,
                     "source_behavior_beat_ids": source_ids,
+                    "phase_evidence": [
+                        {
+                            "phase": "preparation",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": source_ids,
+                        },
+                        {
+                            "phase": "preparation",
+                            "signature_moment_ids": ["signature_state"],
+                            "source_behavior_beat_ids": ["core_behavior_2"],
+                        },
+                    ],
                 },
                 {
                     "scene_index": 2,
@@ -1351,6 +1434,18 @@ def _two_moment_exact_binding_inputs() -> tuple[
                     "effect_timing": "Support both consequences after their actions read.",
                     "signature_moment_ids": shared_moment_ids,
                     "source_behavior_beat_ids": source_ids,
+                    "phase_evidence": [
+                        {
+                            "phase": "action",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": source_ids,
+                        },
+                        {
+                            "phase": "action",
+                            "signature_moment_ids": ["signature_state"],
+                            "source_behavior_beat_ids": ["core_behavior_2"],
+                        },
+                    ],
                     "execution_evidence": [
                         {
                             "claim_id": "joint_execution_claim",
@@ -1373,6 +1468,18 @@ def _two_moment_exact_binding_inputs() -> tuple[
                     "action_result_requirement": "Show both resulting target-state changes.",
                     "signature_moment_ids": shared_moment_ids,
                     "source_behavior_beat_ids": source_ids,
+                    "phase_evidence": [
+                        {
+                            "phase": "payoff",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": source_ids,
+                        },
+                        {
+                            "phase": "payoff",
+                            "signature_moment_ids": ["signature_state"],
+                            "source_behavior_beat_ids": ["core_behavior_2"],
+                        },
+                    ],
                 },
                 {
                     "scene_index": 4,
@@ -1385,6 +1492,18 @@ def _two_moment_exact_binding_inputs() -> tuple[
                     ),
                     "signature_moment_ids": shared_moment_ids,
                     "source_behavior_beat_ids": source_ids,
+                    "phase_evidence": [
+                        {
+                            "phase": "return",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": source_ids,
+                        },
+                        {
+                            "phase": "return",
+                            "signature_moment_ids": ["signature_state"],
+                            "source_behavior_beat_ids": ["core_behavior_2"],
+                        },
+                    ],
                 },
                 {
                     "scene_index": 5,
@@ -1392,6 +1511,20 @@ def _two_moment_exact_binding_inputs() -> tuple[
                     "end_second": 10,
                     "frame_anchor": "last_frame",
                     "visual": "Hold and lock the exact supplied last frame.",
+                    "signature_moment_ids": shared_moment_ids,
+                    "source_behavior_beat_ids": source_ids,
+                    "phase_evidence": [
+                        {
+                            "phase": "final_hold",
+                            "signature_moment_ids": ["signature_action"],
+                            "source_behavior_beat_ids": source_ids,
+                        },
+                        {
+                            "phase": "final_hold",
+                            "signature_moment_ids": ["signature_state"],
+                            "source_behavior_beat_ids": ["core_behavior_2"],
+                        },
+                    ],
                 },
             ],
         }
@@ -1434,9 +1567,7 @@ def _mixed_importance_final_inputs(
         update={
             "reference_video_analysis": reference.model_copy(
                 update={
-                    "behavior_graph": graph.model_copy(
-                        update={"beats": [*graph.beats, mixed_beat]}
-                    )
+                    "behavior_graph": graph.model_copy(update={"beats": [*graph.beats, mixed_beat]})
                 }
             ),
             "director_plan": plan,
@@ -1452,8 +1583,14 @@ def _bind_all_mixed_sources(
     mixed_source_id: str,
 ) -> None:
     complete_source_ids = ["core_behavior", mixed_source_id]
-    for scene_index in (0, 1, 2):
-        storyboard.scenes[scene_index].source_behavior_beat_ids = complete_source_ids
+    for scene_index in range(len(storyboard.scenes)):
+        scene = storyboard.scenes[scene_index]
+        if scene.signature_moment_ids == ["signature_action"]:
+            scene.source_behavior_beat_ids = complete_source_ids
+            scene.phase_evidence = [
+                evidence.model_copy(update={"source_behavior_beat_ids": complete_source_ids})
+                for evidence in scene.phase_evidence
+            ]
     storyboard.scenes[1].execution_evidence = [
         StoryboardExecutionEvidence(
             claim_id="mixed_execution_claim",
@@ -1467,9 +1604,7 @@ def _bind_all_mixed_sources(
 
 
 def test_final_validation_rejects_missing_supporting_source_from_mixed_execution() -> None:
-    storyboard, analysis, review, _ = _mixed_importance_final_inputs(
-        importance="supporting"
-    )
+    storyboard, analysis, review, _ = _mixed_importance_final_inputs(importance="supporting")
 
     with pytest.raises(ValueError, match="signature_action lacks subject/state execution"):
         validate_final_storyboard_action_coverage(storyboard, analysis, review)

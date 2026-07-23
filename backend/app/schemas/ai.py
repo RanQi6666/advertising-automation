@@ -453,10 +453,7 @@ class DirectorSignatureMoment(BaseModel):
                 raise ValueError(
                     "literal infeasibility fact must describe a literal target limitation"
                 )
-            if (
-                self.equivalent_infeasibility_fact.category
-                != "causal_equivalent_unavailable"
-            ):
+            if self.equivalent_infeasibility_fact.category != "causal_equivalent_unavailable":
                 raise ValueError(
                     "equivalent infeasibility fact must describe causal equivalent unavailability"
                 )
@@ -528,13 +525,9 @@ class FrameAnchoredDirectorPlan(BaseModel):
                 continue
             assigned_beat = beats_by_id.get(moment.assigned_beat_id or "")
             if assigned_beat is None:
-                raise ValueError(
-                    "signature moment must reference an existing director beat"
-                )
+                raise ValueError("signature moment must reference an existing director beat")
             if assigned_beat.importance != "core":
-                raise ValueError(
-                    "signature moment must be assigned to a core director beat"
-                )
+                raise ValueError("signature moment must be assigned to a core director beat")
         if any(not constraint.strip() for constraint in self.anti_flattening_constraints):
             raise ValueError("director anti-flattening constraints must not be blank")
         return self
@@ -567,6 +560,23 @@ StoryboardExecutionAssertion = Literal["affirmed", "negated", "static"]
 _STORYBOARD_EXECUTION_CLAIM_ID_PATTERN = (
     r"^(?:__sbv2_claim_\d+__|[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
 )
+
+
+StoryboardScenePhase = Literal["preparation", "action", "payoff", "return", "final_hold"]
+
+
+class StoryboardPhaseEvidence(BaseModel):
+    phase: StoryboardScenePhase
+    signature_moment_ids: list[str] = Field(min_length=1)
+    source_behavior_beat_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_phase_evidence(self) -> "StoryboardPhaseEvidence":
+        if any(not value.strip() for value in self.signature_moment_ids):
+            raise ValueError("phase evidence signature moment ids must not be blank")
+        if any(not value.strip() for value in self.source_behavior_beat_ids):
+            raise ValueError("phase evidence source behavior beat ids must not be blank")
+        return self
 
 
 class StoryboardExecutionEvidence(BaseModel):
@@ -649,6 +659,7 @@ class FrameAnchoredStoryboardScene(BaseModel):
     cinematic_beats: list[str] = Field(default_factory=list)
     signature_moment_ids: list[str] = Field(default_factory=list)
     source_behavior_beat_ids: list[str] = Field(default_factory=list)
+    phase_evidence: list[StoryboardPhaseEvidence] = Field(default_factory=list)
     execution_evidence: list[StoryboardExecutionEvidence] = Field(default_factory=list)
     camera_instruction: str | None = None
     tension_stage: DirectorTensionStage | None = None

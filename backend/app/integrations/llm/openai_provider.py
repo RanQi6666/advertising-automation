@@ -123,9 +123,7 @@ class OpenAILLMProvider:
             else _legacy_ad_performance_analysis_from_data(data)
         )
 
-    async def stream_ad_performance_analysis(
-        self, context: dict
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def stream_ad_performance_analysis(self, context: dict) -> AsyncIterator[dict[str, Any]]:
         operator_result = _uses_facebook_operator_result(context)
         stream = await self.client.chat.completions.create(
             model=self.model,
@@ -283,8 +281,7 @@ class OpenAILLMProvider:
         )
         topic_source_data = topic.source_data if isinstance(topic.source_data, dict) else {}
         creative_strategy = _compact_creative_strategy(
-            campaign_metadata.get("creative_strategy")
-            or topic_source_data.get("creative_strategy")
+            campaign_metadata.get("creative_strategy") or topic_source_data.get("creative_strategy")
         )
         data = await self._json_completion(
             system=with_meta_ad_compliance(
@@ -336,8 +333,7 @@ class OpenAILLMProvider:
                 "with body, primary_text, headline, description, and cta. Preserve the "
                 "operator's business intent while rewriting risky claims into compliant "
                 "language. All generated copy fields are user-facing and must use the "
-                "target audience language.\n\n"
-                + language_requirements_prompt()
+                "target audience language.\n\n" + language_requirements_prompt()
             ),
             user=json.dumps(
                 {
@@ -417,9 +413,7 @@ class OpenAILLMProvider:
                     "target_language": target_language,
                     "revision_feedback": feedback,
                     "source_asset": _image_source_asset_context(source_asset),
-                    "storyboard_context": _compact_image_storyboard_context(
-                        storyboard_context
-                    ),
+                    "storyboard_context": _compact_image_storyboard_context(storyboard_context),
                 }
             ),
         )
@@ -609,9 +603,7 @@ class OpenAILLMProvider:
                                 "objective": campaign.objective,
                                 "product_name": campaign.product_name,
                                 "audience_description": campaign.audience_description,
-                                "metadata": _compact_metadata_with_strategy(
-                                    campaign.metadata_json
-                                ),
+                                "metadata": _compact_metadata_with_strategy(campaign.metadata_json),
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
@@ -739,9 +731,7 @@ class OpenAILLMProvider:
                                 "objective": campaign.objective,
                                 "product_name": campaign.product_name,
                                 "audience_description": campaign.audience_description,
-                                "metadata": _compact_metadata_with_strategy(
-                                    campaign.metadata_json
-                                ),
+                                "metadata": _compact_metadata_with_strategy(campaign.metadata_json),
                             },
                             "copy_draft": _draft_context(draft),
                             "assets": [_asset_context(asset) for asset in assets],
@@ -797,9 +787,7 @@ def _ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str, Any]:
                 "需要结合规则指标确认主要问题。",
             ),
         },
-        "targeting_analysis": _operator_targeting_items(
-            data.get("targeting_analysis")
-        ),
+        "targeting_analysis": _operator_targeting_items(data.get("targeting_analysis")),
         "adjustment_plans": _operator_adjustment_plans(data.get("adjustment_plans")),
         "copywriting_analysis": {
             "summary": _short_required_text(
@@ -863,9 +851,7 @@ def _legacy_ad_performance_analysis_from_data(data: dict[str, Any]) -> dict[str,
             data.get("budget_delivery_feedback"), 5, 360
         ),
         "risk_notes": _limited_text_list(data.get("risk_notes"), 5, 360),
-        "visual_analysis": _ad_performance_visual_analysis_from_data(
-            data.get("visual_analysis")
-        ),
+        "visual_analysis": _ad_performance_visual_analysis_from_data(data.get("visual_analysis")),
         "optimization_work_order": _ad_performance_optimization_work_order_from_data(
             data.get("optimization_work_order")
         ),
@@ -889,16 +875,10 @@ def _operator_targeting_items(value: Any) -> list[dict[str, str]]:
                     "audience",
                 ),
                 "current": _required_text(raw.get("current"), "未提供", 600),
-                "decision": _enum_value(
-                    raw.get("decision"), {"adjust", "test", "monitor"}, "test"
-                ),
+                "decision": _enum_value(raw.get("decision"), {"adjust", "test", "monitor"}, "test"),
                 "problem": _required_text(raw.get("problem"), "需要进一步验证", 600),
-                "suggestion": _required_text(
-                    raw.get("suggestion"), "采用小预算对照测试", 600
-                ),
-                "reason": _required_text(
-                    raw.get("reason"), "缺少该维度的成效拆分数据", 600
-                ),
+                "suggestion": _required_text(raw.get("suggestion"), "采用小预算对照测试", 600),
+                "reason": _required_text(raw.get("reason"), "缺少该维度的成效拆分数据", 600),
             }
         )
         if len(result) >= 3:
@@ -1158,8 +1138,7 @@ def _ad_performance_user_content(
             {
                 "type": "text",
                 "text": (
-                    text
-                    + f"\n\nThe attached image{'s are' if len(local_images) > 1 else ' is'} "
+                    text + f"\n\nThe attached image{'s are' if len(local_images) > 1 else ' is'} "
                     f"the internally processed {creative_type} creative visual"
                     f"{visual_kind}. Inspect only the "
                     "attached visuals for media_analysis and do not claim details that are "
@@ -1169,10 +1148,7 @@ def _ad_performance_user_content(
                     "attached cards and do not infer the contents of missing cards."
                 ),
             },
-            *[
-                {"type": "image_url", "image_url": {"url": data_url}}
-                for data_url in local_images
-            ],
+            *[{"type": "image_url", "image_url": {"url": data_url}} for data_url in local_images],
         ]
     image_url = _ad_performance_image_url(context)
     if not image_url:
@@ -1181,8 +1157,7 @@ def _ad_performance_user_content(
         {
             "type": "text",
             "text": (
-                text
-                + "\n\nThe attached image is the actual ad creative from creative.image_url. "
+                text + "\n\nThe attached image is the actual ad creative from creative.image_url. "
                 "Inspect the image directly for media_analysis. Do not claim visual details "
                 "that are not visible in the image."
             ),
@@ -1351,8 +1326,7 @@ def _limited_text_list(value: Any, limit: int, max_chars: int) -> list[str]:
     return [
         item
         for item in (
-            _truncate(_coerce_optional_text(raw), max_chars)
-            for raw in _coerce_text_list(value)
+            _truncate(_coerce_optional_text(raw), max_chars) for raw in _coerce_text_list(value)
         )
         if item
     ][:limit]
@@ -1382,8 +1356,7 @@ def _video_storyboard_text_system_prompt(revision: bool) -> str:
         else "Write one complete editable plain-text video storyboard script for a short ad. "
     )
     return with_meta_ad_compliance(
-        task
-        + "Do not return JSON, markdown tables, code fences, or analysis. Stream only the "
+        task + "Do not return JSON, markdown tables, code fences, or analysis. Stream only the "
         "script text that an operator can edit directly in a textarea. Selected images "
         "are optional for script generation. Use concise scene blocks with time ranges, "
         "visual direction, subtitle, motion, voiceover, and an "
@@ -1498,11 +1471,11 @@ def _topic_stream_system_prompt() -> str:
         "topics as NDJSON only. Do not output markdown, code fences, arrays, or a root "
         "JSON object. Emit exactly one complete JSON object per line. Each topic line "
         "must use this shape: "
-        "{\"type\":\"topic\",\"index\":1,\"topic\":{\"title\":\"...\",\"angle\":\"...\","
-        "\"angle_type\":\"...\",\"audience\":\"...\",\"selling_points\":[\"...\"],"
-        "\"risk_notes\":\"...\",\"rationale\":\"...\",\"score\":0.85}}. "
+        '{"type":"topic","index":1,"topic":{"title":"...","angle":"...",'
+        '"angle_type":"...","audience":"...","selling_points":["..."],'
+        '"risk_notes":"...","rationale":"...","score":0.85}}. '
         "Emit each topic as soon as it is complete. After the requested number of topics, "
-        "emit one final line: {\"type\":\"done\"}. topic.title is user-facing and must use "
+        'emit one final line: {"type":"done"}. topic.title is user-facing and must use '
         "the target audience language. angle, audience, selling_points, risk_notes, and "
         "rationale are operator-facing planning fields and may use Simplified Chinese. "
         "If creative_strategy.topic_angle_plan is present, set topic.angle_type to one of "
@@ -1812,20 +1785,20 @@ def _frame_analysis_system_prompt() -> str:
         "You jointly analyze two target endpoint images and optional chronological reference "
         "video frames. Return JSON only, with root keys first_frame, last_frame, "
         "transition_brief, language_analysis, and optional reference_video_analysis. "
-        "Use this exact base shape: {\"first_frame\": {\"visible_subjects\": [\"string\"], "
-        "\"visible_text\": [\"string\"], \"environment\": \"string\", "
-        "\"composition\": \"string\", \"camera_perspective\": \"string\", "
-        "\"visual_style\": \"string\", \"color_and_lighting\": \"string\", "
-        "\"opening_state\": \"string\"}, \"last_frame\": {\"visible_subjects\": "
-        "[\"string\"], \"visible_text\": [\"string\"], \"environment\": \"string\", "
-        "\"composition\": \"string\", \"camera_perspective\": \"string\", "
-        "\"visual_style\": \"string\", \"color_and_lighting\": \"string\", "
-        "\"ending_state\": \"string\"}, \"transition_brief\": "
-        "{\"shared_visual_facts\": [\"string\"], \"continuity_requirements\": "
-        "[\"string\"], \"visual_transition\": \"string\", \"narrative_arc\": "
-        "\"string\"}, \"language_analysis\": {\"first_frame_visible_languages\": "
-        "[\"string\"], \"last_frame_visible_languages\": [\"string\"], "
-        "\"recommended_output_language\": \"string\", \"reason\": \"string\"}}. "
+        'Use this exact base shape: {"first_frame": {"visible_subjects": ["string"], '
+        '"visible_text": ["string"], "environment": "string", '
+        '"composition": "string", "camera_perspective": "string", '
+        '"visual_style": "string", "color_and_lighting": "string", '
+        '"opening_state": "string"}, "last_frame": {"visible_subjects": '
+        '["string"], "visible_text": ["string"], "environment": "string", '
+        '"composition": "string", "camera_perspective": "string", '
+        '"visual_style": "string", "color_and_lighting": "string", '
+        '"ending_state": "string"}, "transition_brief": '
+        '{"shared_visual_facts": ["string"], "continuity_requirements": '
+        '["string"], "visual_transition": "string", "narrative_arc": '
+        '"string"}, "language_analysis": {"first_frame_visible_languages": '
+        '["string"], "last_frame_visible_languages": ["string"], '
+        '"recommended_output_language": "string", "reason": "string"}}. '
         "Every visible_text item must be a plain string, never an object. Record factual "
         "visual observations for each exact image. Do not write a storyboard or create new "
         "visible copy, logos, labels, or end cards. The target first and last frames define "
@@ -1973,7 +1946,6 @@ def _frame_anchored_director_system_prompt() -> str:
     )
 
 
-
 def _frame_anchored_storyboard_system_prompt() -> str:
     return (
         "You create a frame-anchored video storyboard from two supplied endpoint images "
@@ -1981,7 +1953,8 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
-        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, execution_evidence, "
+        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, phase_evidence, "
+        "execution_evidence, "
         "camera_instruction, tension_stage, action_result_requirement, effect_timing, "
         "subject_motion_intensity, camera_intensity, effect_intensity, "
         "anchor_return_instruction, overlay_instruction, and anti_flattening_requirement. "
@@ -2023,6 +1996,14 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "action_result_requirement, include camera and effect support in matching fields, show the "
         "visible payoff, and state anchor_return_instruction before final lock. Copy relevant "
         "source behavior IDs into source_behavior_beat_ids. Every scene must return "
+        "phase_evidence as a list of objects with phase, signature_moment_ids, and "
+        "source_behavior_beat_ids. phase must be exactly preparation, action, payoff, return, "
+        "or final_hold. For each non-omitted signature moment, declare every applicable phase "
+        "with that exact one moment id and its exact complete source behavior id set; prose alone "
+        "does not prove a phase. action phase must share the affirmed target subject/state "
+        "execution, "
+        "payoff must share action_result_requirement, return must share anchor_return_instruction, "
+        "and final_hold belongs only in the last_frame scene. Every scene must return "
         "execution_evidence as a list of objects with claim_id, executor_kind, assertion, "
         "action_or_state_change, signature_moment_ids, and source_behavior_beat_ids. "
         "claim_id is a stable private claim identity, not prose: use one constrained identifier "
@@ -2064,7 +2045,6 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "overlays, (3) the advertising objective where it does not contradict supplied images, and "
         "(4) preferred reference camera, transitions, and effects."
     )
-
 
 
 def _frame_pair_user_content(
@@ -2127,8 +2107,7 @@ def _frame_analysis_from_data(
             "last_frame": _frame_visual_facts_from_data(last_frame),
             "transition_brief": {
                 "shared_visual_facts": _frame_string_list(
-                    transition_source.get("shared_visual_facts")
-                    or data.get("shared_visual_facts")
+                    transition_source.get("shared_visual_facts") or data.get("shared_visual_facts")
                 ),
                 "continuity_requirements": _frame_string_list(
                     transition_source.get("continuity_requirements")
@@ -2156,8 +2135,7 @@ def _frame_analysis_from_data(
                     or data.get("recommended_output_language")
                 ),
                 "reason": _coerce_text(
-                    language_source.get("reason")
-                    or data.get("recommended_output_language_reason")
+                    language_source.get("reason") or data.get("recommended_output_language_reason")
                 ),
             },
         }
@@ -2194,14 +2172,10 @@ def _frame_analysis_response_shape(value: Any, depth: int = 0) -> Any:
         return type(value).__name__
     if isinstance(value, dict):
         return {
-            str(key): _frame_analysis_response_shape(item, depth + 1)
-            for key, item in value.items()
+            str(key): _frame_analysis_response_shape(item, depth + 1) for key, item in value.items()
         }
     if isinstance(value, list):
-        return [
-            _frame_analysis_response_shape(item, depth + 1)
-            for item in value[:3]
-        ]
+        return [_frame_analysis_response_shape(item, depth + 1) for item in value[:3]]
     return type(value).__name__
 
 
@@ -2344,9 +2318,7 @@ def _normalize_reference_behavior_graph(
             _coerce_optional_text(beat.get("description"))
             or f"Observed reference behavior {source_index + 1}."
         )
-        readable_duration = _positive_finite_float(
-            beat.get("minimum_readable_duration_seconds")
-        )
+        readable_duration = _positive_finite_float(beat.get("minimum_readable_duration_seconds"))
         beat["minimum_readable_duration_seconds"] = readable_duration or 0.5
         prepared.append(
             {
@@ -2475,6 +2447,7 @@ def _positive_finite_float(value: Any) -> float | None:
     number = _finite_float_or_none(value)
     return number if number is not None and number > 0 else None
 
+
 def _reference_visual_identity_mapping_from_data(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
     normalized["reference_element"] = _coerce_text(data.get("reference_element"))
@@ -2538,14 +2511,11 @@ def _reference_behavior_beat_from_data(data: dict[str, Any]) -> dict[str, Any]:
         default=0.5,
     )
     normalized["depends_on"] = _frame_string_list(data.get("depends_on"))
-    normalized["must_remain_visible_until_final"] = (
-        normalized["behavior_type"] == "overlay"
-        and bool(data.get("must_remain_visible_until_final"))
-    )
+    normalized["must_remain_visible_until_final"] = normalized[
+        "behavior_type"
+    ] == "overlay" and bool(data.get("must_remain_visible_until_final"))
     locked_text = _coerce_optional_text(data.get("locked_text"))
-    normalized["locked_text"] = (
-        locked_text if normalized["behavior_type"] == "overlay" else None
-    )
+    normalized["locked_text"] = locked_text if normalized["behavior_type"] == "overlay" else None
     return normalized
 
 
@@ -2609,9 +2579,7 @@ def _director_text(value: Any) -> str:
         return "; ".join(text for item in value if (text := _director_text(item)))
     if isinstance(value, dict):
         return "; ".join(
-            f"{key}: {text}"
-            for key, item in value.items()
-            if (text := _director_text(item))
+            f"{key}: {text}" for key, item in value.items() if (text := _director_text(item))
         )
     return _coerce_text(value).strip()
 
@@ -2625,9 +2593,7 @@ def _director_text_list(value: Any) -> list[str]:
     for item in _director_items(value):
         if isinstance(item, dict):
             texts.extend(
-                f"{key}: {text}"
-                for key, raw in item.items()
-                if (text := _director_text(raw))
+                f"{key}: {text}" for key, raw in item.items() if (text := _director_text(raw))
             )
         elif text := _director_text(item):
             texts.append(text)
@@ -2663,9 +2629,7 @@ def _normalize_director_attention_path(value: Any) -> list[str]:
     for item in _director_items(value):
         if isinstance(item, dict):
             focus = _director_first_text(item, "focus", "attention", "subject", "objective")
-            method = _director_first_text(
-                item, "method", "approach", "instruction", "camera"
-            )
+            method = _director_first_text(item, "method", "approach", "instruction", "camera")
             ratio = _finite_float_or_none(item.get("time_ratio"))
             prefix = f"At {round(ratio * 100)}%: " if ratio is not None else ""
             detail = ". ".join(part for part in (focus, method) if part)
@@ -2719,7 +2683,6 @@ def _normalize_director_action_arc_windows(value: Any) -> list[dict[str, Any]]:
     return result
 
 
-
 def _normalize_director_omission_fact(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -2730,6 +2693,27 @@ def _normalize_director_omission_fact(value: Any) -> dict[str, Any] | None:
         "scope": _director_first_text(value, "scope"),
         "detail": _director_first_text(value, "detail"),
     }
+
+
+def _normalize_storyboard_phase_evidence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "phase": _director_first_text(item, "phase"),
+                "signature_moment_ids": list(
+                    dict.fromkeys(_frame_string_list(item.get("signature_moment_ids")))
+                ),
+                "source_behavior_beat_ids": list(
+                    dict.fromkeys(_frame_string_list(item.get("source_behavior_beat_ids")))
+                ),
+            }
+        )
+    return normalized
 
 
 def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]:
@@ -2744,20 +2728,17 @@ def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]
                 "claim_id": _director_first_text(item, "claim_id"),
                 "executor_kind": _director_first_text(item, "executor_kind"),
                 "assertion": _director_first_text(item, "assertion"),
-                "action_or_state_change": _director_first_text(
-                    item, "action_or_state_change"
-                ),
+                "action_or_state_change": _director_first_text(item, "action_or_state_change"),
                 "signature_moment_ids": list(
                     dict.fromkeys(_frame_string_list(item.get("signature_moment_ids")))
                 ),
                 "source_behavior_beat_ids": list(
-                    dict.fromkeys(
-                        _frame_string_list(item.get("source_behavior_beat_ids"))
-                    )
+                    dict.fromkeys(_frame_string_list(item.get("source_behavior_beat_ids")))
                 ),
             }
         )
     return normalized
+
 
 def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
     fields = (
@@ -2863,9 +2844,7 @@ def _normalize_director_climax_beats(value: Any) -> list[dict[str, Any]]:
                 "importance": _normalize_director_importance(raw.get("importance")),
             }
         )
-        raw_dependencies.append(
-            _director_text_list(raw.get("depends_on", raw.get("dependencies")))
-        )
+        raw_dependencies.append(_director_text_list(raw.get("depends_on", raw.get("dependencies"))))
     for beat, dependencies in zip(normalized, raw_dependencies, strict=True):
         beat["depends_on"] = [
             mapped
@@ -2896,9 +2875,7 @@ def _normalize_director_overlay_lifecycle_plan(value: Any) -> list[dict[str, str
         )
         if not element:
             continue
-        lifecycle = _director_first_text(
-            raw, "lifecycle", "timing_instruction", "observed_in"
-        )
+        lifecycle = _director_first_text(raw, "lifecycle", "timing_instruction", "observed_in")
         constraints = _director_text(raw.get("constraints"))
         final_requirement = _director_first_text(
             raw,
@@ -2967,15 +2944,9 @@ def _frame_anchored_director_plan_from_data(
 ) -> FrameAnchoredDirectorPlan:
     normalized = dict(data)
     normalized["narrative_objective"] = _director_text(data.get("narrative_objective"))
-    normalized["attention_path"] = _normalize_director_attention_path(
-        data.get("attention_path")
-    )
-    normalized["tension_curve"] = _normalize_director_tension_curve(
-        data.get("tension_curve")
-    )
-    normalized["climax_beats"] = _normalize_director_climax_beats(
-        data.get("climax_beats")
-    )
+    normalized["attention_path"] = _normalize_director_attention_path(data.get("attention_path"))
+    normalized["tension_curve"] = _normalize_director_tension_curve(data.get("tension_curve"))
+    normalized["climax_beats"] = _normalize_director_climax_beats(data.get("climax_beats"))
     normalized["action_arc_windows"] = _normalize_director_action_arc_windows(
         data.get("action_arc_windows")
     )
@@ -3001,6 +2972,7 @@ def _frame_anchored_director_plan_from_data(
             _frame_analysis_response_shape(data),
         )
         raise ProviderError("LLM returned invalid frame-anchored director-plan JSON.") from exc
+
 
 def _frame_anchored_storyboard_from_data(
     data: dict[str, Any],
@@ -3035,6 +3007,7 @@ def _frame_anchored_storyboard_from_data(
                 "source_behavior_beat_ids": list(
                     dict.fromkeys(_frame_string_list(scene.get("source_behavior_beat_ids")))
                 ),
+                "phase_evidence": _normalize_storyboard_phase_evidence(scene.get("phase_evidence")),
                 "execution_evidence": _normalize_storyboard_execution_evidence(
                     scene.get("execution_evidence")
                 ),
@@ -3211,9 +3184,7 @@ def _compact_landing_page_metadata(value: Any) -> dict[str, Any]:
     if isinstance(headings, list):
         compact_headings = [
             item
-            for item in (
-                _truncate(_coerce_text(heading), 120) for heading in headings[:8]
-            )
+            for item in (_truncate(_coerce_text(heading), 120) for heading in headings[:8])
             if item
         ]
         if compact_headings:
@@ -3346,8 +3317,7 @@ def _compact_selected_topic_context(value: Any) -> dict[str, Any] | None:
         selected_topic["selling_points"] = [
             item
             for item in (
-                _truncate(_coerce_optional_text(point), 160)
-                for point in selling_points[:6]
+                _truncate(_coerce_optional_text(point), 160) for point in selling_points[:6]
             )
             if item
         ]

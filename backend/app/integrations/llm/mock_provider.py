@@ -195,8 +195,7 @@ def _mock_phase_durations(
     minimums = {
         "preparation": 0.08 + 0.02 * state_count,
         "action": sum(
-            max(0.08, beat.minimum_readable_duration_seconds * 0.45)
-            for beat in core_beats
+            max(0.08, beat.minimum_readable_duration_seconds * 0.45) for beat in core_beats
         ),
         "payoff": 0.08 + 0.02 * len(core_beats),
         "return": 0.08 + 0.01 * endpoint_evidence,
@@ -220,10 +219,7 @@ def _mock_phase_durations(
     expansion_weights = {
         "preparation": len(core_beats) + state_count + 1,
         "action": (
-            action_count
-            + state_count
-            + allocation["divergence"]
-            + allocation["camera_travel"]
+            action_count + state_count + allocation["divergence"] + allocation["camera_travel"]
         ),
         "payoff": (
             evidence_items
@@ -232,12 +228,7 @@ def _mock_phase_durations(
             + allocation["payoff_readability"]
             + allocation["effect_readability"]
         ),
-        "return": (
-            endpoint_evidence
-            + state_count
-            + 1
-            + 2 * allocation["endpoint_difference"]
-        ),
+        "return": (endpoint_evidence + state_count + 1 + 2 * allocation["endpoint_difference"]),
         "final_lock": len(transition.continuity_requirements) + 1,
     }
     expansion_total = sum(expansion_weights.values())
@@ -635,6 +626,18 @@ class MockLLMProvider:
                 }
                 for moment in signature_moments
             ]
+
+            def phase_evidence(*phases: str) -> list[dict[str, object]]:
+                return [
+                    {
+                        "phase": phase,
+                        "signature_moment_ids": [moment.moment_id],
+                        "source_behavior_beat_ids": list(moment.source_behavior_beat_ids),
+                    }
+                    for phase in phases
+                    for moment in signature_moments
+                ]
+
             common_execution = {
                 "motion": motion,
                 "cinematic_beat": beat_ids[0],
@@ -678,6 +681,7 @@ class MockLLMProvider:
                         sound_effects=["Soft preparation ambience."],
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("preparation"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -691,6 +695,7 @@ class MockLLMProvider:
                             "Allow temporary divergence while every linked behavior executes."
                         ),
                         sound_effects=["Execution rise."],
+                        phase_evidence=phase_evidence("action"),
                         **action_fields,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -711,6 +716,7 @@ class MockLLMProvider:
                         subject_motion_intensity=0.55,
                         camera_intensity=0.5,
                         effect_intensity=0.8,
+                        phase_evidence=phase_evidence("payoff"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=4,
@@ -726,6 +732,7 @@ class MockLLMProvider:
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                         anchor_return_instruction=return_instruction,
+                        phase_evidence=phase_evidence("return"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=5,
@@ -736,6 +743,9 @@ class MockLLMProvider:
                         motion="Stabilize and hold the supplied final composition.",
                         transition_goal="Maintain the final hold without an end card or cut.",
                         sound_effects=["Ending ambience."],
+                        signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("final_hold"),
                     ),
                 ]
             elif duration_seconds >= 4:
@@ -755,6 +765,7 @@ class MockLLMProvider:
                         sound_effects=["Soft preparation ambience."],
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("preparation"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -767,6 +778,7 @@ class MockLLMProvider:
                             "the payoff without a cut."
                         ),
                         sound_effects=["Execution rise.", "Payoff accent."],
+                        phase_evidence=phase_evidence("action", "payoff"),
                         **common_execution,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -783,6 +795,7 @@ class MockLLMProvider:
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                         anchor_return_instruction=return_instruction,
+                        phase_evidence=phase_evidence("return"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=4,
@@ -793,6 +806,9 @@ class MockLLMProvider:
                         motion="Stabilize and hold the supplied final composition.",
                         transition_goal="Maintain the final hold without an end card or cut.",
                         sound_effects=["Ending ambience."],
+                        signature_moment_ids=signature_ids,
+                        source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("final_hold"),
                     ),
                 ]
             elif duration_seconds == 3:
@@ -808,6 +824,7 @@ class MockLLMProvider:
                         sound_effects=["Soft preparation ambience."],
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("preparation"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -820,6 +837,7 @@ class MockLLMProvider:
                             "continuous scene."
                         ),
                         sound_effects=["Execution rise.", "Payoff accent."],
+                        phase_evidence=phase_evidence("action", "payoff"),
                         **common_execution,
                     ),
                     FrameAnchoredStoryboardScene(
@@ -834,6 +852,7 @@ class MockLLMProvider:
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
                         anchor_return_instruction=return_instruction,
+                        phase_evidence=phase_evidence("return", "final_hold"),
                     ),
                 ]
             else:
@@ -849,6 +868,7 @@ class MockLLMProvider:
                         sound_effects=["Soft preparation ambience."],
                         signature_moment_ids=signature_ids,
                         source_behavior_beat_ids=source_ids,
+                        phase_evidence=phase_evidence("preparation"),
                     ),
                     FrameAnchoredStoryboardScene(
                         scene_index=2,
@@ -865,6 +885,7 @@ class MockLLMProvider:
                         ),
                         sound_effects=["Execution rise.", "Payoff accent.", "Ending ambience."],
                         anchor_return_instruction=return_instruction,
+                        phase_evidence=phase_evidence("action", "payoff", "return", "final_hold"),
                         **common_execution,
                     ),
                 ]
@@ -1107,9 +1128,7 @@ class MockLLMProvider:
         )
         creative_name = creative.get("name") or creative.get("ad_name") or "该广告"
         problems = (
-            rule_analysis.get("problems")
-            if isinstance(rule_analysis.get("problems"), list)
-            else []
+            rule_analysis.get("problems") if isinstance(rule_analysis.get("problems"), list) else []
         )
         problem_titles = [
             item.get("title")
@@ -1193,15 +1212,12 @@ class MockLLMProvider:
             "confidence_note": "Mock 分析用于本地开发；真实环境会调用配置的大模型 provider。",
         }
 
-    async def stream_ad_performance_analysis(
-        self, context: dict
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def stream_ad_performance_analysis(self, context: dict) -> AsyncIterator[dict[str, Any]]:
         analysis = await self.analyze_ad_performance(context)
         text = json.dumps(analysis, ensure_ascii=False)
         for chunk in _chunk_text(text, size=36):
             yield {"type": "delta", "text": chunk}
         yield {"type": "done", "analysis": analysis, "text": text}
-
 
     async def generate_topics(
         self,
@@ -1240,9 +1256,7 @@ class MockLLMProvider:
             candidates.append(
                 TopicCandidate(
                     title=(
-                        f"{product}: {title}"
-                        if target_language["country_code"] != "IN"
-                        else title
+                        f"{product}: {title}" if target_language["country_code"] != "IN" else title
                     ),
                     angle=_append_context(
                         (
@@ -1411,9 +1425,7 @@ class MockLLMProvider:
                 ImageBrief(
                     image_index=index + 1,
                     title=("Revised image" if feedback else snippet),
-                    short_text=sanitize_creative_safety_text(
-                        (draft.headline or snippet)[:80]
-                    ),
+                    short_text=sanitize_creative_safety_text((draft.headline or snippet)[:80]),
                     visual_direction=(
                         "Clean standalone performance-ad layout with readable text, product focus, "
                         "and enough negative space for mobile feed placements. "
@@ -1439,9 +1451,7 @@ class MockLLMProvider:
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         product = campaign.product_name or campaign.name
-        safe_product = (
-            "the app lobby" if contains_creative_safety_risk(product) else product
-        )
+        safe_product = "the app lobby" if contains_creative_safety_risk(product) else product
         target_language = build_target_language_context(campaign=campaign, context=context)
         creative_strategy = _mock_creative_strategy(
             campaign.metadata_json,
@@ -1488,8 +1498,7 @@ class MockLLMProvider:
                 aspect_ratio=aspect_ratio,
                 scenes=scenes,
                 rationale=(
-                    "Mock storyboard follows creative_strategy.v2 and requested "
-                    "duration_seconds."
+                    "Mock storyboard follows creative_strategy.v2 and requested duration_seconds."
                 ),
             )
         asset_count = max(1, len(assets))
@@ -1520,10 +1529,14 @@ class MockLLMProvider:
                     role="last_frame",
                     fallback="End on a clear call to action and keep the final frame readable.",
                 )
-                subtitle = "Start" if creative_strategy else (
-                    "अभी डाउनलोड करें"
-                    if target_language["country_code"] == "IN"
-                    else "Download Now"
+                subtitle = (
+                    "Start"
+                    if creative_strategy
+                    else (
+                        "अभी डाउनलोड करें"
+                        if target_language["country_code"] == "IN"
+                        else "Download Now"
+                    )
                 )
             else:
                 visual = f"Show proof and variety using context from {landing_title[:80]}."
@@ -1744,9 +1757,7 @@ def _mock_facebook_operator_result(context: dict[str, Any]) -> dict[str, Any]:
             "references": [],
             "limitation": "公开来源只能用于参考创意模式，不能验证真实投放成效。",
         },
-        "data_gaps": [
-            "Mock 环境不提供真实素材识别、受众拆分或公开相似广告研究结论。"
-        ],
+        "data_gaps": ["Mock 环境不提供真实素材识别、受众拆分或公开相似广告研究结论。"],
     }
 
 
@@ -1828,8 +1839,7 @@ def _mock_ad_performance_optimization_work_order(
                 action="check",
                 priority="high",
                 reason=(
-                    "Clicks are useful only if the landing page loads and events fire "
-                    "correctly."
+                    "Clicks are useful only if the landing page loads and events fire correctly."
                 ),
                 suggested_value=landing_url,
             ),
@@ -1842,8 +1852,7 @@ def _mock_ad_performance_optimization_work_order(
                 reason="Mock AI recommends testing a stronger benefit or challenge-led headline.",
                 suggested_direction="Lead with the result, challenge, or clear benefit.",
                 generation_prompt=(
-                    "Generate 5 Meta ad headlines with a clear result, challenge, "
-                    "or benefit."
+                    "Generate 5 Meta ad headlines with a clear result, challenge, or benefit."
                 ),
                 can_apply_to_generation=True,
                 missing=headline is None,
