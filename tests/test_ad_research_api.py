@@ -72,6 +72,23 @@ def test_ad_research_api_document_preserves_external_task_state_contract() -> No
     assert expired_row is not None
     assert re.search(r"GET.*?`410 Gone`", expired_row.group())
 
+    assert "final_score = visual_total" in document
+    assert "public_continuity_points" not in document
+    assert "legacy insufficient" in document
+    assert "最多 6 轮" in document
+    assert "650 条原始候选" in document
+    assert "每个查询最多召回 50 条" in document
+    assert (
+        "P1 `game_gambling`\u3001P2 `sports_betting`"
+        "\u3001P3 `gambling_adjacent`\u3001P4 `unrelated`"
+        in document
+    )
+    assert "is_fallback: true" in document
+    assert 'fallback_reason: "insufficient_high_relevance_candidates"' in document
+    assert '"reasoning": {"effort": "none"}' in document
+    assert "AD_RESEARCH_WORKER_CONCURRENCY=2" in document
+    assert "AD_RESEARCH_MODEL_CONCURRENCY=6" in document
+
 
 def test_create_replay_conflict_and_poll(monkeypatch) -> None:
     monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "")
