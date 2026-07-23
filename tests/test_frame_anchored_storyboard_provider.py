@@ -2878,3 +2878,48 @@ async def test_gateway_storyboard_draft_schema_excludes_private_claims() -> None
     assert "phase_evidence" not in serialized_schema
     assert "execution_actions" in serialized_schema
     assert "phase_tags" in serialized_schema
+
+
+@pytest.mark.asyncio
+async def test_gateway_final_storyboard_text_uses_minimal_strict_schema_and_director_prompt(
+) -> None:
+    provider, captured = _gateway_provider_with_responses(
+        {"storyboard_text": "A complete flexible director script without internal evidence IDs."}
+    )
+
+    method = getattr(provider, "generate_frame_anchored_video_storyboard_text", None)
+    assert method is not None, "Storyboard V2 provider must expose the two-call final text method"
+    candidate = await method(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis_with_mock_core_behavior(),
+        12,
+        "9:16",
+    )
+
+    assert candidate.storyboard_text.startswith("A complete flexible")
+    response_format = captured[0]["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["name"] == "frame_anchored_storyboard_text_candidate"
+    assert response_format["strict"] is True
+    schema = response_format["schema"]
+    assert set(schema["properties"]) == {"storyboard_text"}
+    assert schema["required"] == ["storyboard_text"]
+
+    system_prompt = captured[0]["input"][0]["content"].casefold()
+    assert "3a" in system_prompt
+    assert "supplied first frame" in system_prompt
+    assert "supplied last frame" in system_prompt
+    assert "reference" in system_prompt
+    assert "camera" in system_prompt
+    assert "vfx" in system_prompt
+    assert "safety" in system_prompt or "compliance" in system_prompt
+    for forbidden_contract in (
+        "signature_moment_ids",
+        "source_behavior_beat_ids",
+        "execution_evidence",
+        "phase_evidence",
+        "director_corrections",
+        "final_lock",
+    ):
+        assert forbidden_contract not in system_prompt

@@ -17,6 +17,7 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     FrameAnchoredStoryboardDraft,
     FrameAnchoredStoryboardScene,
+    FrameAnchoredStoryboardTextCandidate,
     FrameLanguageAnalysis,
     FrameTransitionBrief,
     FrameVisualFacts,
@@ -519,6 +520,34 @@ class MockLLMProvider:
                 "Keep preparation, subject/state execution, payoff, return, and final hold "
                 "readable."
             ],
+        )
+
+    async def generate_frame_anchored_video_storyboard_text(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboardTextCandidate:
+        del first_frame_image_url, last_frame_image_url
+        reference_direction = (
+            "Use the analyzed reference behavior, camera rhythm, causal payoff, and VFX as "
+            "target-compatible director material. "
+            if frame_analysis.reference_video_analysis is not None
+            else "Use the analyzed transition between the supplied endpoint images. "
+        )
+        return FrameAnchoredStoryboardTextCandidate(
+            storyboard_text=(
+                f"Create one continuous {duration_seconds}-second {aspect_ratio} cinematic clip. "
+                "Begin exactly from the supplied first frame and preserve its visible target "
+                "identity and composition. "
+                + reference_direction
+                + "Build a readable action, consequence, camera escalation, and layered effects "
+                "inside the shot, then resolve coherently to the supplied last frame as the final "
+                "visual anchor. Keep visible text, rewards, UI, brand, product, character, and "
+                "setting consistent with the target frames and apply all safety requirements."
+            )
         )
 
     async def generate_frame_anchored_video_storyboard(

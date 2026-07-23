@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -22,7 +24,6 @@ from backend.app.main import create_app
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
     DirectorActionCorrection,
-    DirectorActionCoverageReview,
     DirectorBeat,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
@@ -446,6 +447,32 @@ class FakeExternalAILLM:
             anti_flattening_constraints=[
                 "Keep trigger, action, impact, and ending as distinct readable phases."
             ],
+        )
+
+    async def generate_frame_anchored_video_storyboard_text(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ):
+        self.calls.append("generate_frame_anchored_video_storyboard_text")
+        self.call_details.append({"frame_analysis": frame_analysis})
+        assert first_frame_image_url.endswith("first.png")
+        assert last_frame_image_url.endswith("last.png")
+        assert frame_analysis.first_frame.visible_text == ["START"]
+        assert duration_seconds == 12
+        assert aspect_ratio == "9:16"
+        if frame_analysis.reference_video_analysis is not None:
+            assert frame_analysis.timeline_adaptation_plan is not None
+        return SimpleNamespace(
+            storyboard_text=(
+                "Begin exactly from the supplied first frame. The target subject enters with "
+                "the reference-inspired motion, executes a readable causal action, and drives "
+                "a strong in-shot camera push with layered VFX. Resolve exactly to the supplied "
+                "last frame. Internal marker __sbv2_behavior_001__ must stay private."
+            )
         )
 
     async def generate_frame_anchored_video_storyboard(
@@ -1025,9 +1052,7 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
     fake_llm = FakeExternalAILLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     client, engine, app = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        filename="external-ai-storyboard-v2.db",
+        tmp_path, monkeypatch, filename="external-ai-storyboard-v2.db"
     )
     try:
         create_response = client.post(
@@ -1035,11 +1060,9 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
             headers=_authorized_headers(),
             json=_storyboard_v2_payload(),
         )
-        create_body = create_response.json()
-        job_id = create_body["data"]["job_id"]
+        job_id = create_response.json()["data"]["job_id"]
         poll_response = client.get(
-            f"/api/v1/integrations/ai/jobs/{job_id}",
-            headers=_authorized_headers(),
+            f"/api/v1/integrations/ai/jobs/{job_id}", headers=_authorized_headers()
         )
         poll_body = poll_response.json()
     finally:
@@ -1048,47 +1071,25 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
 
     assert create_response.status_code == 202
     assert poll_response.status_code == 200
-    assert poll_body["code"] == 0
     data = poll_body["data"]
     assert data["status"] == "succeeded"
     assert data["request_id"] == "external-ai-storyboard-v2-1"
-    assert data["storyboard_text"]
     assert data["duration_seconds"] == 12
     assert data["aspect_ratio"] == "9:16"
-    assert "Scene 1" in data["storyboard_text"]
-    assert "Cinematic beat:" not in data["storyboard_text"]
-    assert "Cinematic beats:" not in data["storyboard_text"]
-    assert (
-        "Return to final anchor: Return continuously to the supplied last frame."
-        in data["storyboard_text"]
-    )
-    for private_id in (
-        "core_behavior",
-        "core_state_change",
-        "custom_behavior_beat",
-        "signature_action",
-        "custom_signature_id",
-        "causal_peak",
-        "custom_director_beat",
-    ):
-        assert private_id not in data["storyboard_text"]
+    assert "readable causal action" in data["storyboard_text"]
+    assert "__sbv2_" not in data["storyboard_text"]
     for private_field in (
         "frame_analysis",
         "director_plan",
         "director_action_coverage_review",
         "frame_anchored_storyboard_candidate",
+        "frame_anchored_storyboard_text_candidate",
         "frame_anchored_storyboard",
-        "signature_moment_ids",
-        "source_behavior_beat_ids",
-        "execution_evidence",
-        "claim_id",
-        "storyboard",
     ):
         assert private_field not in data
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
-        "direct_frame_anchored_video_storyboard",
-        "generate_frame_anchored_video_storyboard",
+        "generate_frame_anchored_video_storyboard_text",
     ]
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
@@ -1096,14 +1097,13 @@ async def test_external_storyboard_v2_runs_two_steps_and_keeps_analysis_private(
         assert task is not None
         assert task.queue_name == "text_queue"
         assert task.task_type == "external_video_storyboard_v2"
-        assert task.campaign_id is None
-        assert task.metadata_json is not None
         assert task.metadata_json["frame_analysis"]["first_frame"]["visible_text"] == ["START"]
-        assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
-        director_plan = task.metadata_json["frame_analysis"]["director_plan"]
-        assert director_plan["climax_beats"][0]["beat_id"] == "__sbv2_beat_001__"
-        first_scene = task.metadata_json["frame_anchored_storyboard"]["scenes"][0]
-        assert first_scene["frame_anchor"] == "first_frame"
+        assert task.metadata_json["frame_analysis"]["director_plan"] is None
+        raw_candidate = task.metadata_json["frame_anchored_storyboard_text_candidate"]
+        assert "__sbv2_behavior_001__" in raw_candidate["storyboard_text"]
+        assert "director_action_coverage_review" not in task.metadata_json
+        assert "frame_anchored_storyboard_candidate" not in task.metadata_json
+        assert "frame_anchored_storyboard" not in task.metadata_json
 
     assert await _count_rows(engine, Campaign) == 0
     assert await _count_rows(engine, WorkOrder) == 0
@@ -1122,6 +1122,8 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     fake_llm = FakeExternalAILLM()
 
     class FakeReferenceVideoService:
+        cleanup_calls = 0
+
         async def prepare(self, session, reference_video, *, task_id: str):
             assert session is not None
             assert reference_video.source_type == "url"
@@ -1131,23 +1133,17 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
                 sample_interval_seconds=2.0,
                 frames=[
                     ReferenceVideoFrame(
-                        timestamp_seconds=0,
-                        image_url="data:image/jpeg;base64,AAA",
-                    ),
-                    ReferenceVideoFrame(
-                        timestamp_seconds=2,
-                        image_url="data:image/jpeg;base64,BBB",
-                    ),
-                    ReferenceVideoFrame(
-                        timestamp_seconds=5.8,
-                        image_url="data:image/jpeg;base64,CCC",
-                    ),
+                        timestamp_seconds=timestamp,
+                        image_url=f"data:image/jpeg;base64,{label}",
+                    )
+                    for timestamp, label in ((0, "AAA"), (2, "BBB"), (5.8, "CCC"))
                 ],
                 working_dir=tmp_path / "reference-analysis",
             )
 
         async def cleanup(self, prepared: PreparedReferenceVideo) -> None:
             assert prepared.duration_seconds == 5.8
+            type(self).cleanup_calls += 1
 
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     monkeypatch.setattr(
@@ -1156,9 +1152,7 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
         FakeReferenceVideoService,
     )
     client, engine, app = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        filename="external-ai-storyboard-v2-reference.db",
+        tmp_path, monkeypatch, filename="external-ai-storyboard-v2-reference.db"
     )
     try:
         created = client.post(
@@ -1172,10 +1166,7 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
             ),
         )
         job_id = created.json()["data"]["job_id"]
-        polled = client.get(
-            f"/api/v1/integrations/ai/jobs/{job_id}",
-            headers=_authorized_headers(),
-        )
+        polled = client.get(f"/api/v1/integrations/ai/jobs/{job_id}", headers=_authorized_headers())
     finally:
         app.dependency_overrides.clear()
         client.close()
@@ -1184,53 +1175,51 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
     assert created.status_code == 202
     assert polled.status_code == 200
     assert poll_data["status"] == "succeeded"
-    assert "Target timeline adaptation" not in poll_data["storyboard_text"]
-    assert (
-        "required final overlay on the target last-frame base layer"
-        not in poll_data["storyboard_text"]
-    )
+    assert "__sbv2_" not in poll_data["storyboard_text"]
     assert "reference_video_analysis" not in poll_data
     assert "reference_frames" not in poll_data
     assert fake_llm.calls == [
         "analyze_video_frame_pair",
-        "direct_frame_anchored_video_storyboard",
-        "generate_frame_anchored_video_storyboard",
+        "generate_frame_anchored_video_storyboard_text",
     ]
+    assert FakeReferenceVideoService.cleanup_calls == 1
 
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         task = await session.get(GenerationTask, job_id)
         assert task is not None
+        frame_analysis = task.metadata_json["frame_analysis"]
         assert (
-            task.metadata_json["frame_analysis"]["reference_video_analysis"]["adapted_constraints"][
-                "subject_presence"
-            ]["strength"]
+            frame_analysis["reference_video_analysis"]["adapted_constraints"]["subject_presence"][
+                "strength"
+            ]
             == "preferred"
         )
-        final_beat = task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1]
+        final_beat = frame_analysis["timeline_adaptation_plan"]["beats"][-1]
         assert final_beat["must_remain_visible_until_final"] is False
         assert "director overlay_lifecycle_plan" in final_beat["adaptation_instruction"]
-        assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
+        assert frame_analysis["director_plan"] is None
+        assert "director_action_coverage_review" not in task.metadata_json
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_plan(
+async def test_external_storyboard_v2_retry_reuses_cached_analysis_after_final_text_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FailingOnceStoryboardLLM(FakeExternalAILLM):
+    class FailingOnceStoryboardTextLLM(FakeExternalAILLM):
         def __init__(self) -> None:
             super().__init__()
             self.storyboard_attempts = 0
 
-        async def generate_frame_anchored_video_storyboard(self, *args, **kwargs):
+        async def generate_frame_anchored_video_storyboard_text(self, *args, **kwargs):
             self.storyboard_attempts += 1
             if self.storyboard_attempts == 1:
-                self.calls.append("generate_frame_anchored_video_storyboard")
+                self.calls.append("generate_frame_anchored_video_storyboard_text")
                 raise ProviderError("temporary final storyboard failure")
-            return await super().generate_frame_anchored_video_storyboard(*args, **kwargs)
+            return await super().generate_frame_anchored_video_storyboard_text(*args, **kwargs)
 
-    fake_llm = FailingOnceStoryboardLLM()
+    fake_llm = FailingOnceStoryboardTextLLM()
 
     class CountingReferenceVideoService:
         prepare_calls = 0
@@ -1244,20 +1233,13 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_
                 sample_interval_seconds=2.0,
                 frames=[
                     ReferenceVideoFrame(
-                        frame_index=0,
-                        timestamp_seconds=0.0,
-                        image_url="data:image/jpeg;base64,AAA",
-                    ),
-                    ReferenceVideoFrame(
-                        frame_index=1,
-                        timestamp_seconds=2.0,
-                        image_url="data:image/jpeg;base64,BBB",
-                    ),
-                    ReferenceVideoFrame(
-                        frame_index=2,
-                        timestamp_seconds=5.8,
-                        image_url="data:image/jpeg;base64,CCC",
-                    ),
+                        frame_index=index,
+                        timestamp_seconds=timestamp,
+                        image_url=f"data:image/jpeg;base64,{label}",
+                    )
+                    for index, (timestamp, label) in enumerate(
+                        ((0.0, "AAA"), (2.0, "BBB"), (5.8, "CCC"))
+                    )
                 ],
                 working_dir=tmp_path / "cached-reference-analysis",
             )
@@ -1273,8 +1255,7 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_
         CountingReferenceVideoService,
     )
     engine, session_factory = await _session_factory(
-        tmp_path,
-        "external-ai-storyboard-v2-checkpoint.db",
+        tmp_path, "external-ai-storyboard-v2-checkpoint.db"
     )
     service = ExternalAIGenerationService()
     async with session_factory() as session:
@@ -1299,46 +1280,50 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_and_director_
             await service.execute_frame_anchored_video_storyboard(session, task)
 
         await session.refresh(task)
-        assert task.metadata_json["frame_analysis"]["director_plan"] is not None
+        assert task.metadata_json["frame_analysis"]["director_plan"] is None
+        assert "frame_anchored_storyboard_text_candidate" not in task.metadata_json
 
         result = await service.execute_frame_anchored_video_storyboard(session, task)
 
         assert "storyboard_text" in result
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
+            "generate_frame_anchored_video_storyboard_text",
         ]
         assert CountingReferenceVideoService.prepare_calls == 1
         assert CountingReferenceVideoService.cleanup_calls == 1
-        assert fake_llm.call_details[-1]["director_corrections"] == []
+        assert fake_llm.call_details[-1]["frame_analysis"].director_plan is None
 
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_external_storyboard_v2_retry_reuses_cached_analysis_after_director_failure(
+async def test_external_storyboard_v2_clears_legacy_cached_director_plan(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FailingOnceDirectorLLM(FakeExternalAILLM):
-        def __init__(self) -> None:
-            super().__init__()
-            self.director_attempts = 0
+    fake_llm = FakeExternalAILLM()
+    cached_analysis = await fake_llm.analyze_video_frame_pair(
+        "https://cdn.example.test/first.png",
+        "https://cdn.example.test/last.png",
+        12,
+        "9:16",
+    )
+    legacy_plan = await fake_llm.direct_frame_anchored_video_storyboard(
+        "https://cdn.example.test/first.png",
+        "https://cdn.example.test/last.png",
+        cached_analysis,
+        12,
+        "9:16",
+    )
+    cached_analysis = cached_analysis.model_copy(update={"director_plan": legacy_plan})
+    fake_llm.calls.clear()
+    fake_llm.call_details.clear()
 
-        async def direct_frame_anchored_video_storyboard(self, *args, **kwargs):
-            self.director_attempts += 1
-            if self.director_attempts == 1:
-                self.calls.append("direct_frame_anchored_video_storyboard")
-                raise ProviderError("temporary director failure")
-            return await super().direct_frame_anchored_video_storyboard(*args, **kwargs)
-
-    fake_llm = FailingOnceDirectorLLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     engine, session_factory = await _session_factory(
-        tmp_path,
-        "external-ai-storyboard-v2-analysis-checkpoint.db",
+        tmp_path, "external-ai-storyboard-v2-legacy-director-cache.db"
     )
     service = ExternalAIGenerationService()
     async with session_factory() as session:
@@ -1346,67 +1331,49 @@ async def test_external_storyboard_v2_retry_reuses_cached_analysis_after_directo
             queue_name="text_queue",
             task_type="external_video_storyboard_v2",
             business_type="external_ai",
-            business_id="analysis-checkpoint-storyboard-v2",
+            business_id="legacy-director-cache-storyboard-v2",
             payload_json=_storyboard_v2_payload(),
+            metadata_json={"frame_analysis": cached_analysis.model_dump(mode="json")},
             queued_at=utcnow(),
         )
         session.add(task)
         await session.commit()
         await session.refresh(task)
 
-        with pytest.raises(ProviderError, match="temporary director failure"):
-            await service.execute_frame_anchored_video_storyboard(session, task)
-
-        await session.refresh(task)
-        assert task.metadata_json["frame_analysis"]["director_plan"] is None
-
         result = await service.execute_frame_anchored_video_storyboard(session, task)
 
         assert "storyboard_text" in result
-        assert fake_llm.calls == [
-            "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
-        ]
+        assert fake_llm.calls == ["generate_frame_anchored_video_storyboard_text"]
+        assert fake_llm.call_details[-1]["frame_analysis"].director_plan is None
+        await session.refresh(task)
+        assert task.metadata_json["frame_analysis"]["director_plan"] is None
 
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_stores_review_and_forwards_corrections(
+async def test_storyboard_v2_skips_legacy_review_and_corrections(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
+
+    def fail_if_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("legacy director review must not run")
+
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     monkeypatch.setattr(
         external_ai_service_module,
         "review_director_action_coverage",
-        lambda frame_analysis, director_plan: DirectorActionCoverageReview(
-            status="corrective",
-            required_core_behavior_beat_ids=["core_behavior"],
-            uncovered_core_behavior_beat_ids=["core_behavior"],
-            correction_requirements=[
-                "Provide executable subject/state action and visible payoff for the linked moment."
-            ],
-            structured_corrections=[
-                DirectorActionCorrection(
-                    correction_type="execution",
-                    signature_moment_ids=["signature_action"],
-                    source_behavior_beat_ids=["core_behavior"],
-                    instruction=(
-                        "Provide executable subject/state action and visible payoff for the "
-                        "linked moment."
-                    ),
-                )
-            ],
-        ),
+        fail_if_called,
+        raising=False,
     )
     monkeypatch.setattr(
         external_ai_service_module,
         "validate_final_storyboard_action_coverage",
-        lambda storyboard, frame_analysis, review: None,
+        fail_if_called,
+        raising=False,
     )
     engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-review.db")
     service = ExternalAIGenerationService()
@@ -1425,37 +1392,29 @@ async def test_storyboard_v2_stores_review_and_forwards_corrections(
         result = await service.execute_frame_anchored_video_storyboard(session, task)
         await session.refresh(task)
         assert result["storyboard_text"]
-        assert task.metadata_json["director_action_coverage_review"]["status"] == "corrective"
-        forwarded = fake_llm.call_details[-1]["director_corrections"]
-        assert len(forwarded) == 1
-        assert forwarded[0].signature_moment_ids == ["signature_action"]
-        assert forwarded[0].source_behavior_beat_ids == ["core_behavior"]
+        assert "director_action_coverage_review" not in task.metadata_json
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "generate_frame_anchored_video_storyboard_text",
+        ]
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_unrecoverable_linkage_stops_before_call3(
+async def test_storyboard_v2_does_not_require_legacy_signature_linkage(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
+
+    async def fail_if_director_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("legacy director planning must not run")
+
+    fake_llm.direct_frame_anchored_video_storyboard = fail_if_director_called
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    monkeypatch.setattr(
-        external_ai_service_module,
-        "review_director_action_coverage",
-        lambda frame_analysis, director_plan: DirectorActionCoverageReview.model_construct(
-            status="unrecoverable",
-            required_core_behavior_beat_ids=["core_behavior"],
-            uncovered_core_behavior_beat_ids=["core_behavior"],
-            correction_requirements=[],
-            structured_corrections=[],
-            unrecoverable_reasons=[
-                "Core behavior beat core_behavior has no signature/source linkage."
-            ],
-        ),
-    )
     engine, session_factory = await _session_factory(
-        tmp_path, "storyboard-v2-unrecoverable-review.db"
+        tmp_path, "storyboard-v2-no-linkage-contract.db"
     )
     service = ExternalAIGenerationService()
     async with session_factory() as session:
@@ -1463,44 +1422,37 @@ async def test_storyboard_v2_unrecoverable_linkage_stops_before_call3(
             queue_name="text_queue",
             task_type="external_video_storyboard_v2",
             business_type="external_ai",
-            business_id="storyboard-v2-unrecoverable-review",
+            business_id="storyboard-v2-no-linkage-contract",
             payload_json=_storyboard_v2_payload(),
             queued_at=utcnow(),
         )
         session.add(task)
         await session.commit()
         await session.refresh(task)
-
-        with pytest.raises(ProviderError) as excinfo:
-            await service.execute_frame_anchored_video_storyboard(session, task)
-
-        message = str(excinfo.value)
-        assert "required signature/source linkage is missing" in message
-        assert "invalid omission contract" not in message
-        assert "core_behavior" not in message
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
+        assert result["storyboard_text"]
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
         ]
-
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_uncached_success_uses_exactly_three_llm_calls(
+async def test_storyboard_v2_uncached_success_uses_exactly_two_llm_calls(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-three-calls.db")
+    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-two-calls.db")
     service = ExternalAIGenerationService()
     async with session_factory() as session:
         task = GenerationTask(
             queue_name="text_queue",
             task_type="external_video_storyboard_v2",
             business_type="external_ai",
-            business_id="storyboard-v2-three-calls",
+            business_id="storyboard-v2-two-calls",
             payload_json=_storyboard_v2_payload(),
             queued_at=utcnow(),
         )
@@ -1510,8 +1462,7 @@ async def test_storyboard_v2_uncached_success_uses_exactly_three_llm_calls(
         await service.execute_frame_anchored_video_storyboard(session, task)
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
         ]
     await engine.dispose()
 
@@ -1580,25 +1531,25 @@ def test_frame_anchored_formatter_hides_private_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_storyboard_v2_saves_candidate_before_director_coverage_validation(
+async def test_external_storyboard_v2_saves_text_candidate_without_legacy_validation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
 
-    def reject_coverage(storyboard, plan) -> None:
-        del storyboard, plan
-        raise ValueError("missing dynamic core beat")
+    def fail_if_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("legacy storyboard validation must not run")
 
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     monkeypatch.setattr(
         external_ai_service_module,
         "validate_director_coverage",
-        reject_coverage,
+        fail_if_called,
+        raising=False,
     )
     engine, session_factory = await _session_factory(
-        tmp_path,
-        "external-ai-storyboard-v2-candidate.db",
+        tmp_path, "external-ai-storyboard-v2-candidate.db"
     )
     service = ExternalAIGenerationService()
     async with session_factory() as session:
@@ -1614,15 +1565,13 @@ async def test_external_storyboard_v2_saves_candidate_before_director_coverage_v
         await session.commit()
         await session.refresh(task)
 
-        with pytest.raises(
-            ProviderError,
-            match="does not execute the required director action and final-anchor return",
-        ):
-            await service.execute_frame_anchored_video_storyboard(session, task)
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
 
         await session.refresh(task)
-        candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
-        assert candidate["scenes"][1]["cinematic_beat"] == "__sbv2_beat_001__"
+        raw_candidate = task.metadata_json["frame_anchored_storyboard_text_candidate"]
+        assert "__sbv2_behavior_001__" in raw_candidate["storyboard_text"]
+        assert "__sbv2_" not in result["storyboard_text"]
+        assert "frame_anchored_storyboard_candidate" not in task.metadata_json
         assert "frame_anchored_storyboard" not in task.metadata_json
 
     await engine.dispose()
@@ -2131,69 +2080,30 @@ def test_frame_anchored_formatter_scrubs_private_ids_from_renderable_text() -> N
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_invalid_omit_stops_after_call2(
+async def test_storyboard_v2_accepts_final_text_without_legacy_omit_or_return_contract(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_llm = FakeExternalAILLM()
-    original_analyze = fake_llm.analyze_video_frame_pair
-    original_direct = fake_llm.direct_frame_anchored_video_storyboard
+    class MinimalTextLLM(FakeExternalAILLM):
+        async def generate_frame_anchored_video_storyboard_text(self, *args, **kwargs):
+            del args, kwargs
+            self.calls.append("generate_frame_anchored_video_storyboard_text")
+            return SimpleNamespace(
+                storyboard_text="A continuous target-compatible action reaches a visible payoff."
+            )
 
-    async def analyze_with_required_core_behavior(
-        first_frame_image_url,
-        last_frame_image_url,
-        duration_seconds,
-        aspect_ratio,
-        **kwargs,
-    ):
-        del kwargs
-        return await original_analyze(
-            first_frame_image_url,
-            last_frame_image_url,
-            duration_seconds,
-            aspect_ratio,
-            reference_frames=[
-                ReferenceVideoFrame(timestamp_seconds=0, image_url="data:image/jpeg;base64,AAA"),
-                ReferenceVideoFrame(timestamp_seconds=2, image_url="data:image/jpeg;base64,BBB"),
-                ReferenceVideoFrame(timestamp_seconds=5.8, image_url="data:image/jpeg;base64,CCC"),
-            ],
-            reference_video_duration_seconds=5.8,
-            reference_video_sample_interval_seconds=2.0,
-        )
-
-    async def invalid_omit_director(*args, **kwargs):
-        plan = await original_direct(*args, **kwargs)
-        moment = plan.signature_moment_plan[0].model_copy(
-            update={
-                "strategy": "omit",
-                "adapted_action": "",
-                "temporary_divergence": "",
-                "camera_support": "",
-                "effect_support": "",
-                "visible_payoff": "",
-                "return_strategy": "",
-                "assigned_beat_id": None,
-                "omission_reason": "The action cannot match the final pose.",
-                "equivalent_replacement_failure": ("No equivalent preserves the ending framing."),
-                "literal_infeasibility_category": "endpoint_constraint_only",
-                "literal_infeasibility_evidence": "Only the final pose differs.",
-                "equivalent_infeasibility_category": "endpoint_constraint_only",
-                "equivalent_infeasibility_evidence": "Only the ending framing differs.",
-            }
-        )
-        return plan.model_copy(update={"signature_moment_plan": [moment]})
-
-    fake_llm.analyze_video_frame_pair = analyze_with_required_core_behavior
-    fake_llm.direct_frame_anchored_video_storyboard = invalid_omit_director
+    fake_llm = MinimalTextLLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-invalid-omit.db")
+    engine, session_factory = await _session_factory(
+        tmp_path, "storyboard-v2-no-legacy-omit-contract.db"
+    )
     service = ExternalAIGenerationService()
     async with session_factory() as session:
         task = GenerationTask(
             queue_name="text_queue",
             task_type="external_video_storyboard_v2",
             business_type="external_ai",
-            business_id="storyboard-v2-invalid-omit",
+            business_id="storyboard-v2-no-legacy-omit-contract",
             payload_json=_storyboard_v2_payload(),
             queued_at=utcnow(),
         )
@@ -2201,19 +2111,15 @@ async def test_storyboard_v2_invalid_omit_stops_after_call2(
         await session.commit()
         await session.refresh(task)
 
-        with pytest.raises(ProviderError) as excinfo:
-            await service.execute_frame_anchored_video_storyboard(session, task)
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
 
-        message = str(excinfo.value)
-        assert "invalid omission contract" in message
-        assert "signature/source linkage" not in message
-        assert "signature_action" not in message
-        assert "core_behavior" not in message
+        assert result["storyboard_text"] == (
+            "A continuous target-compatible action reaches a visible payoff."
+        )
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
         ]
-
     await engine.dispose()
 
 
@@ -2304,183 +2210,52 @@ async def test_private_namespace_normalization_revalidates_nested_models() -> No
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_prose(
+async def test_storyboard_v2_scrubs_private_tokens_without_scrubbing_natural_prose(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_llm = FakeExternalAILLM()
-    original_direct = fake_llm.direct_frame_anchored_video_storyboard
-    original_generate = fake_llm.generate_frame_anchored_video_storyboard
-    observed_call3_ids: dict[str, object] = {}
-
-    async def mixed_private_namespace_director(*args, **kwargs):
-        plan = await original_direct(*args, **kwargs)
-        old_beat_id = plan.climax_beats[0].beat_id
-        old_window_id = plan.action_arc_windows[0].window_id
-        old_moment_id = plan.signature_moment_plan[0].moment_id
-        reserved_beat = plan.climax_beats[0].model_copy(
-            update={
-                "beat_id": "__sbv2_beat_001__",
-                "attention_objective": "Preserve a separately reserved private beat.",
-            }
-        )
-        climax_beats = [
-            plan.climax_beats[0].model_copy(
-                update={
-                    "beat_id": " action ",
-                    "depends_on": [
-                        " action " if dependency == old_beat_id else dependency
-                        for dependency in plan.climax_beats[0].depends_on
-                    ],
-                }
-            ),
-            reserved_beat,
-        ]
-        action_arc_windows = [
-            window.model_copy(
-                update={
-                    "window_id": (
-                        "camera-action" if window.window_id == old_window_id else window.window_id
-                    ),
-                    "depends_on": [
-                        "camera-action" if dependency == old_window_id else dependency
-                        for dependency in window.depends_on
-                    ],
-                }
-            )
-            for window in plan.action_arc_windows
-        ]
-        signature_moment_plan = [
-            moment.model_copy(
-                update={
-                    "moment_id": (
-                        "subject" if moment.moment_id == old_moment_id else moment.moment_id
-                    ),
-                    "source_behavior_beat_ids": [" camera action "],
-                    "assigned_beat_id": (
-                        " action "
-                        if moment.assigned_beat_id == old_beat_id
-                        else moment.assigned_beat_id
-                    ),
-                }
-            )
-            for moment in plan.signature_moment_plan
-        ]
-        return plan.model_copy(
-            update={
-                "climax_beats": climax_beats,
-                "action_arc_windows": action_arc_windows,
-                "signature_moment_plan": signature_moment_plan,
-            }
-        )
-
-    async def natural_language_candidate(*args, **kwargs):
-        frame_analysis = kwargs["frame_analysis"]
-        plan = frame_analysis.director_plan
-        assert plan is not None
-        signature_moment = plan.signature_moment_plan[0]
-        private_ids = {
-            "behavior": signature_moment.source_behavior_beat_ids[0],
-            "beat": plan.climax_beats[0].beat_id,
-            "reserved_beat": plan.climax_beats[1].beat_id,
-            "window": plan.action_arc_windows[0].window_id,
-            "moment": signature_moment.moment_id,
-        }
-        observed_call3_ids.update(private_ids)
-        storyboard = await original_generate(*args, **kwargs)
-        action = storyboard.scenes[1].execution_actions[0]
-        storyboard.scenes[1].execution_actions = [
-            action,
-            action.model_copy(
-                update={
-                    "executor_kind": "target_object",
-                    "action_or_state_change": "a second target action executes visibly",
-                }
-            ),
-        ]
-        natural_sentence = "The camera follows the action while the subject moves."
-        storyboard.scenes[1].visual = (
-            f"{' '.join(private_ids.values())} __sbv2_claim_001__; {natural_sentence}"
-        )
-        storyboard.scenes[1].motion = natural_sentence
-        return storyboard
-
-    fake_llm.direct_frame_anchored_video_storyboard = mixed_private_namespace_director
-    fake_llm.generate_frame_anchored_video_storyboard = natural_language_candidate
-    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    client, engine, app = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        filename="external-ai-storyboard-v2-private-namespace.db",
+    natural_sentence = "primary-claimant is ordinary director prose."
+    raw_text = (
+        f"{natural_sentence} Execute __sbv2_claim_001__, "
+        "prefix.__sbv2_beat_002__-extra, and 中__sbv2_action:003__文"
     )
-    try:
-        created = client.post(
-            "/api/v1/integrations/ai/storyboard-v2",
-            headers=_authorized_headers(),
-            json=_storyboard_v2_payload(),
-        ).json()
-        job_id = created["data"]["job_id"]
-        polled = client.get(
-            f"/api/v1/integrations/ai/jobs/{job_id}",
-            headers=_authorized_headers(),
-        ).json()["data"]
 
-        assert polled["status"] == "succeeded"
-        natural_sentence = "The camera follows the action while the subject moves."
-        assert natural_sentence in polled["storyboard_text"]
-        assert "__sbv2_" not in polled["storyboard_text"]
-        assert "camera action" not in polled["storyboard_text"]
-        assert "camera-action" not in polled["storyboard_text"]
-        assert fake_llm.calls == [
-            "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
-        ]
-        assert observed_call3_ids == {
-            "behavior": "__sbv2_behavior_001__",
-            "beat": "__sbv2_beat_002__",
-            "reserved_beat": "__sbv2_beat_001__",
-            "window": "__sbv2_window_001__",
-            "moment": "__sbv2_moment_001__",
-        }
+    class PrivateTokenTextLLM(FakeExternalAILLM):
+        async def generate_frame_anchored_video_storyboard_text(self, *args, **kwargs):
+            del args, kwargs
+            self.calls.append("generate_frame_anchored_video_storyboard_text")
+            return SimpleNamespace(storyboard_text=raw_text)
 
-        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-            task = await session.get(GenerationTask, job_id)
-            assert task is not None
-            director_plan = task.metadata_json["frame_analysis"]["director_plan"]
-            assert [beat["beat_id"] for beat in director_plan["climax_beats"]] == [
-                "__sbv2_beat_002__",
-                "__sbv2_beat_001__",
-            ]
-            assert director_plan["signature_moment_plan"][0][
-                "source_behavior_beat_ids"
-            ] == ["__sbv2_behavior_001__"]
-            assert director_plan["action_arc_windows"][0]["window_id"] == (
-                "__sbv2_window_001__"
-            )
-            assert director_plan["signature_moment_plan"][0]["moment_id"] == (
-                "__sbv2_moment_001__"
-            )
-            assert director_plan["signature_moment_plan"][0]["assigned_beat_id"] == (
-                "__sbv2_beat_002__"
-            )
+    fake_llm = PrivateTokenTextLLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    engine, session_factory = await _session_factory(
+        tmp_path, "storyboard-v2-private-token-scrub.db"
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-private-token-scrub",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
 
-            candidate_payload = task.metadata_json["frame_anchored_storyboard_candidate"]
-            candidate = FrameAnchoredStoryboardDraft.model_validate(candidate_payload)
-            assert len(candidate.scenes[1].execution_actions) == 2
-            assert "execution_evidence" not in candidate_payload["scenes"][1]
-            assert "claim_id" not in candidate_payload["scenes"][1]["execution_actions"][0]
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
 
-            compiled = FrameAnchoredStoryboard.model_validate(
-                task.metadata_json["frame_anchored_storyboard"]
-            )
-            assert [
-                evidence.claim_id for evidence in compiled.scenes[1].execution_evidence
-            ] == ["__sbv2_claim_001__", "__sbv2_claim_002__"]
-    finally:
-        app.dependency_overrides.clear()
-        client.close()
-        await engine.dispose()
+        assert "__sbv2_" not in result["storyboard_text"]
+        assert natural_sentence in result["storyboard_text"]
+        await session.refresh(task)
+        assert (
+            task.metadata_json["frame_anchored_storyboard_text_candidate"]["storyboard_text"]
+            == raw_text
+        )
+
+    await engine.dispose()
 
 
 def test_claim_alias_replacement_is_longest_single_pass_and_unicode_safe() -> None:
@@ -2556,95 +2331,46 @@ def test_formatter_scrubs_canonical_claim_ids_adjacent_to_unicode_letters() -> N
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_compiler_owns_claim_ids_and_keeps_them_private(
+async def test_storyboard_v2_service_does_not_invoke_legacy_compiler(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_llm = FakeExternalAILLM()
-    original_generate = fake_llm.generate_frame_anchored_video_storyboard
 
-    async def two_action_candidate(*args, **kwargs):
-        storyboard = await original_generate(*args, **kwargs)
-        action = storyboard.scenes[1].execution_actions[0]
-        storyboard.scenes[1].execution_actions = [
-            action.model_copy(
-                update={
-                    "executor_kind": "target_subject",
-                    "action_or_state_change": "the target subject completes the strike",
-                }
-            ),
-            action.model_copy(
-                update={
-                    "executor_kind": "target_object",
-                    "action_or_state_change": "the target object visibly changes after impact",
-                }
-            ),
-        ]
-        return storyboard
+    def fail_if_called(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("legacy storyboard compiler must not run")
 
-    fake_llm.generate_frame_anchored_video_storyboard = two_action_candidate
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
-    client, engine, app = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        filename="storyboard-v2-compiler-owned-claims.db",
+    monkeypatch.setattr(
+        external_ai_service_module,
+        "compile_storyboard_v2",
+        fail_if_called,
+        raising=False,
     )
-    try:
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        service = ExternalAIGenerationService()
-        async with session_factory() as session:
-            task = GenerationTask(
-                queue_name="text_queue",
-                task_type="external_video_storyboard_v2",
-                business_type="external_ai",
-                business_id="compiler-owned-claims",
-                payload_json=_storyboard_v2_payload(),
-                queued_at=utcnow(),
-            )
-            session.add(task)
-            await session.commit()
-            await session.refresh(task)
-            result = await service.execute_frame_anchored_video_storyboard(session, task)
-            task.status = "succeeded"
-            task.result_json = result
-            session.add(task)
-            await session.commit()
-            job_id = task.id
-
-        polled = client.get(
-            f"/api/v1/integrations/ai/jobs/{job_id}",
-            headers=_authorized_headers(),
-        ).json()["data"]
-
-        assert polled["status"] == "succeeded"
-        assert "__sbv2_claim_" not in polled["storyboard_text"]
+    engine, session_factory = await _session_factory(
+        tmp_path, "storyboard-v2-no-legacy-compiler.db"
+    )
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-no-legacy-compiler",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
+        assert result["storyboard_text"]
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
         ]
-
-        async with session_factory() as session:
-            task = await session.get(GenerationTask, job_id)
-            assert task is not None
-            candidate_payload = task.metadata_json["frame_anchored_storyboard_candidate"]
-            candidate = FrameAnchoredStoryboardDraft.model_validate(candidate_payload)
-            assert len(candidate.scenes[1].execution_actions) == 2
-            assert all(
-                "claim_id" not in action
-                for action in candidate_payload["scenes"][1]["execution_actions"]
-            )
-
-            compiled = FrameAnchoredStoryboard.model_validate(
-                task.metadata_json["frame_anchored_storyboard"]
-            )
-            assert [
-                evidence.claim_id for evidence in compiled.scenes[1].execution_evidence
-            ] == ["__sbv2_claim_001__", "__sbv2_claim_002__"]
-    finally:
-        app.dependency_overrides.clear()
-        client.close()
-        await engine.dispose()
+    await engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -2723,37 +2449,25 @@ def test_canonical_private_id_scrub_respects_complete_safe_token_boundaries(
 
 
 @pytest.mark.asyncio
-async def test_storyboard_v2_polling_preserves_unregistered_longer_private_id_tokens(
+async def test_storyboard_v2_polling_scrubs_all_private_id_tokens(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_llm = FakeExternalAILLM()
-    original_generate = fake_llm.generate_frame_anchored_video_storyboard
-    canonical_longer_tokens = [
+    private_tokens = [
         "__sbv2_claim_001__-extra",
         "__sbv2_claim_001__:extra",
-        "__sbv2_claim_001__.extra",
-        "__sbv2_claim_001___extra",
-        "prefix-__sbv2_claim_001__",
-        "prefix:__sbv2_claim_001__",
         "prefix.__sbv2_claim_001__",
-        "prefix___sbv2_claim_001__",
-        "prefix.__sbv2_claim_001__-extra",
+        "中__sbv2_action:003__文",
     ]
+    raw_text = "Keep natural prose; scrub " + " ".join(private_tokens)
 
-    async def token_boundary_candidate(*args, **kwargs):
-        storyboard = await original_generate(*args, **kwargs)
-        storyboard.scenes[1].visual = (
-            f"{storyboard.scenes[1].visual} keep {' '.join(canonical_longer_tokens)}; "
-            "scrub \u4e2d__sbv2_claim_001__\u6587."
-        )
-        storyboard.scenes[-1].notes = (
-            f"{storyboard.scenes[-1].notes or ''} "
-            "scrub \u6536__sbv2_claim_001__\u675f."
-        )
-        return storyboard
+    class TokenBoundaryTextLLM(FakeExternalAILLM):
+        async def generate_frame_anchored_video_storyboard_text(self, *args, **kwargs):
+            del args, kwargs
+            self.calls.append("generate_frame_anchored_video_storyboard_text")
+            return SimpleNamespace(storyboard_text=raw_text)
 
-    fake_llm.generate_frame_anchored_video_storyboard = token_boundary_candidate
+    fake_llm = TokenBoundaryTextLLM()
     monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
     client, engine, app = await _client_with_db(
         tmp_path,
@@ -2788,34 +2502,99 @@ async def test_storyboard_v2_polling_preserves_unregistered_longer_private_id_to
         ).json()["data"]
 
         assert polled["status"] == "succeeded"
-        storyboard_text = polled["storyboard_text"]
-        for token in canonical_longer_tokens:
-            assert token in storyboard_text
-        assert "\u4e2d__sbv2_claim_001__\u6587" not in storyboard_text
-        assert "\u6536__sbv2_claim_001__\u675f" not in storyboard_text
-        assert "\u4e2dlinked item\u6587" in storyboard_text
-        assert "\u6536linked item\u675f" in storyboard_text
+        assert "__sbv2_" not in polled["storyboard_text"]
+        assert "Keep natural prose" in polled["storyboard_text"]
         assert fake_llm.calls == [
             "analyze_video_frame_pair",
-            "direct_frame_anchored_video_storyboard",
-            "generate_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard_text",
         ]
 
         async with session_factory() as session:
             task = await session.get(GenerationTask, job_id)
             assert task is not None
-            candidate_payload = task.metadata_json["frame_anchored_storyboard_candidate"]
-            candidate = FrameAnchoredStoryboardDraft.model_validate(candidate_payload)
-            assert candidate.scenes[1].execution_actions
-            assert "claim_id" not in candidate_payload["scenes"][1]["execution_actions"][0]
-
-            compiled = FrameAnchoredStoryboard.model_validate(
-                task.metadata_json["frame_anchored_storyboard"]
-            )
-            assert compiled.scenes[1].execution_evidence[0].claim_id == (
-                "__sbv2_claim_001__"
+            assert (
+                task.metadata_json["frame_anchored_storyboard_text_candidate"]["storyboard_text"]
+                == raw_text
             )
     finally:
         app.dependency_overrides.clear()
         client.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_latest_path_uses_only_analysis_and_final_text_model_calls(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-two-call-red.db")
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-two-call-red",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        result = await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "generate_frame_anchored_video_storyboard_text",
+        ]
+        assert "readable causal action" in result["storyboard_text"]
+        assert "__sbv2_" not in result["storyboard_text"]
+        await session.refresh(task)
+        assert task.metadata_json["frame_analysis"]["director_plan"] is None
+        assert task.metadata_json["frame_anchored_storyboard_text_candidate"]["storyboard_text"]
+        assert "director_action_coverage_review" not in task.metadata_json
+        assert "frame_anchored_storyboard" not in task.metadata_json
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_rejects_blank_final_storyboard_text(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlankStoryboardTextLLM(FakeExternalAILLM):
+        async def generate_frame_anchored_video_storyboard_text(self, *args, **kwargs):
+            del args, kwargs
+            self.calls.append("generate_frame_anchored_video_storyboard_text")
+            return SimpleNamespace(storyboard_text="   \n\t  ")
+
+    fake_llm = BlankStoryboardTextLLM()
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    engine, session_factory = await _session_factory(tmp_path, "storyboard-v2-blank-text-red.db")
+    service = ExternalAIGenerationService()
+    async with session_factory() as session:
+        task = GenerationTask(
+            queue_name="text_queue",
+            task_type="external_video_storyboard_v2",
+            business_type="external_ai",
+            business_id="storyboard-v2-blank-text-red",
+            payload_json=_storyboard_v2_payload(),
+            queued_at=utcnow(),
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+        with pytest.raises(ProviderError, match="empty frame-anchored storyboard text"):
+            await service.execute_frame_anchored_video_storyboard(session, task)
+
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "generate_frame_anchored_video_storyboard_text",
+        ]
+
+    await engine.dispose()
