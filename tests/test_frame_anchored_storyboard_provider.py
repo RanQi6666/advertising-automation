@@ -26,6 +26,7 @@ from backend.app.services.storyboard_director_coverage_service import (
     review_director_action_coverage,
     validate_final_storyboard_action_coverage,
 )
+from backend.app.services.storyboard_v2_compiler import compile_storyboard_v2
 
 FIRST_FRAME_URL = "https://cdn.example.test/first.png"
 LAST_FRAME_URL = "https://cdn.example.test/last.png"
@@ -1442,6 +1443,13 @@ async def test_gateway_storyboard_logs_sanitized_validation_details(
                     "end_second": 6,
                     "frame_anchor": "opening",
                     "visual": "Start from the supplied first frame.",
+                    "execution_actions": [
+                        {
+                            "executor_kind": "invalid_executor",
+                            "assertion": "affirmed",
+                            "action_or_state_change": "invalid structured action",
+                        }
+                    ],
                 },
                 {
                     "scene_index": 2,
@@ -1456,7 +1464,7 @@ async def test_gateway_storyboard_logs_sanitized_validation_details(
 
     with (
         caplog.at_level(logging.WARNING),
-        pytest.raises(ProviderError, match="invalid frame-anchored storyboard JSON"),
+        pytest.raises(ProviderError, match="invalid frame-anchored storyboard draft JSON"),
     ):
         await provider.generate_frame_anchored_video_storyboard(
             FIRST_FRAME_URL,
@@ -1467,8 +1475,8 @@ async def test_gateway_storyboard_logs_sanitized_validation_details(
         )
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "Frame-anchored storyboard JSON validation failed" in messages
-    assert "scenes.0.frame_anchor" in messages
+    assert "Frame-anchored storyboard draft JSON validation failed" in messages
+    assert "scenes.0.execution_actions.0.executor_kind" in messages
     assert "response_shape" in messages
     assert "data:image" not in messages
     assert "DO_NOT_LOG_THIS" not in messages
@@ -1606,9 +1614,11 @@ async def test_gateway_storyboard_sends_analysis_and_frame_rules() -> None:
     assert "one continuous scene may carry multiple" in system_prompt.lower()
     assert "exact beat_id" in system_prompt
     assert "signature_moment_plan" in system_prompt
-    assert "execution_evidence" in system_prompt
-    assert "claim_id" in system_prompt
-    assert "stable private claim identity" in system_prompt.lower()
+    assert "execution_actions" in system_prompt
+    assert "phase_tags" in system_prompt
+    assert "tension_stage_hint" in system_prompt
+    assert "do not output claim_id" in system_prompt.lower()
+    assert "do not output phase_evidence" in system_prompt.lower()
     assert "target_subject" in system_prompt
     assert "camera_support" in system_prompt
     assert "negated or static items never prove execution" in system_prompt.lower()
@@ -1696,10 +1706,11 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
     assert director_plan.action_arc_windows
     assert director_plan.signature_moment_plan
 
-    storyboard = await provider.generate_frame_anchored_video_storyboard(
+    analysis = analysis.model_copy(update={"director_plan": director_plan})
+    storyboard_draft = await provider.generate_frame_anchored_video_storyboard(
         FIRST_FRAME_URL,
         LAST_FRAME_URL,
-        analysis.model_copy(update={"director_plan": director_plan}),
+        analysis,
         duration_seconds,
         "9:16",
         director_corrections=[
@@ -1711,10 +1722,16 @@ async def test_mock_storyboard_merges_short_durations_with_core_evidence(
             )
         ],
     )
+    storyboard = compile_storyboard_v2(
+        storyboard_draft,
+        analysis,
+        duration_seconds=duration_seconds,
+        aspect_ratio="9:16",
+    )
 
     _assert_mock_scene_timing(storyboard, duration_seconds, expected_windows)
 
-    execution_scene = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
+    execution_scene = next(scene for scene in storyboard.scenes if scene.execution_evidence)
     assert all(evidence.claim_id for evidence in execution_scene.execution_evidence)
     assert len({evidence.claim_id for evidence in execution_scene.execution_evidence}) == len(
         execution_scene.execution_evidence
@@ -1794,8 +1811,14 @@ async def test_mock_director_and_storyboard_cover_every_core_behavior() -> None:
     analysis = analysis.model_copy(update={"director_plan": plan})
     review = review_director_action_coverage(analysis, plan)
     assert review.status == "pass"
-    storyboard = await provider.generate_frame_anchored_video_storyboard(
+    storyboard_draft = await provider.generate_frame_anchored_video_storyboard(
         FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 8, "9:16"
+    )
+    storyboard = compile_storyboard_v2(
+        storyboard_draft,
+        analysis,
+        duration_seconds=8,
+        aspect_ratio="9:16",
     )
     execution = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
     assert set(execution.signature_moment_ids) == {
@@ -1825,11 +1848,17 @@ async def test_mock_short_storyboard_shares_scene_for_all_core_behaviors() -> No
     analysis = analysis.model_copy(update={"director_plan": plan})
     review = review_director_action_coverage(analysis, plan)
 
-    storyboard = await provider.generate_frame_anchored_video_storyboard(
+    storyboard_draft = await provider.generate_frame_anchored_video_storyboard(
         FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 2, "9:16"
     )
+    storyboard = compile_storyboard_v2(
+        storyboard_draft,
+        analysis,
+        duration_seconds=2,
+        aspect_ratio="9:16",
+    )
 
-    execution = next(scene for scene in storyboard.scenes if scene.tension_stage == "climax")
+    execution = next(scene for scene in storyboard.scenes if scene.execution_evidence)
     assert set(execution.source_behavior_beat_ids) == {
         "core_behavior",
         "core_state_change",
@@ -2731,12 +2760,13 @@ async def test_provider_normalizes_structured_execution_evidence() -> None:
         FIRST_FRAME_URL, LAST_FRAME_URL, analysis, 12, "9:16"
     )
 
-    evidence = storyboard.scenes[1].execution_evidence[0]
-    assert evidence.claim_id == "execution_claim"
-    assert evidence.executor_kind == "target_object"
-    assert evidence.assertion == "affirmed"
-    assert evidence.signature_moment_ids == ["signature_action"]
-    assert evidence.source_behavior_beat_ids == ["core_behavior"]
+    action = storyboard.scenes[1].execution_actions[0]
+    assert action.executor_kind == "target_object"
+    assert action.assertion == "affirmed"
+    assert action.action_or_state_change == "object state changes visibly"
+    assert action.signature_moment_ids == ["signature_action"]
+    assert action.source_behavior_beat_ids == ["core_behavior"]
+    assert not hasattr(action, "claim_id")
 
 
 
@@ -2819,3 +2849,25 @@ def test_director_coverage_accepts_explicit_beat_with_strict_positive_overlap() 
     )
 
     validate_director_coverage(storyboard, director_plan)
+
+@pytest.mark.asyncio
+async def test_gateway_storyboard_draft_schema_excludes_private_claims() -> None:
+    provider, captured = _gateway_provider_with_responses(_action_storyboard_response())
+
+    await provider.generate_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    response_format = captured[0]["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["name"] == "frame_anchored_storyboard_draft"
+    assert response_format["strict"] is True
+    serialized_schema = json.dumps(response_format["schema"], ensure_ascii=False)
+    assert "claim_id" not in serialized_schema
+    assert "phase_evidence" not in serialized_schema
+    assert "execution_actions" in serialized_schema
+    assert "phase_tags" in serialized_schema

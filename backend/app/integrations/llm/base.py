@@ -10,7 +10,7 @@ from backend.app.schemas.ai import (
     DirectorActionCorrection,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
-    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardDraft,
     ImageBrief,
     ReferenceVideoFrame,
     TopicCandidate,
@@ -115,8 +115,8 @@ class LLMProvider(Protocol):
         duration_seconds: int,
         aspect_ratio: str,
         director_corrections: list[DirectorActionCorrection] | None = None,
-    ) -> FrameAnchoredStoryboard:
-        """Create an anchored storyboard using the same first and last frames."""
+    ) -> FrameAnchoredStoryboardDraft:
+        """Create a creative storyboard draft for deterministic backend compilation."""
 
     def stream_video_storyboard_text(
         self,

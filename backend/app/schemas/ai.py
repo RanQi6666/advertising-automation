@@ -565,6 +565,53 @@ _STORYBOARD_EXECUTION_CLAIM_ID_PATTERN = (
 StoryboardScenePhase = Literal["preparation", "action", "payoff", "return", "final_hold"]
 
 
+class StoryboardDraftExecutionAction(BaseModel):
+    executor_kind: StoryboardExecutionExecutorKind
+    assertion: StoryboardExecutionAssertion
+    action_or_state_change: str
+    signature_moment_ids: list[str] = Field(default_factory=list)
+    source_behavior_beat_ids: list[str] = Field(default_factory=list)
+
+
+class FrameAnchoredStoryboardDraftScene(BaseModel):
+    scene_index: int
+    start_second: float | None = None
+    end_second: float | None = None
+    # Creative hints are intentionally open strings. The compiler owns final anchors/stages.
+    frame_anchor: str
+    visual: str
+    motion: str | None = None
+    transition_goal: str | None = None
+    subtitle: str | None = None
+    voiceover: str | None = None
+    sound_effects: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    cinematic_beat: str | None = None
+    cinematic_beats: list[str] = Field(default_factory=list)
+    signature_moment_ids: list[str] = Field(default_factory=list)
+    source_behavior_beat_ids: list[str] = Field(default_factory=list)
+    phase_tags: list[StoryboardScenePhase] = Field(default_factory=list)
+    execution_actions: list[StoryboardDraftExecutionAction] = Field(default_factory=list)
+    camera_instruction: str | None = None
+    tension_stage_hint: str | None = None
+    action_result_requirement: str | None = None
+    effect_timing: str | None = None
+    subject_motion_intensity: float | None = None
+    camera_intensity: float | None = None
+    effect_intensity: float | None = None
+    anchor_return_instruction: str | None = None
+    overlay_instruction: DirectorOverlayInstruction | str | None = None
+    anti_flattening_requirement: str | None = None
+
+
+class FrameAnchoredStoryboardDraft(BaseModel):
+    duration_seconds: int
+    aspect_ratio: str
+    scenes: list[FrameAnchoredStoryboardDraftScene] = Field(default_factory=list)
+    sound_design: StoryboardSoundDesign = Field(default_factory=StoryboardSoundDesign)
+    rationale: str | None = None
+
+
 class StoryboardPhaseEvidence(BaseModel):
     phase: StoryboardScenePhase
     signature_moment_ids: list[str] = Field(min_length=1)
