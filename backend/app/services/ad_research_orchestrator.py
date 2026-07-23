@@ -73,6 +73,7 @@ class AdResearchOrchestrator:
         technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification] = {}
         scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
         model_scoring_failed_ids: set[str] = set()
+        used_query_ids: set[str] = set()
         used_query_keys: set[str] = set()
         used_queries: list[str] = []
         round_summaries: list[dict[str, Any]] = []
@@ -95,8 +96,9 @@ class AdResearchOrchestrator:
                 termination_reason = "query_planning_empty"
                 break
 
-            queries = _new_queries(
+            queries, skipped_query_diagnostics = _new_queries(
                 planned_queries,
+                used_query_ids,
                 used_query_keys,
                 used_queries,
                 round_number=round_number,
@@ -173,6 +175,9 @@ class AdResearchOrchestrator:
                     source_query_ids=source_query_ids_by_ad_library_id[ad.ad_library_id],
                 )
 
+            _refresh_scored_source_attribution(
+                scored_by_ad_library_id, source_query_ids_by_ad_library_id
+            )
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
             selected = scored[: job.target_count]
             twenty_fifth_score = _target_score(scored, job.target_count)
@@ -210,6 +215,7 @@ class AdResearchOrchestrator:
                     "queries": [query.query for query in collected_queries],
                     "planned_query_count": len(planned_queries),
                     "skipped_repeated_query_count": len(planned_queries) - len(queries),
+                    "skipped_query_diagnostics": skipped_query_diagnostics,
                     "round_raw_collected": round_raw_collected,
                     "round_new_candidates": round_new_candidates,
                     "query_metrics": query_metrics,
@@ -228,6 +234,7 @@ class AdResearchOrchestrator:
                 "technical_rejection_summary": technical_rejection_summary,
                 "model_scoring_failed": len(model_scoring_failed_ids),
                 "duplicate_count": raw_collected - len(candidates),
+                "skipped_query_diagnostics": skipped_query_diagnostics,
             }
 
             has_target = len(scored) >= job.target_count
@@ -261,6 +268,9 @@ class AdResearchOrchestrator:
                 )
                 break
 
+        _refresh_scored_source_attribution(
+            scored_by_ad_library_id, source_query_ids_by_ad_library_id
+        )
         scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
         selected = scored[: job.target_count]
         status = "completed" if len(scored) >= job.target_count else "insufficient"
@@ -395,11 +405,13 @@ class AdResearchOrchestrator:
 
 def _new_queries(
     planned_queries: QueryPlan | list[str],
+    used_query_ids: set[str],
     used_query_keys: set[str],
     used_queries: list[str],
     *,
     round_number: int,
-) -> list[_ResolvedQuery]:
+) -> tuple[list[_ResolvedQuery], list[dict[str, str]]]:
+    is_structured_plan = isinstance(planned_queries, QueryPlan)
     source_queries = (
         (
             _ResolvedQuery(
@@ -409,7 +421,7 @@ def _new_queries(
             )
             for planned_query in planned_queries.queries
         )
-        if isinstance(planned_queries, QueryPlan)
+        if is_structured_plan
         else (
             _ResolvedQuery(
                 query_id=f"legacy_r{round_number}_q{index:02d}",
@@ -420,11 +432,35 @@ def _new_queries(
         )
     )
     queries: list[_ResolvedQuery] = []
+    skipped_diagnostics: list[dict[str, str]] = []
+    expected_query_id_prefix = f"r{round_number}_q"
     for planned_query in source_queries:
+        query_id_key = planned_query.query_id.casefold()
+        if query_id_key in used_query_ids:
+            skipped_diagnostics.append(
+                {"query_id": planned_query.query_id, "reason": "query_id_already_used"}
+            )
+            continue
+        if is_structured_plan and not query_id_key.startswith(expected_query_id_prefix):
+            skipped_diagnostics.append(
+                {"query_id": planned_query.query_id, "reason": "query_id_wrong_round"}
+            )
+            continue
+
         normalized = " ".join(planned_query.query.split())
         query_key = normalized.casefold()
-        if not normalized or query_key in used_query_keys:
+        if not normalized:
+            skipped_diagnostics.append(
+                {"query_id": planned_query.query_id, "reason": "query_empty"}
+            )
             continue
+        if query_key in used_query_keys:
+            skipped_diagnostics.append(
+                {"query_id": planned_query.query_id, "reason": "query_already_used"}
+            )
+            continue
+
+        used_query_ids.add(query_id_key)
         used_query_keys.add(query_key)
         used_queries.append(normalized)
         queries.append(
@@ -434,7 +470,17 @@ def _new_queries(
                 intent=planned_query.intent,
             )
         )
-    return queries
+    return queries, skipped_diagnostics
+
+
+def _refresh_scored_source_attribution(
+    scored_by_ad_library_id: dict[str, dict[str, Any]],
+    source_query_ids_by_ad_library_id: dict[str, list[str]],
+) -> None:
+    for ad_library_id, scored in scored_by_ad_library_id.items():
+        source_query_ids = source_query_ids_by_ad_library_id[ad_library_id]
+        scored["first_source_query_id"] = source_query_ids[0]
+        scored["source_query_ids"] = list(source_query_ids)
 
 
 def _public_continuity_points(active_days: int | None) -> float:

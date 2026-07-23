@@ -60,10 +60,15 @@ class Media:
         self.rejected = rejected or {}
         self.retain_calls: list[set[str]] = []
         self.low_confidence_calls: list[str] = []
+        self.inspect_calls_by_ad_id: dict[str, int] = {}
 
     async def inspect_many(
         self, items: list[CollectorAd], *, job_id: str
     ) -> dict[str, TechnicalQualification]:
+        for item in items:
+            self.inspect_calls_by_ad_id[item.ad_library_id] = (
+                self.inspect_calls_by_ad_id.get(item.ad_library_id, 0) + 1
+            )
         return {item.ad_library_id: self._qualification(item) for item in items}
 
     async def add_low_confidence_frames(
@@ -569,3 +574,134 @@ async def test_orchestrator_collects_plain_query_text_from_structured_query_plan
     assert result.status == "completed"
     assert collector.queries == ["rummy bonus"]
     assert all("PlannedQuery(" not in query for query in collector.queries)
+
+@pytest.mark.asyncio
+async def test_orchestrator_refreshes_scored_ad_sources_across_rounds_without_rescoring() -> None:
+    shared = candidate(19)
+    second_only = candidate(20)
+    first_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="first",
+                intent="game_gambling",
+                rationale="Initial query.",
+            ),
+        )
+    )
+    second_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r2_q01",
+                query="second",
+                intent="sports_betting",
+                rationale="Supplement query.",
+            ),
+        )
+    )
+    collector = QueryCollector({"first": [shared], "second": [shared, second_only]})
+    media = Media()
+    model = Model(plans=[first_plan, second_plan])
+
+    result = await run_custom(collector=collector, media=media, model=model, target_count=2)
+
+    assert result.status == "completed"
+    ads_by_id = {item["ad_library_id"]: item for item in result.ads}
+    assert ads_by_id[shared.ad_library_id]["first_source_query_id"] == "r1_q01"
+    assert ads_by_id[shared.ad_library_id]["source_query_ids"] == ["r1_q01", "r2_q01"]
+    assert model.score_calls_by_ad_id == {shared.ad_library_id: 1, second_only.ad_library_id: 1}
+    assert media.inspect_calls_by_ad_id == {shared.ad_library_id: 1, second_only.ad_library_id: 1}
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_reused_or_wrong_round_structured_query_ids() -> None:
+    first = candidate(21)
+    second = candidate(22)
+    first_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="first",
+                intent="game_gambling",
+                rationale="Initial query.",
+            ),
+        )
+    )
+    second_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="duplicate id",
+                intent="game_gambling",
+                rationale="Invalid repeat.",
+            ),
+            PlannedQuery(
+                query_id="r1_q02",
+                query="wrong round",
+                intent="sports_betting",
+                rationale="Invalid round.",
+            ),
+            PlannedQuery(
+                query_id="r2_q01",
+                query="second",
+                intent="local_exploration",
+                rationale="Valid second-round query.",
+            ),
+        )
+    )
+    collector = QueryCollector({"first": [first], "second": [second]})
+    result = await run_custom(
+        collector=collector,
+        media=Media(),
+        model=Model(plans=[first_plan, second_plan]),
+        target_count=3,
+    )
+
+    assert result.status == "insufficient"
+    assert collector.queries == ["first", "second"]
+    assert [item["query_id"] for item in result.summary["query_metrics"]] == ["r1_q01", "r2_q01"]
+    round_two = result.summary["rounds"][1]
+    assert round_two["skipped_repeated_query_count"] == 2
+    assert round_two["skipped_query_diagnostics"] == [
+        {"query_id": "r1_q01", "reason": "query_id_already_used"},
+        {"query_id": "r1_q02", "reason": "query_id_wrong_round"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_accepts_valid_second_round_structured_query_plan() -> None:
+    first = candidate(23)
+    second = candidate(24)
+    first_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="first",
+                intent="game_gambling",
+                rationale="Initial query.",
+            ),
+        )
+    )
+    second_plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r2_q01",
+                query="second",
+                intent="sports_betting",
+                rationale="Valid second-round query.",
+            ),
+        )
+    )
+    collector = QueryCollector({"first": [first], "second": [second]})
+
+    result = await run_custom(
+        collector=collector,
+        media=Media(),
+        model=Model(plans=[first_plan, second_plan]),
+        target_count=2,
+    )
+
+    assert result.status == "completed"
+    assert collector.queries == ["first", "second"]
+    assert [item["query_id"] for item in result.summary["query_metrics"]] == ["r1_q01", "r2_q01"]
+    assert result.summary["rounds"][1]["skipped_query_diagnostics"] == []
