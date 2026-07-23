@@ -30,12 +30,12 @@ def candidate(index: int, *, active_days: int = 3) -> CollectorAd:
     )
 
 
-def prepared_media(*, frame_count: int = 3) -> PreparedAdMedia:
+def prepared_media(*, frame_count: int = 3, marker: str = "default") -> PreparedAdMedia:
     frame_urls = tuple(
         f"https://ai.example/storage/frame-{index}.jpg" for index in range(frame_count)
     )
     return PreparedAdMedia(
-        cover_url="https://ai.example/storage/cover.jpg",
+        cover_url=f"https://ai.example/storage/{marker}/cover.jpg",
         cover_source="generated_frame",
         frame_urls=frame_urls,
         local_frame_paths=tuple(Path(f"frame-{index}.jpg") for index in range(frame_count)),
@@ -71,7 +71,10 @@ class Media:
     ) -> TechnicalQualification:
         self.low_confidence_calls.append(item.ad_library_id)
         assert qualification.media is not None
-        return replace(qualification, media=prepared_media(frame_count=5))
+        return replace(
+            qualification,
+            media=prepared_media(frame_count=5, marker=item.ad_library_id),
+        )
 
     async def retain_only(self, job_id: str, ad_library_ids: set[str]) -> None:
         self.retain_calls.append(ad_library_ids)
@@ -86,7 +89,7 @@ class Media:
             reasons=reasons,
             duration_seconds=item.duration_seconds,
             active_days=item.days_running,
-            media=None if reasons else prepared_media(),
+            media=None if reasons else prepared_media(marker=item.ad_library_id),
         )
 
 
@@ -114,20 +117,36 @@ class Model:
         return [f"query-{kwargs['round_number']}"]
 
     async def score_visual(
-        self, *, category: str, candidate: CollectorAd, media: PreparedAdMedia
+        self, *, category: str, duration_seconds: float, media: PreparedAdMedia
     ) -> dict[str, Any]:
-        if candidate.ad_library_id in self.fail_ids:
+        marker = str(media.cover_url or "").split("/")[-2]
+        if marker in self.fail_ids:
             raise RuntimeError("model unavailable")
-        self.score_calls_by_ad_id[candidate.ad_library_id] = (
-            self.score_calls_by_ad_id.get(candidate.ad_library_id, 0) + 1
-        )
-        total = self.score_by_ad_id.get(candidate.ad_library_id, 80.0)
-        confidence = self.confidence_by_ad_id.get(candidate.ad_library_id, 0.9)
+        self.score_calls_by_ad_id[marker] = self.score_calls_by_ad_id.get(marker, 0) + 1
+        total = self.score_by_ad_id.get(marker, 80.0)
+        confidence = self.confidence_by_ad_id.get(marker, 0.9)
+        remaining = max(float(total), 0.0)
+        dimensions: dict[str, float] = {}
+        for key, maximum in (
+            ("gameplay_gambling_points", 40.0),
+            ("multi_signal_style_points", 20.0),
+            ("betting_mechanism_points", 15.0),
+            ("gambling_visual_style_points", 10.0),
+            ("visual_clarity_points", 10.0),
+            ("media_quality_points", 5.0),
+        ):
+            dimensions[key] = min(remaining, maximum)
+            remaining -= dimensions[key]
         return {
-            "visual_total": total,
+            "visual_priority": "game_gambling",
+            **dimensions,
+            "visual_total": -9999,
             "analysis_confidence": confidence,
-            "visible_elements": [f"visible-{candidate.ad_library_id}", "slot ui"],
-            "visual_evidence": [{"frame_index": 0, "evidence": "slot ui"}],
+            "gambling_signals": [f"visible-{marker}", "slot ui"],
+            "game_visual_present": True,
+            "visual_evidence": [{"frame_index": 0, "detail": "slot ui"}],
+            "retrieval_hints": ["slot ui"],
+            "uncertain": False,
         }
 
 
@@ -258,6 +277,38 @@ async def test_orchestrator_does_not_apply_text_or_category_hard_rejection() -> 
     assert result.ads[0]["visual_total"] == 70.0
     assert "category_match" not in result.ads[0]
     assert result.summary["model_relevant"] == result.summary["model_scored"] == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_passes_only_category_duration_and_media_to_visual_model() -> None:
+    item = candidate(31, active_days=17)
+    item.text_variants = ["candidate text must not reach visual scorer"]
+    collector = QueryCollector({"first": [item]})
+    media = Media()
+
+    class StrictVisualModel(Model):
+        def __init__(self) -> None:
+            super().__init__(plans=[["first"]])
+            self.calls: list[dict[str, Any]] = []
+
+        async def score_visual(
+            self, *, category: str, duration_seconds: float, media: PreparedAdMedia
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {"category": category, "duration_seconds": duration_seconds, "media": media}
+            )
+            return await super().score_visual(
+                category=category, duration_seconds=duration_seconds, media=media
+            )
+
+    model = StrictVisualModel()
+    result = await run_custom(collector=collector, media=media, model=model, target_count=1)
+
+    assert result.status == "completed"
+    assert len(model.calls) == 1
+    assert model.calls[0]["category"] == "gambling"
+    assert model.calls[0]["duration_seconds"] == 20.0
+    assert isinstance(model.calls[0]["media"], PreparedAdMedia)
 
 
 @pytest.mark.asyncio

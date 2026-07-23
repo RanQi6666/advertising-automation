@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from backend.app.core.config import get_settings
-from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia
 from backend.app.services.ad_research_model import (
     AdResearchModel,
@@ -49,14 +48,18 @@ def gateway_model_that_captures_request(
             json={
                 "output_text": json.dumps(
                     {
-                        "core_gambling_points": 40,
-                        "reward_ui_points": 8,
-                        "gambling_style_points": 4,
-                        "casino_context_points": 2,
+                        "visual_priority": "game_gambling",
+                        "gameplay_gambling_points": 40,
+                        "multi_signal_style_points": 8,
+                        "betting_mechanism_points": 4,
+                        "gambling_visual_style_points": 2,
+                        "visual_clarity_points": 10,
                         "media_quality_points": 5,
                         "analysis_confidence": 0.8,
-                        "visible_elements": ["slot reels", "coins"],
+                        "gambling_signals": ["slot reels", "coins"],
+                        "game_visual_present": True,
                         "visual_evidence": [{"frame_index": 0, "detail": "slot reels are visible"}],
+                        "retrieval_hints": ["slot ui"],
                         "uncertain": False,
                     }
                 )
@@ -258,7 +261,7 @@ async def test_model_planner_invalid_model_response_uses_deterministic_fallback(
 
 
 @pytest.mark.asyncio
-async def test_visual_score_sends_only_media_metadata_and_three_input_images(
+async def test_visual_score_sends_exact_pure_visual_metadata_and_three_input_images(
     monkeypatch, tmp_path
 ) -> None:
     captured: dict[str, object] = {}
@@ -267,87 +270,94 @@ async def test_visual_score_sends_only_media_metadata_and_three_input_images(
 
     result = await model.score_visual(
         category="gambling",
-        candidate=CollectorAd(
-            ad_library_id="ad-1",
-            text_variants=["must not be sent"],
-            headline="must not be sent",
-            cta_text="must not be sent",
-            advertiser_name="must not be sent",
-            landing_url="https://must-not-be-sent.example",
-            days_running=3,
-            duration_seconds=15,
-        ),
+        duration_seconds=15.0,
         media=media,
     )
 
     user_content = captured["input"][1]["content"]
     text_blocks = [part["text"] for part in user_content if part["type"] == "input_text"]
+    assert len(text_blocks) == 1
+    assert json.loads(text_blocks[0]) == {
+        "category": "gambling",
+        "media": {"duration_seconds": 15.0, "frame_count": 3},
+    }
     assert len([part for part in user_content if part["type"] == "input_image"]) == 3
-    assert all("must not be sent" not in block for block in text_blocks)
+    forbidden_terms = (
+        "active_days",
+        "advertiser",
+        "\u4e3b\u9875",
+        "\u6b63\u6587",
+        "\u6807\u9898",
+        "CTA",
+        "URL",
+        "\u843d\u5730\u9875",
+        "query",
+        "\u5173\u952e\u8bcd",
+        "public_continuity_points",
+    )
+    request_text = "\n".join([str(captured["input"][0]["content"]), *text_blocks])
+    assert all(term.casefold() not in request_text.casefold() for term in forbidden_terms)
     assert captured["reasoning"] == {"effort": "none"}
-    assert result["core_gambling_points"] == 40.0
+    assert result["gameplay_gambling_points"] == 40.0
     await client.aclose()
 
 
-def test_visual_score_validation_clamps_points_and_removes_invalid_evidence() -> None:
+def test_visual_score_validation_clamps_dimensions_recomputes_total_and_sanitizes_output() -> None:
     result = _validated_visual_score(
         {
-            "core_gambling_points": 99,
-            "reward_ui_points": -4,
-            "gambling_style_points": 99,
-            "casino_context_points": 99,
+            "visual_priority": "not-allowed",
+            "gameplay_gambling_points": 99,
+            "multi_signal_style_points": -4,
+            "betting_mechanism_points": 99,
+            "gambling_visual_style_points": 99,
+            "visual_clarity_points": 99,
             "media_quality_points": 99,
+            "visual_total": 99999,
             "analysis_confidence": 9,
-            "visible_elements": "not-a-list",
+            "gambling_signals": ["  slot reels  ", "", 8, "x" * 121],
+            "game_visual_present": 1,
             "visual_evidence": [
-                {"frame_index": 0, "detail": "valid"},
+                {"frame_index": 0, "detail": " valid ", "ignored": "x"},
                 {"frame_index": 5, "detail": "out of range"},
                 {"frame_index": "x", "detail": "invalid"},
             ],
-            "recommendation": "keep",
-            "category_match": True,
-            "is_obviously_unrelated": False,
-            "category_confidence": 1,
+            "retrieval_hints": ["  slot ui  ", "", 9, "x" * 121],
+            "uncertain": True,
         },
         frame_count=3,
     )
 
-    assert result["core_gambling_points"] == 40.0
-    assert result["reward_ui_points"] == 0.0
-    assert result["gambling_style_points"] == 15.0
-    assert result["casino_context_points"] == 10.0
+    assert result["visual_priority"] == "unrelated"
+    assert result["gameplay_gambling_points"] == 40.0
+    assert result["multi_signal_style_points"] == 0.0
+    assert result["betting_mechanism_points"] == 15.0
+    assert result["gambling_visual_style_points"] == 10.0
+    assert result["visual_clarity_points"] == 10.0
     assert result["media_quality_points"] == 5.0
+    assert result["visual_total"] == 80.0
     assert result["analysis_confidence"] == 1.0
-    assert result["visible_elements"] == []
+    assert result["gambling_signals"] == ["slot reels", "8"]
+    assert result["game_visual_present"] is True
     assert result["visual_evidence"] == [{"frame_index": 0, "detail": "valid"}]
-    for deprecated_key in (
-        "recommendation",
-        "category_match",
-        "is_obviously_unrelated",
-        "category_confidence",
-    ):
-        assert deprecated_key not in result
+    assert result["retrieval_hints"] == ["slot ui", "9"]
+    assert result["uncertain"] is True
 
 
 @pytest.mark.asyncio
-async def test_mock_visual_score_does_not_read_candidate_text(tmp_path, monkeypatch) -> None:
+async def test_mock_visual_score_uses_only_prepared_media(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     get_settings.cache_clear()
     model = AdResearchModel(limiter=Limiter())
 
     result = await model.score_visual(
         category="gambling",
-        candidate=CollectorAd(
-            ad_library_id="ad-1",
-            text_variants=["this must never control mock score"],
-            headline="same",
-            cta_text="same",
-        ),
+        duration_seconds=15.0,
         media=prepared_media_with_three_frames(tmp_path),
     )
 
     assert result["media_quality_points"] == 5.0
     assert result["visual_total"] == 5.0
+    assert result["visual_priority"] == "unrelated"
 
 
 @pytest.mark.asyncio

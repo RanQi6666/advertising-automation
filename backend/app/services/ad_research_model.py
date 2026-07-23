@@ -16,7 +16,6 @@ from redis import asyncio as redis_async
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
-from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia
 
 QueryIntent = Literal[
@@ -304,7 +303,7 @@ class AdResearchModel:
         self,
         *,
         category: str,
-        candidate: CollectorAd,
+        duration_seconds: float,
         media: PreparedAdMedia,
     ) -> dict[str, Any]:
         if self.settings.llm_provider == "mock":
@@ -316,8 +315,7 @@ class AdResearchModel:
                     {
                         "category": category,
                         "media": {
-                            "duration_seconds": candidate.duration_seconds,
-                            "active_days": candidate.days_running,
+                            "duration_seconds": duration_seconds,
                             "frame_count": len(media.local_frame_paths),
                         },
                     },
@@ -399,17 +397,29 @@ class AdResearchModel:
 
 
 _VISUAL_SCORING_SYSTEM_PROMPT = """
-Score this public advertisement only from the supplied video-frame images. Return JSON only with:
-core_gambling_points, reward_ui_points, gambling_style_points, casino_context_points,
-media_quality_points, analysis_confidence, visible_elements, visual_evidence, uncertain.
-Use these maximums: core_gambling_points 40, reward_ui_points 20, gambling_style_points 15,
-casino_context_points 10, media_quality_points 5. Direct gambling gameplay or UI gets the
-strongest score: slots, 777, roulette, cards, live dealers, dice, Aviator/Crash, fishing-game
-gambling UI, bets, odds, or balances. Coins, crystals, reward chests, Jackpot, Bonus,
-multipliers, big-win effects, WIN, VIP, and reward UI/effects can also receive points as
-casino-style evidence. Score only visible content in the provided images. Do not infer from
-ad copy, audio, advertiser, page, URL, landing page, or facts not provided. visual_evidence
-must be a list of objects with frame_index and detail. Do not return a recommendation,
+Score this public advertisement only from the supplied video-frame images. Return one JSON object
+only with: visual_priority, gameplay_gambling_points, multi_signal_style_points,
+betting_mechanism_points, gambling_visual_style_points, visual_clarity_points,
+media_quality_points, analysis_confidence, gambling_signals, game_visual_present,
+visual_evidence, retrieval_hints, uncertain. Do not return visual_total.
+
+Use these strict maximums: gameplay_gambling_points 40, multi_signal_style_points 20,
+betting_mechanism_points 15, gambling_visual_style_points 10, visual_clarity_points 10,
+media_quality_points 5. Score only visible content in the supplied images. Ignore all information
+outside those images.
+
+visual_priority must be exactly one of:
+- game_gambling: direct gambling gameplay, OR clear game visuals plus at least two visible
+  gambling, reward, or gamification signals. Evidence can include coins, crystals, WIN, VIP,
+  bonus, lottery, reels, card tables, or similar. Prefer this class when both game and gambling
+  are visible.
+- sports_betting: both a sports match and odds, betting, amounts, wallet, balance, or settlement
+  are visible. Ordinary sports, scores, or prediction channels are not sports_betting.
+- gambling_adjacent: only limited related visual clues are visible.
+- unrelated: insufficient visible evidence.
+
+visual_evidence must be a list of objects with frame_index and detail. gambling_signals and
+retrieval_hints must be short lists of visible visual cues. Do not return a recommendation,
 category_match, category_confidence, or is_obviously_unrelated field.
 """.strip()
 
@@ -642,45 +652,61 @@ def _unique_queries(values: list[Any]) -> list[str]:
 
 
 def _mock_visual_score(media: PreparedAdMedia) -> dict[str, Any]:
-    media_quality_points = 5.0 if media.local_frame_paths else 0.0
+    has_frames = bool(media.local_frame_paths)
+    media_quality_points = 5.0 if has_frames else 0.0
     return {
-        "core_gambling_points": 0.0,
-        "reward_ui_points": 0.0,
-        "gambling_style_points": 0.0,
-        "casino_context_points": 0.0,
+        "visual_priority": "unrelated",
+        "gameplay_gambling_points": 0.0,
+        "multi_signal_style_points": 0.0,
+        "betting_mechanism_points": 0.0,
+        "gambling_visual_style_points": 0.0,
+        "visual_clarity_points": 0.0,
         "media_quality_points": media_quality_points,
-        "analysis_confidence": 1.0 if media.local_frame_paths else 0.0,
-        "visible_elements": [],
+        "analysis_confidence": 1.0 if has_frames else 0.0,
+        "gambling_signals": [],
+        "game_visual_present": False,
         "visual_evidence": [],
-        "uncertain": not bool(media.local_frame_paths),
+        "retrieval_hints": [],
+        "uncertain": not has_frames,
         "visual_total": media_quality_points,
     }
 
 
+_VISUAL_PRIORITIES = frozenset(
+    {"game_gambling", "sports_betting", "gambling_adjacent", "unrelated"}
+)
+_VISUAL_SCORE_DIMENSIONS = (
+    ("gameplay_gambling_points", 40.0),
+    ("multi_signal_style_points", 20.0),
+    ("betting_mechanism_points", 15.0),
+    ("gambling_visual_style_points", 10.0),
+    ("visual_clarity_points", 10.0),
+    ("media_quality_points", 5.0),
+)
+
+
 def _validated_visual_score(data: Any, *, frame_count: int) -> dict[str, Any]:
     payload = data if isinstance(data, dict) else {}
+    visual_priority = payload.get("visual_priority")
     result = {
-        "core_gambling_points": _bounded_score(payload.get("core_gambling_points"), 40.0),
-        "reward_ui_points": _bounded_score(payload.get("reward_ui_points"), 20.0),
-        "gambling_style_points": _bounded_score(payload.get("gambling_style_points"), 15.0),
-        "casino_context_points": _bounded_score(payload.get("casino_context_points"), 10.0),
-        "media_quality_points": _bounded_score(payload.get("media_quality_points"), 5.0),
+        "visual_priority": (
+            visual_priority
+            if isinstance(visual_priority, str) and visual_priority in _VISUAL_PRIORITIES
+            else "unrelated"
+        ),
+        **{
+            key: _bounded_score(payload.get(key), maximum)
+            for key, maximum in _VISUAL_SCORE_DIMENSIONS
+        },
         "analysis_confidence": _bounded_score(payload.get("analysis_confidence"), 1.0),
-        "visible_elements": _strings(payload.get("visible_elements"), limit=12, width=120),
+        "gambling_signals": _clean_strings(payload.get("gambling_signals"), limit=12, width=120),
+        "game_visual_present": bool(payload.get("game_visual_present")),
         "visual_evidence": _visual_evidence(payload.get("visual_evidence"), frame_count),
+        "retrieval_hints": _clean_strings(payload.get("retrieval_hints"), limit=12, width=120),
         "uncertain": bool(payload.get("uncertain")),
     }
     result["visual_total"] = round(
-        sum(
-            float(result[key])
-            for key in (
-                "core_gambling_points",
-                "reward_ui_points",
-                "gambling_style_points",
-                "casino_context_points",
-                "media_quality_points",
-            )
-        ),
+        sum(float(result[key]) for key, _ in _VISUAL_SCORE_DIMENSIONS),
         2,
     )
     return result
@@ -694,17 +720,22 @@ def _bounded_score(value: Any, maximum: float) -> float:
     return max(0.0, min(maximum, parsed))
 
 
-def _strings(value: Any, *, limit: int, width: int) -> list[str]:
+def _clean_strings(value: Any, *, limit: int, width: int) -> list[str]:
     if not isinstance(value, list):
         return []
     values: list[str] = []
     for item in value:
-        rendered = str(item).strip()
-        if rendered:
-            values.append(rendered[:width])
+        text = " ".join(str(item).replace("\x00", " ").split()).strip()
+        if text and len(text) <= width:
+            values.append(text)
         if len(values) >= limit:
             break
     return values
+
+
+def _clean_text(value: Any, *, width: int) -> str:
+    text = str(value).replace("\x00", " ")
+    return " ".join(text.split())[:width].strip()
 
 
 def _visual_evidence(value: Any, frame_count: int) -> list[dict[str, Any]]:
@@ -715,7 +746,7 @@ def _visual_evidence(value: Any, frame_count: int) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         frame_index = item.get("frame_index")
-        detail = str(item.get("detail") or "").strip()
+        detail = _clean_text(item.get("detail") or "", width=300)
         if (
             isinstance(frame_index, bool)
             or not isinstance(frame_index, int)
@@ -724,7 +755,7 @@ def _visual_evidence(value: Any, frame_count: int) -> list[dict[str, Any]]:
             or not detail
         ):
             continue
-        evidence.append({"frame_index": frame_index, "detail": detail[:300]})
+        evidence.append({"frame_index": frame_index, "detail": detail})
         if len(evidence) >= 12:
             break
     return evidence

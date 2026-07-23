@@ -19,7 +19,11 @@ from backend.app.services.ad_research_media import (
     PreparedAdMedia,
     TechnicalQualification,
 )
-from backend.app.services.ad_research_model import AdResearchModel, QueryPlan
+from backend.app.services.ad_research_model import (
+    AdResearchModel,
+    QueryPlan,
+    _validated_visual_score,
+)
 from backend.app.services.ad_research_service import AdResearchService
 
 MAX_ROUNDS = 4
@@ -243,10 +247,14 @@ class AdResearchOrchestrator:
     ) -> list[tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, bool]]:
         semaphore = asyncio.Semaphore(max(int(self.settings.ad_research_model_concurrency), 1))
 
-        async def call_model(candidate: CollectorAd, media: PreparedAdMedia) -> dict[str, Any]:
+        async def call_model(
+            media_duration_seconds: float, media: PreparedAdMedia
+        ) -> dict[str, Any]:
             async with semaphore:
                 return await self.model.score_visual(
-                    category=category, candidate=candidate, media=media
+                    category=category,
+                    duration_seconds=float(media_duration_seconds),
+                    media=media,
                 )
 
         async def score_one(
@@ -256,7 +264,7 @@ class AdResearchOrchestrator:
             if media is None:
                 return candidate, qualification, None, True
             try:
-                score = await call_model(candidate, media)
+                score = await call_model(qualification.duration_seconds, media)
             except Exception:
                 return candidate, qualification, None, True
 
@@ -272,7 +280,7 @@ class AdResearchOrchestrator:
             if enriched.media is None:
                 return candidate, qualification, score, False
             try:
-                rescored = await call_model(candidate, enriched.media)
+                rescored = await call_model(enriched.duration_seconds, enriched.media)
             except Exception:
                 return candidate, qualification, score, False
             return candidate, enriched, rescored, False
@@ -378,7 +386,11 @@ def _public_result(
     media = qualification.media
     if media is None:
         raise ValueError("qualified ad research candidate has no prepared media")
-    visual_total = float(visual_score.get("visual_total") or 0)
+    visual_score = _validated_visual_score(
+        visual_score,
+        frame_count=len(media.local_frame_paths),
+    )
+    visual_total = float(visual_score["visual_total"])
     public_continuity_points = _public_continuity_points(qualification.active_days)
     return {
         "ad_library_id": ad.ad_library_id,
@@ -395,9 +407,21 @@ def _public_result(
         "final_score": round(visual_total + public_continuity_points, 2),
         "visual_total": visual_total,
         "public_continuity_points": public_continuity_points,
+        "visual_priority": str(visual_score.get("visual_priority") or "unrelated"),
+        "gameplay_gambling_points": float(visual_score.get("gameplay_gambling_points") or 0),
+        "multi_signal_style_points": float(visual_score.get("multi_signal_style_points") or 0),
+        "betting_mechanism_points": float(visual_score.get("betting_mechanism_points") or 0),
+        "gambling_visual_style_points": float(
+            visual_score.get("gambling_visual_style_points") or 0
+        ),
+        "visual_clarity_points": float(visual_score.get("visual_clarity_points") or 0),
+        "media_quality_points": float(visual_score.get("media_quality_points") or 0),
         "analysis_confidence": float(visual_score.get("analysis_confidence") or 0),
-        "visible_elements": list(visual_score.get("visible_elements") or []),
+        "gambling_signals": list(visual_score.get("gambling_signals") or []),
+        "game_visual_present": bool(visual_score.get("game_visual_present")),
         "visual_evidence": list(visual_score.get("visual_evidence") or []),
+        "retrieval_hints": list(visual_score.get("retrieval_hints") or []),
+        "uncertain": bool(visual_score.get("uncertain")),
         "media": _public_media(media),
     }
 
@@ -454,7 +478,7 @@ def _high_score_visible_elements(scored: list[dict[str, Any]]) -> list[str]:
     for candidate in scored:
         if float(candidate["final_score"]) < QUALITY_SUPPLEMENT_THRESHOLD:
             continue
-        for item in candidate.get("visible_elements") or []:
+        for item in candidate.get("gambling_signals") or []:
             element = str(item).strip()
             key = element.casefold()
             if not element or key in seen:
