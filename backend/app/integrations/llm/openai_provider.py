@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from backend.app.core.errors import ProviderError
 from backend.app.db.models.campaign import Campaign
@@ -43,6 +43,57 @@ from backend.app.services.creative_strategy_builder import compact_creative_stra
 logger = logging.getLogger(__name__)
 
 
+_STRICT_SCHEMA_OMITTED_KEYS = {
+    "default",
+    "description",
+    "examples",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "pattern",
+    "title",
+}
+
+
+def _structured_output_name(response_model: type[BaseModel]) -> str:
+    name: list[str] = []
+    for index, character in enumerate(response_model.__name__):
+        if character.isupper() and index:
+            name.append("_")
+        name.append(character.lower())
+    return "".join(name)
+
+
+def _strict_json_schema_format(response_model: type[BaseModel]) -> dict[str, Any]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        normalized = {
+            key: normalize(item)
+            for key, item in value.items()
+            if key not in _STRICT_SCHEMA_OMITTED_KEYS
+        }
+        properties = normalized.get("properties")
+        if normalized.get("type") == "object" or isinstance(properties, dict):
+            normalized["type"] = "object"
+            normalized["additionalProperties"] = False
+            normalized["required"] = list(properties or {})
+        return normalized
+
+    return {
+        "name": _structured_output_name(response_model),
+        "strict": True,
+        "schema": normalize(response_model.model_json_schema()),
+    }
+
+
 class OpenAILLMProvider:
     def __init__(
         self,
@@ -57,14 +108,25 @@ class OpenAILLMProvider:
         self.supports_video_input = supports_video_input
         self.video_input_fps = video_input_fps
 
-    async def _json_completion(self, system: str, user: Any) -> dict[str, Any]:
+    async def _json_completion(
+        self,
+        system: str,
+        user: Any,
+        response_model: type[BaseModel] | None = None,
+    ) -> dict[str, Any]:
+        response_format: dict[str, Any] = {"type": "json_object"}
+        if response_model is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": _strict_json_schema_format(response_model),
+            }
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            response_format={"type": "json_object"},
+            response_format=response_format,
         )
         content = response.choices[0].message.content or "{}"
         content = _strip_json_markdown(content)
@@ -73,8 +135,13 @@ class OpenAILLMProvider:
         except json.JSONDecodeError as exc:
             raise ProviderError("LLM returned invalid JSON.") from exc
 
-    async def _vision_json_completion(self, system: str, user: Any) -> dict[str, Any]:
-        return await self._json_completion(system, user)
+    async def _vision_json_completion(
+        self,
+        system: str,
+        user: Any,
+        response_model: type[BaseModel] | None = None,
+    ) -> dict[str, Any]:
+        return await self._json_completion(system, user, response_model=response_model)
 
     async def extract_delivery_fields(self, raw_content: str) -> dict[str, Any]:
         return await self._json_completion(
@@ -542,6 +609,7 @@ class OpenAILLMProvider:
                     "frame_analysis": frame_analysis.model_dump(mode="json"),
                 },
             ),
+            response_model=FrameAnchoredDirectorPlan,
         )
         return _frame_anchored_director_plan_from_data(data)
 
@@ -2662,6 +2730,71 @@ def _normalize_director_importance(value: Any) -> str:
     return "supporting"
 
 
+_DIRECTOR_ACTION_ARC_PHASES = {
+    "anchor_hold",
+    "departure",
+    "preparation",
+    "action",
+    "impact",
+    "payoff",
+    "return",
+    "final_lock",
+}
+
+
+def _director_action_arc_phase(value: Any) -> str:
+    text = _director_text(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if text in _DIRECTOR_ACTION_ARC_PHASES:
+        return text
+    aliases = (
+        ("final_lock", ("final", "ending", "end_lock", "last_frame", "lock")),
+        ("anchor_hold", ("anchor_hold", "opening_hold", "initial_hold", "hold")),
+        ("departure", ("departure", "depart", "leave", "breakaway")),
+        ("preparation", ("preparation", "prepare", "setup", "opening", "windup")),
+        ("impact", ("impact", "climax", "peak", "collision", "hit")),
+        ("payoff", ("payoff", "result", "reveal", "reward", "consequence")),
+        ("return", ("return", "resolution", "resolve", "settle", "recovery")),
+        ("action", ("action", "execution", "execute", "escalation", "perform")),
+    )
+    return next(
+        (phase for phase, words in aliases if any(word in text for word in words)),
+        text,
+    )
+
+
+def _director_intensity(value: Any) -> Any:
+    number = _finite_float_or_none(value)
+    if number is not None:
+        if number > 1:
+            number = number / 100 if number <= 100 else 1.0
+        return max(0.0, min(1.0, number))
+    text = _director_text(value).strip().lower().replace("-", " ").replace("_", " ")
+    if text.endswith("%"):
+        number = _finite_float_or_none(text[:-1])
+        if number is not None:
+            return max(0.0, min(1.0, number / 100))
+    labels = {
+        "very low": 0.1,
+        "minimal": 0.1,
+        "low": 0.25,
+        "medium low": 0.35,
+        "medium": 0.5,
+        "moderate": 0.5,
+        "medium high": 0.65,
+        "high": 0.75,
+        "very high": 1.0,
+        "maximum": 1.0,
+        "\u5f88\u4f4e": 0.1,
+        "\u4f4e": 0.25,
+        "\u4e2d\u4f4e": 0.35,
+        "\u4e2d": 0.5,
+        "\u4e2d\u9ad8": 0.65,
+        "\u9ad8": 0.75,
+        "\u5f88\u9ad8": 1.0,
+    }
+    return labels.get(text, value)
+
+
 def _normalize_director_action_arc_windows(value: Any) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for item in _director_items(value):
@@ -2670,20 +2803,28 @@ def _normalize_director_action_arc_windows(value: Any) -> list[dict[str, Any]]:
         result.append(
             {
                 "window_id": _director_first_text(item, "window_id", "id"),
-                "phase": _director_first_text(item, "phase", "role"),
+                "phase": _director_action_arc_phase(
+                    _director_first_text(item, "phase", "role")
+                ),
                 "start_ratio": item.get("start_ratio"),
                 "end_ratio": item.get("end_ratio"),
                 "objective": _director_first_text(item, "objective", "instruction"),
-                "subject_motion_intensity": item.get("subject_motion_intensity"),
-                "camera_intensity": item.get("camera_intensity"),
-                "effect_intensity": item.get("effect_intensity"),
+                "subject_motion_intensity": _director_intensity(
+                    item.get("subject_motion_intensity")
+                ),
+                "camera_intensity": _director_intensity(item.get("camera_intensity")),
+                "effect_intensity": _director_intensity(item.get("effect_intensity")),
                 "depends_on": _frame_string_list(item.get("depends_on")),
             }
         )
     return result
 
 
-def _normalize_director_omission_fact(value: Any) -> dict[str, Any] | None:
+def _normalize_director_omission_fact(
+    value: Any,
+    *,
+    detail_fallback: str | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     return {
@@ -2691,7 +2832,7 @@ def _normalize_director_omission_fact(value: Any) -> dict[str, Any] | None:
         "basis": _director_first_text(value, "basis"),
         "polarity": _director_first_text(value, "polarity"),
         "scope": _director_first_text(value, "scope"),
-        "detail": _director_first_text(value, "detail"),
+        "detail": _director_first_text(value, "detail") or _director_text(detail_fallback),
     }
 
 
@@ -2740,14 +2881,60 @@ def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]
     return normalized
 
 
+_DIRECTOR_SIGNATURE_TRANSFER_ROLES = {
+    "causal_setup",
+    "primary_action",
+    "interaction",
+    "impact",
+    "visible_result",
+    "camera_emphasis",
+    "effect_emphasis",
+    "overlay_lifecycle",
+    "other",
+}
+
+
+def _normalize_director_transfer_role(value: Any, moment_type: str) -> str:
+    text = _director_text(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if text in _DIRECTOR_SIGNATURE_TRANSFER_ROLES:
+        return text
+    aliases = (
+        ("causal_setup", ("setup", "cause", "trigger", "preparation")),
+        ("primary_action", ("action_execution", "primary_action", "execution", "action")),
+        ("interaction", ("interaction", "interact", "contact")),
+        ("impact", ("impact", "climax", "collision", "hit")),
+        ("visible_result", ("visible_result", "result", "payoff", "reward", "reveal")),
+        ("camera_emphasis", ("camera", "shot", "framing", "camera_emphasis")),
+        ("effect_emphasis", ("effect", "vfx", "fx", "effect_emphasis")),
+        ("overlay_lifecycle", ("overlay", "ui", "text", "overlay_lifecycle")),
+    )
+    mapped = next(
+        (role for role, words in aliases if any(word in text for word in words)),
+        None,
+    )
+    if mapped is not None:
+        return mapped
+    if not text:
+        return {
+            "camera": "camera_emphasis",
+            "action": "primary_action",
+            "effect": "effect_emphasis",
+            "result": "visible_result",
+            "combined": "primary_action",
+        }.get(moment_type, "other")
+    return "other"
+
+
 def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
-    fields = (
+    required_text_fields = (
         "adapted_action",
         "temporary_divergence",
         "camera_support",
         "effect_support",
         "visible_payoff",
         "return_strategy",
+    )
+    optional_text_fields = (
         "omission_reason",
         "equivalent_replacement_failure",
         "literal_infeasibility_evidence",
@@ -2757,12 +2944,27 @@ def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
     for item in _director_items(value):
         if not isinstance(item, dict):
             continue
+        moment_type = _director_first_text(item, "moment_type", "type")
+        literal_evidence = _director_first_text(
+            item,
+            "literal_infeasibility_evidence",
+            "omission_reason",
+        )
+        equivalent_evidence = _director_first_text(
+            item,
+            "equivalent_infeasibility_evidence",
+            "equivalent_replacement_failure",
+            "omission_reason",
+        )
         normalized = {
             "moment_id": _director_first_text(item, "moment_id", "id"),
-            "moment_type": _director_first_text(item, "moment_type", "type"),
+            "moment_type": moment_type,
             "source_evidence": _director_text_list(item.get("source_evidence")),
             "source_behavior_beat_ids": _frame_string_list(item.get("source_behavior_beat_ids")),
-            "transfer_role": _director_first_text(item, "transfer_role", "role"),
+            "transfer_role": _normalize_director_transfer_role(
+                _director_first_text(item, "transfer_role", "role"),
+                moment_type,
+            ),
             "strategy": _director_first_text(item, "strategy", "decision"),
             "target_adaptation": _director_first_text(item, "target_adaptation", "adaptation"),
             "assigned_beat_id": _director_first_text(item, "assigned_beat_id") or None,
@@ -2775,13 +2977,20 @@ def _normalize_director_signature_moments(value: Any) -> list[dict[str, Any]]:
             )
             or None,
             "literal_infeasibility_fact": _normalize_director_omission_fact(
-                item.get("literal_infeasibility_fact")
+                item.get("literal_infeasibility_fact"),
+                detail_fallback=literal_evidence,
             ),
             "equivalent_infeasibility_fact": _normalize_director_omission_fact(
-                item.get("equivalent_infeasibility_fact")
+                item.get("equivalent_infeasibility_fact"),
+                detail_fallback=equivalent_evidence,
             ),
         }
-        normalized.update({field: _director_text(item.get(field)) or None for field in fields})
+        normalized.update(
+            {field: _director_text(item.get(field)) for field in required_text_fields}
+        )
+        normalized.update(
+            {field: _director_text(item.get(field)) or None for field in optional_text_fields}
+        )
         result.append(normalized)
     return result
 

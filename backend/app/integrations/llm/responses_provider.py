@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
@@ -21,6 +22,7 @@ from backend.app.integrations.llm.openai_provider import (
     _legacy_ad_performance_analysis_from_data,
     _legacy_ad_performance_analysis_system_prompt,
     _legacy_ad_performance_user_content,
+    _strict_json_schema_format,
     _strip_json_markdown,
     _truncate,
     _uses_facebook_operator_result,
@@ -93,8 +95,14 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
         system: str,
         user: Any,
         timeout_seconds: float | None = None,
+        response_model: type[BaseModel] | None = None,
     ) -> dict[str, Any]:
-        content = await self._text_completion(system, user, timeout_seconds=timeout_seconds)
+        content = await self._text_completion(
+            system,
+            user,
+            timeout_seconds=timeout_seconds,
+            response_model=response_model,
+        )
         content = _strip_json_markdown(content)
         try:
             return json.loads(content)
@@ -106,19 +114,28 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
         system: str,
         user: Any,
         timeout_seconds: float | None = None,
+        response_model: type[BaseModel] | None = None,
     ) -> str:
         request_timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else self.fast_timeout_seconds
         )
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": _responses_user_content(user)},
+            ],
+        }
+        if response_model is not None:
+            payload["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    **_strict_json_schema_format(response_model),
+                }
+            }
         response = await self._http_client.post(
             "responses",
-            json={
-                "model": self.model,
-                "input": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": _responses_user_content(user)},
-                ],
-            },
+            json=payload,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -134,11 +151,17 @@ class GatewayResponsesLLMProvider(OpenAILLMProvider):
             ) from exc
         return _extract_response_text(response.json())
 
-    async def _vision_json_completion(self, system: str, user: Any) -> dict[str, Any]:
+    async def _vision_json_completion(
+        self,
+        system: str,
+        user: Any,
+        response_model: type[BaseModel] | None = None,
+    ) -> dict[str, Any]:
         return await self._json_completion(
             system,
             user,
             timeout_seconds=self.timeout_seconds,
+            response_model=response_model,
         )
 
     async def analyze_ad_performance(self, context: dict) -> dict[str, Any]:

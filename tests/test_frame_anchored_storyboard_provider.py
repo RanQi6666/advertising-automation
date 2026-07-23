@@ -519,6 +519,143 @@ def test_director_coverage_allows_one_timed_scene_to_carry_multiple_core_beats()
 
 
 @pytest.mark.asyncio
+async def test_gateway_director_plan_requests_strict_json_schema() -> None:
+    provider, captured = _gateway_provider_with_responses(_director_plan_payload())
+
+    await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    response_format = captured[0]["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["name"] == "frame_anchored_director_plan"
+    assert response_format["strict"] is True
+
+    schema = response_format["schema"]
+    object_schemas = []
+
+    def collect_objects(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                object_schemas.append(value)
+            for child in value.values():
+                collect_objects(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_objects(child)
+
+    collect_objects(schema)
+    assert object_schemas
+    for object_schema in object_schemas:
+        assert object_schema["additionalProperties"] is False
+        assert set(object_schema["required"]) == set(object_schema.get("properties", {}))
+
+    action_window_schema = schema["$defs"]["DirectorActionArcWindow"]
+    assert "action" in action_window_schema["properties"]["phase"]["enum"]
+    signature_schema = schema["$defs"]["DirectorSignatureMoment"]
+    assert "primary_action" in signature_schema["properties"]["transfer_role"]["enum"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_normalizes_phase_role_and_intensity_aliases() -> None:
+    payload = _director_plan_payload()
+    windows = payload["action_arc_windows"]
+    windows[0]["phase"] = "setup"
+    windows[0]["subject_motion_intensity"] = "low"
+    windows[0]["camera_intensity"] = "25%"
+    windows[0]["effect_intensity"] = "\u4f4e"
+    windows[1]["phase"] = "execution"
+    windows[1]["subject_motion_intensity"] = "high"
+    windows[1]["camera_intensity"] = "medium"
+    windows[1]["effect_intensity"] = "75%"
+    windows[2]["phase"] = "resolution"
+    windows[2]["subject_motion_intensity"] = "very low"
+    windows[2]["camera_intensity"] = "\u4e2d"
+    windows[2]["effect_intensity"] = "0"
+    payload["signature_moment_plan"][0]["transfer_role"] = "action_execution"
+    provider, _captured = _gateway_provider_with_responses(payload)
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    assert [window.phase for window in plan.action_arc_windows] == [
+        "preparation",
+        "action",
+        "return",
+    ]
+    assert plan.action_arc_windows[0].subject_motion_intensity == pytest.approx(0.25)
+    assert plan.action_arc_windows[0].camera_intensity == pytest.approx(0.25)
+    assert plan.action_arc_windows[1].subject_motion_intensity == pytest.approx(0.75)
+    assert plan.action_arc_windows[1].effect_intensity == pytest.approx(0.75)
+    assert plan.action_arc_windows[2].camera_intensity == pytest.approx(0.5)
+    assert plan.signature_moment_plan[0].transfer_role == "primary_action"
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_plan_fills_empty_omission_detail_from_existing_evidence() -> None:
+    payload = _director_plan_payload(
+        signature_strategy="omit",
+        assigned_beat_id=None,
+        omission_reason="Literal transfer conflicts with the supplied target identity.",
+    )
+    moment = payload["signature_moment_plan"][0]
+    moment.update(
+        {
+            "literal_infeasibility_category": "identity_semantics_conflict",
+            "literal_infeasibility_evidence": (
+                "The supplied target identity cannot support the literal reference identity."
+            ),
+            "equivalent_infeasibility_category": "causal_equivalent_unavailable",
+            "equivalent_infeasibility_evidence": (
+                "No target-compatible causal equivalent is supported by the supplied frames."
+            ),
+            "literal_infeasibility_fact": {
+                "category": "identity_semantics_conflict",
+                "basis": "identity_semantics",
+                "polarity": "affirmed",
+                "scope": "global",
+                "detail": "",
+            },
+            "equivalent_infeasibility_fact": {
+                "category": "causal_equivalent_unavailable",
+                "basis": "causal_equivalent",
+                "polarity": "affirmed",
+                "scope": "action_interval",
+                "detail": "",
+            },
+        }
+    )
+    provider, _captured = _gateway_provider_with_responses(payload)
+
+    plan = await provider.direct_frame_anchored_video_storyboard(
+        FIRST_FRAME_URL,
+        LAST_FRAME_URL,
+        _analysis(),
+        12,
+        "9:16",
+    )
+
+    normalized_moment = plan.signature_moment_plan[0]
+    assert normalized_moment.literal_infeasibility_fact is not None
+    assert normalized_moment.literal_infeasibility_fact.detail == moment[
+        "literal_infeasibility_evidence"
+    ]
+    assert normalized_moment.equivalent_infeasibility_fact is not None
+    assert normalized_moment.equivalent_infeasibility_fact.detail == moment[
+        "equivalent_infeasibility_evidence"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() -> None:
     provider, captured = _gateway_provider_with_responses(
         {
