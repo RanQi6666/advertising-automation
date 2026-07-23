@@ -57,6 +57,7 @@ from backend.app.services.external_ai_generation_service import (
     _format_optional_intensity,
     _normalize_private_storyboard_namespace,
     _replace_private_id_aliases,
+    _replace_private_ids_in_text,
 )
 from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
@@ -2682,6 +2683,185 @@ async def test_storyboard_v2_prefix_overlapping_claim_aliases_are_order_independ
             ]
             assert observed_raw_claim_ids == list(
                 reversed(claim_pair) if reverse_evidence_order else claim_pair
+            )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("primary-claim-extra", "primary-claim-extra"),
+        ("primary-claim:extra", "primary-claim:extra"),
+        ("primary-claim.extra", "primary-claim.extra"),
+        ("primary-claim_extra", "primary-claim_extra"),
+        ("prefix-primary-claim", "prefix-primary-claim"),
+        ("prefix:primary-claim", "prefix:primary-claim"),
+        ("prefix.primary-claim", "prefix.primary-claim"),
+        ("prefix_primary-claim", "prefix_primary-claim"),
+        ("prefix.primary-claim_extra", "prefix.primary-claim_extra"),
+        ("\u4e2dprimary-claim\u6587", "\u4e2d__sbv2_claim_001__\u6587"),
+        ("\u52d5primary-claim\u304f", "\u52d5__sbv2_claim_001__\u304f"),
+        ("(primary-claim)", "(__sbv2_claim_001__)"),
+        ("primary-claim,", "__sbv2_claim_001__,"),
+        ("primary-claim;", "__sbv2_claim_001__;"),
+        ("primary-claim\u3002", "__sbv2_claim_001__\u3002"),
+        ("primary-claim. next", "__sbv2_claim_001__. next"),
+        ("primary-claim.", "__sbv2_claim_001__."),
+        ("primary-claim", "__sbv2_claim_001__"),
+    ],
+)
+def test_raw_private_id_replacement_respects_complete_safe_token_boundaries(
+    source: str,
+    expected: str,
+) -> None:
+    assert _replace_private_ids_in_text(
+        source,
+        {"primary-claim": "__sbv2_claim_001__"},
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("__sbv2_claim_001__-extra", "__sbv2_claim_001__-extra"),
+        ("__sbv2_claim_001__:extra", "__sbv2_claim_001__:extra"),
+        ("__sbv2_claim_001__.extra", "__sbv2_claim_001__.extra"),
+        ("__sbv2_claim_001___extra", "__sbv2_claim_001___extra"),
+        ("prefix-__sbv2_claim_001__", "prefix-__sbv2_claim_001__"),
+        ("prefix:__sbv2_claim_001__", "prefix:__sbv2_claim_001__"),
+        ("prefix.__sbv2_claim_001__", "prefix.__sbv2_claim_001__"),
+        ("prefix___sbv2_claim_001__", "prefix___sbv2_claim_001__"),
+        (
+            "prefix.__sbv2_claim_001__-extra",
+            "prefix.__sbv2_claim_001__-extra",
+        ),
+        ("\u4e2d__sbv2_claim_001__\u6587", "\u4e2dlinked item\u6587"),
+        ("\u52d5__sbv2_claim_001__\u304f", "\u52d5linked item\u304f"),
+        ("(__sbv2_claim_001__)", "(linked item)"),
+        ("__sbv2_claim_001__,", "linked item,"),
+        ("__sbv2_claim_001__;", "linked item;"),
+        ("__sbv2_claim_001__\u3002", "linked item\u3002"),
+        ("__sbv2_claim_001__. next", "linked item. next"),
+        ("__sbv2_claim_001__.", "linked item."),
+        ("__sbv2_claim_001__", "linked item"),
+    ],
+)
+def test_canonical_private_id_scrub_respects_complete_safe_token_boundaries(
+    source: str,
+    expected: str,
+) -> None:
+    assert _replace_private_ids_in_text(
+        source,
+        {"__sbv2_claim_001__": "linked item"},
+    ) == expected
+
+
+@pytest.mark.asyncio
+async def test_storyboard_v2_polling_preserves_unregistered_longer_private_id_tokens(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    original_generate = fake_llm.generate_frame_anchored_video_storyboard
+    raw_longer_tokens = [
+        "primary-claim-extra",
+        "primary-claim:extra",
+        "primary-claim.extra",
+        "primary-claim_extra",
+        "prefix-primary-claim",
+        "prefix:primary-claim",
+        "prefix.primary-claim",
+        "prefix_primary-claim",
+        "prefix.primary-claim_extra",
+    ]
+    canonical_longer_tokens = [
+        "__sbv2_claim_001__-extra",
+        "__sbv2_claim_001__:extra",
+        "__sbv2_claim_001__.extra",
+        "__sbv2_claim_001___extra",
+        "prefix-__sbv2_claim_001__",
+        "prefix:__sbv2_claim_001__",
+        "prefix.__sbv2_claim_001__",
+        "prefix___sbv2_claim_001__",
+        "prefix.__sbv2_claim_001__-extra",
+    ]
+
+    async def token_boundary_candidate(*args, **kwargs):
+        storyboard = await original_generate(*args, **kwargs)
+        evidence = storyboard.scenes[1].execution_evidence[0]
+        storyboard.scenes[1].execution_evidence = [
+            evidence.model_copy(update={"claim_id": "primary-claim"})
+        ]
+        storyboard.scenes[1].visual = (
+            f"{storyboard.scenes[1].visual} keep {' '.join(raw_longer_tokens)}; "
+            "scrub \u4e2dprimary-claim\u6587."
+        )
+        storyboard.scenes[-1].notes = (
+            f"{storyboard.scenes[-1].notes or ''} "
+            f"keep {' '.join(canonical_longer_tokens)}; "
+            "scrub \u6536__sbv2_claim_001__\u675f."
+        )
+        return storyboard
+
+    fake_llm.generate_frame_anchored_video_storyboard = token_boundary_candidate
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename="storyboard-v2-private-id-token-boundaries.db",
+    )
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        service = ExternalAIGenerationService()
+        async with session_factory() as session:
+            task = GenerationTask(
+                queue_name="text_queue",
+                task_type="external_video_storyboard_v2",
+                business_type="external_ai",
+                business_id="private-id-token-boundaries",
+                payload_json=_storyboard_v2_payload(),
+                queued_at=utcnow(),
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            result = await service.execute_frame_anchored_video_storyboard(session, task)
+            task.status = "succeeded"
+            task.result_json = result
+            session.add(task)
+            await session.commit()
+            job_id = task.id
+
+        polled = client.get(
+            f"/api/v1/integrations/ai/jobs/{job_id}",
+            headers=_authorized_headers(),
+        ).json()["data"]
+
+        assert polled["status"] == "succeeded"
+        storyboard_text = polled["storyboard_text"]
+        for token in (*raw_longer_tokens, *canonical_longer_tokens):
+            assert token in storyboard_text
+        assert "\u4e2dprimary-claim\u6587" not in storyboard_text
+        assert "\u6536__sbv2_claim_001__\u675f" not in storyboard_text
+        assert "\u4e2dlinked item\u6587" in storyboard_text
+        assert "\u6536linked item\u675f" in storyboard_text
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard",
+        ]
+
+        async with session_factory() as session:
+            task = await session.get(GenerationTask, job_id)
+            assert task is not None
+            candidate = FrameAnchoredStoryboard.model_validate(
+                task.metadata_json["frame_anchored_storyboard_candidate"]
+            )
+            assert candidate.scenes[1].execution_evidence[0].claim_id == (
+                "__sbv2_claim_001__"
             )
     finally:
         app.dependency_overrides.clear()

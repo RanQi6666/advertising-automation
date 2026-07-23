@@ -995,7 +995,9 @@ def _replace_private_ids_in_text(value: str, mapping: dict[str, str]) -> str:
     aliases = sorted(replacements, key=len, reverse=True)
     alias_pattern = "|".join(re.escape(alias) for alias in aliases)
     pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])(?:{alias_pattern})(?![A-Za-z0-9_])"
+        rf"(?<![A-Za-z0-9_])(?<![A-Za-z0-9][_:.-])"
+        rf"(?:{alias_pattern})"
+        rf"(?![A-Za-z0-9_])(?![_:.-][A-Za-z0-9])"
     )
     return pattern.sub(lambda match: replacements[match.group(0)], value)
 
