@@ -1399,6 +1399,123 @@ def _two_moment_exact_binding_inputs() -> tuple[
     return storyboard, analysis, review
 
 
+def _mixed_importance_final_inputs(
+    *,
+    importance: str,
+) -> tuple[
+    FrameAnchoredStoryboard,
+    FrameAnalysis,
+    DirectorActionCoverageReview,
+    str,
+]:
+    storyboard, analysis, _ = _valid_final_inputs()
+    reference = analysis.reference_video_analysis
+    assert reference is not None
+    graph = reference.behavior_graph
+    assert graph is not None
+    mixed_source_id = f"{importance}_behavior"
+    mixed_beat = graph.beats[0].model_copy(
+        update={
+            "beat_id": mixed_source_id,
+            "importance": importance,
+            "description": f"A valid {importance} behavior supports the same visible action.",
+        }
+    )
+    plan = analysis.director_plan
+    assert plan is not None
+    plan_payload = plan.model_dump()
+    plan_payload["signature_moment_plan"][0]["source_behavior_beat_ids"] = [
+        "core_behavior",
+        f" {mixed_source_id} ",
+        mixed_source_id,
+    ]
+    plan = FrameAnchoredDirectorPlan.model_validate(plan_payload)
+    analysis = analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "behavior_graph": graph.model_copy(
+                        update={"beats": [*graph.beats, mixed_beat]}
+                    )
+                }
+            ),
+            "director_plan": plan,
+        }
+    )
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+    return storyboard, analysis, review, mixed_source_id
+
+
+def _bind_all_mixed_sources(
+    storyboard: FrameAnchoredStoryboard,
+    mixed_source_id: str,
+) -> None:
+    complete_source_ids = ["core_behavior", mixed_source_id]
+    for scene_index in (0, 1, 2):
+        storyboard.scenes[scene_index].source_behavior_beat_ids = complete_source_ids
+    storyboard.scenes[1].execution_evidence = [
+        StoryboardExecutionEvidence(
+            claim_id="mixed_execution_claim",
+            executor_kind="target_subject",
+            assertion="affirmed",
+            action_or_state_change="the complete mixed-source action executes visibly",
+            signature_moment_ids=["signature_action"],
+            source_behavior_beat_ids=complete_source_ids,
+        )
+    ]
+
+
+def test_final_validation_rejects_missing_supporting_source_from_mixed_execution() -> None:
+    storyboard, analysis, review, _ = _mixed_importance_final_inputs(
+        importance="supporting"
+    )
+
+    with pytest.raises(ValueError, match="signature_action lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_missing_decorative_source_from_mixed_preparation() -> None:
+    storyboard, analysis, review, mixed_source_id = _mixed_importance_final_inputs(
+        importance="decorative"
+    )
+    _bind_all_mixed_sources(storyboard, mixed_source_id)
+    storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+
+    with pytest.raises(
+        ValueError, match="preparation evidence for signature moment signature_action"
+    ):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_allows_complete_normalized_mixed_importance_binding() -> None:
+    storyboard, analysis, review, mixed_source_id = _mixed_importance_final_inputs(
+        importance="supporting"
+    )
+    _bind_all_mixed_sources(storyboard, mixed_source_id)
+
+    validate_director_coverage(storyboard, analysis.director_plan)
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_unknown_moment_source_id() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    plan = analysis.director_plan
+    assert plan is not None
+    plan_payload = plan.model_dump()
+    plan_payload["signature_moment_plan"][0]["source_behavior_beat_ids"] = [
+        "core_behavior",
+        "unknown_behavior",
+    ]
+    plan = FrameAnchoredDirectorPlan.model_validate(plan_payload)
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+
+    with pytest.raises(ValueError, match="unknown source behavior beat ids"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
 def test_final_validation_rejects_partial_source_binding_hidden_by_another_moment() -> None:
     storyboard, analysis, review = _two_moment_exact_binding_inputs()
     storyboard.scenes[1].execution_evidence = [

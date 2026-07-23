@@ -431,8 +431,13 @@ def _scene_links_moment(
     moment_id: str,
     source_ids: set[str],
 ) -> bool:
+    scene_source_ids = {
+        str(value).strip()
+        for value in scene.source_behavior_beat_ids
+        if str(value).strip()
+    }
     return moment_id in scene.signature_moment_ids and (
-        not source_ids or source_ids.issubset(set(scene.source_behavior_beat_ids))
+        not source_ids or source_ids.issubset(scene_source_ids)
     )
 
 
@@ -705,6 +710,30 @@ def validate_final_storyboard_action_coverage(
     _validate_timeline(storyboard)
     required_ids = [beat.beat_id for beat in _required_core_behavior_beats(frame_analysis)]
     required_id_set = set(required_ids)
+    reference = frame_analysis.reference_video_analysis
+    graph = reference.behavior_graph if reference is not None else None
+    moment_source_ids_by_id = {
+        moment.moment_id: {
+            str(value).strip()
+            for value in moment.source_behavior_beat_ids
+            if str(value).strip()
+        }
+        for moment in plan.signature_moment_plan
+        if moment.strategy != "omit"
+    }
+    allowed_source_ids = (
+        {beat.beat_id.strip() for beat in graph.beats if beat.beat_id.strip()}
+        if graph is not None
+        else set().union(*moment_source_ids_by_id.values())
+    )
+    for moment_id, moment_source_ids in moment_source_ids_by_id.items():
+        unknown_source_ids = moment_source_ids - allowed_source_ids
+        if unknown_source_ids:
+            raise ValueError(
+                f"signature moment {moment_id} references unknown source behavior beat ids: "
+                + ", ".join(sorted(unknown_source_ids))
+            )
+
     validly_omitted_ids = {
         beat_id
         for moment in plan.signature_moment_plan
@@ -730,11 +759,11 @@ def validate_final_storyboard_action_coverage(
         if not scenes:
             raise ValueError(f"storyboard is missing required signature moment: {moment.moment_id}")
 
-        referenced_required_ids = required_id_set.intersection(moment.source_behavior_beat_ids)
+        moment_source_ids = moment_source_ids_by_id[moment.moment_id]
         linked_scene_indexes = [
             index
             for index, scene in enumerate(storyboard.scenes)
-            if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
+            if _scene_links_moment(scene, moment.moment_id, moment_source_ids)
         ]
         assigned_beat_id = (moment.assigned_beat_id or "").strip()
         assigned_beat = next(
@@ -747,11 +776,11 @@ def validate_final_storyboard_action_coverage(
                 _matching_target_execution_evidence(
                     scene,
                     moment_id=moment.moment_id,
-                    source_ids=referenced_required_ids,
+                    source_ids=moment_source_ids,
                 ),
             )
             for scene in scenes
-            if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
+            if _scene_links_moment(scene, moment.moment_id, moment_source_ids)
             and assigned_beat is not None
             and _scene_carries_director_beat(scene, assigned_beat_id)
             and _scene_strictly_overlaps_director_beat(
@@ -766,7 +795,7 @@ def validate_final_storyboard_action_coverage(
             for scene, evidence in execution_matches
             if evidence
         ]
-        requires_execution = bool(referenced_required_ids) or moment.transfer_role in {
+        requires_execution = bool(moment_source_ids) or moment.transfer_role in {
             "primary_action",
             "interaction",
             "impact",
@@ -789,7 +818,7 @@ def validate_final_storyboard_action_coverage(
                     if str(value).strip()
                 }
                 executed_source_ids.update(
-                    referenced_required_ids.intersection(evidence_source_ids)
+                    required_id_set.intersection(moment_source_ids, evidence_source_ids)
                 )
 
         if moment.moment_type in {"camera", "combined"} and not any(
@@ -811,7 +840,7 @@ def validate_final_storyboard_action_coverage(
                 frame_analysis=frame_analysis,
                 plan=plan,
                 moment_id=moment.moment_id,
-                source_ids=referenced_required_ids,
+                source_ids=moment_source_ids,
                 linked_scene_indexes=linked_scene_indexes,
                 execution_scene_indexes=moment_execution_indexes,
                 final_hold_index=final_hold_index,
