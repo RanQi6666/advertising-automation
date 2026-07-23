@@ -208,6 +208,24 @@ async def test_media_inspector_rejects_when_all_frames_fail(
 
 
 @pytest.mark.asyncio
+async def test_low_confidence_frames_adds_only_two_extra_keyframes(
+    inspector_with_storage, allow_public_media, monkeypatch
+) -> None:
+    inspector = inspector_with_storage
+    monkeypatch.setattr(inspector, "_download_video", lambda *_: _write_downloaded_video(_[1]))
+    monkeypatch.setattr(inspector, "_extract_frame", lambda *args: _write_frame(args[1]))
+    ad = eligible_ad(thumbnail_url=None)
+    qualification = await inspector.inspect(ad, job_id="job-1")
+
+    enriched = await inspector.add_low_confidence_frames(ad, qualification, job_id="job-1")
+
+    assert enriched.media is not None
+    assert len(enriched.media.frame_urls) == 5
+    assert enriched.media.frame_urls[-2].endswith("frame_35.jpg")
+    assert enriched.media.frame_urls[-1].endswith("frame_65.jpg")
+
+
+@pytest.mark.asyncio
 async def test_retain_only_removes_unselected_ad_artifacts(inspector_with_storage) -> None:
     root = inspector_with_storage._artifact_dir("job-1", "keep").parent
     for name in ("keep", "drop"):

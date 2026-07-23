@@ -108,6 +108,72 @@ class AdResearchMediaInspector:
     ) -> bool:
         return (await self.inspect(ad, job_id=job_id)).qualified
 
+    async def add_low_confidence_frames(
+        self,
+        ad: CollectorAd,
+        qualification: TechnicalQualification,
+        *,
+        job_id: str,
+    ) -> TechnicalQualification:
+        """Add 35% and 65% keyframes for a qualified, low-confidence visual score.
+
+        The original downloaded video is reused. A failed supplemental frame must not
+        invalidate an otherwise technically qualified candidate.
+        """
+        media = qualification.media
+        duration = qualification.duration_seconds
+        if not qualification.qualified or media is None or duration is None:
+            return qualification
+
+        artifact_dir = self._artifact_dir(job_id, ad.ad_library_id)
+        video_path = artifact_dir / "video.mp4"
+        if not video_path.is_file():
+            return qualification
+
+        extra_seconds = _frame_seconds(duration, low_confidence=True)[-2:]
+        extra_ratios = (35, 65)
+
+        async def extract(second: float, ratio: int) -> Path | None:
+            destination = artifact_dir / f"frame_{ratio}.jpg"
+            if destination.is_file() and destination.stat().st_size > 0:
+                return destination
+            async with self._frame_semaphore:
+                return await self._extract_frame(video_path, destination, second)
+
+        extracted = await asyncio.gather(
+            *(
+                extract(second, ratio)
+                for second, ratio in zip(extra_seconds, extra_ratios, strict=True)
+            )
+        )
+        new_paths = tuple(path for path in extracted if path is not None)
+        if not new_paths:
+            return qualification
+
+        frame_urls = list(media.frame_urls)
+        local_frame_paths = list(media.local_frame_paths)
+        for path in new_paths:
+            public_url = self._public_url(path)
+            if public_url not in frame_urls:
+                frame_urls.append(public_url)
+            if path not in local_frame_paths:
+                local_frame_paths.append(path)
+
+        return TechnicalQualification(
+            qualified=qualification.qualified,
+            reasons=qualification.reasons,
+            duration_seconds=qualification.duration_seconds,
+            active_days=qualification.active_days,
+            media=PreparedAdMedia(
+                cover_url=media.cover_url,
+                cover_source=media.cover_source,
+                frame_urls=tuple(frame_urls),
+                local_frame_paths=tuple(local_frame_paths),
+                duration_source=media.duration_source,
+                duration_probe_attempts=media.duration_probe_attempts,
+            ),
+        )
+
     async def _base_reasons(self, ad: CollectorAd) -> list[str]:
         reasons: list[str] = []
         if (ad.status or "").upper() != "ACTIVE":
