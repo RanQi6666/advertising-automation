@@ -102,7 +102,7 @@ POST /api/v1/integrations/ad-research/jobs
 GET /api/v1/integrations/ad-research/jobs/{task_id}
 ```
 
-建议按响应中的 `poll_after_seconds` 轮询；任务排队或采集中建议至少间隔 3 秒。不使用 callback，也不需要“确认已获取结果”的接口。
+新任务只会依次处于 `queued`、`processing`、`completed` 或 `failed` 状态。建议仅在 `queued` 或 `processing` 时按响应中的 `poll_after_seconds` 轮询（建议至少间隔 3 秒）；不使用 callback，也不需要“确认已获取结果”的接口。结果保留期结束后，任务记录会标记为 `expired`，此 GET 返回 `410 Gone`。
 
 处理中示例：
 
@@ -231,7 +231,7 @@ final_score = visual_total + public_continuity_points
 
 排序稳定规则依次为：`final_score`、`visual_total`、`active_days`、帧数、`ad_library_id`。不存在模型类别命中、`category_confidence`、`recommendation` 或“明显无关”等硬淘汰门槛。
 
-当已获得 `target_count` 条候选、但第 `target_count` 条的 `final_score < 55` 时，系统继续补采以尝试提高结果质量。`55` 只是补采阈值，不是广告淘汰线；达到轮数或原始候选上限时，仍会按分数返回已有 Top N。
+当已获得 `target_count` 条候选、但第 `target_count` 条的 `final_score < 55` 时，系统继续补采以尝试提高结果质量。`55` 只是补采阈值，不是广告淘汰线；新任务只有在取得严格等于 `target_count` 条结果时才会以 `completed` 返回，达到采集边界仍不足时会以 `failed` 结束，不返回部分 Top N。
 
 `model_relevant` 是兼容字段，始终等于 `model_scored`，不再表示文本类目硬命中。
 
@@ -241,10 +241,10 @@ final_score = visual_total + public_continuity_points
 | --- | --- | --- |
 | `202` / `queued` | 已创建，等待 Worker。 | 按建议时间轮询。 |
 | `processing` | 正在规划、采集、技术准备或视觉评分。 | 继续轮询。 |
-| `completed` | 已取得 `target_count` 条可评分候选；如果补采预算耗尽，可能仍带 `quality_supplement_exhausted` 原因。 | 读取 `ads`。 |
-| `insufficient` | 达到采集边界前未取得 `target_count` 条可评分候选；仍返回已找到的 Top N。 | 读取已有 `ads` 与 `research_summary.reason`，可使用新的 `external_user_id` 重新发起任务。 |
-| `failed` | 队列、采集器或未捕获的系统异常导致任务失败。 | 查看 `error.code` 后使用同一 `external_user_id` 重试，或联系系统维护方。 |
-| `410 Gone` | 结果已超过 24 小时，结果和系统保存的封面/关键帧都已清除。 | 使用新的请求重新创建任务；原 `external_user_id` 已可复用。 |
+| `completed` | 已取得严格等于 `target_count` 条可评分候选。 | 读取 `ads`，停止轮询。 |
+| `insufficient` | 仅历史只读兼容状态，可能带旧 `ads`；新任务绝不会产生该状态。 | 仅按历史结果处理，不应作为新任务终态。 |
+| `failed` | 未取得严格等于 `target_count` 条结果，或队列、采集器或未捕获的系统异常导致任务失败；`ads` 为 `null`。 | 查看 `error.code` 后使用同一 `external_user_id` 重试，或联系系统维护方；停止轮询。 |
+| `410 Gone` / `expired` | 结果已超过 24 小时；GET 返回 `410 Gone`，结果和系统保存的封面/关键帧都已清除。 | 使用新的请求重新创建任务；原 `external_user_id` 已可复用。 |
 | `404 Not Found` | `task_id` 不存在。 | 检查请求 ID。 |
 
 ## 后台处理与资源配置
@@ -253,7 +253,7 @@ final_score = visual_total + public_continuity_points
 2. 内部采集 Bridge 对每个查询最多召回 50 条公开视频广告。
 3. 服务端去重后并发准备视频媒体，执行技术硬条件、时长确认、封面下载/生成和关键帧导出。
 4. GPT-5.4 mini 对技术合格候选做纯视觉评分；低置信度候选补帧并复评。
-5. 服务端计算 `final_score`，保留 Top N；在数量不足或第 N 名低于 55 分时继续下一轮补采。
+5. 服务端计算 `final_score`；在数量不足或第 N 名低于 55 分时继续下一轮补采，只有取得严格等于 `target_count` 条结果才完成。
 6. 完成时仅保留 Top N 的媒体目录；任务结果及最终媒体保留 24 小时。过期、失败或 stale 任务会清理整个任务媒体目录。
 
 模型调用受 Redis 全局租约限流，广告研究 Worker 建议并发为 2，单 Worker 模型并发为 6：

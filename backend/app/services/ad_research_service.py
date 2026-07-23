@@ -216,6 +216,8 @@ class AdResearchService:
         job = await session.get(AdResearchJob, job_id)
         if job is None:
             raise NotFoundError("ad research task was not found.")
+        if job.status == "expired":
+            raise AdResearchResultExpired("ad research result has expired after 24 hours.")
         if job.is_result_expired:
             await self._expire_job(session, job)
             raise AdResearchResultExpired("ad research result has expired after 24 hours.")
@@ -237,7 +239,9 @@ class AdResearchService:
             stage=job.stage,
             round=job.current_round,
             progress=job.progress_json or {},
-            poll_after_seconds=None if result_available or job.status == "failed" else 3,
+            poll_after_seconds=(
+                None if result_available or job.status in {"failed", "expired"} else 3
+            ),
             research_summary=job.summary_json or {},
             ads=list(result.get("ads") or []) if result_available else None,
             result_expires_at=job.result_expires_at if result_available else None,

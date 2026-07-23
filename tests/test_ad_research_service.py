@@ -407,3 +407,69 @@ async def test_complete_job_rejects_unsupported_completion_status(status: str) -
                 )
     finally:
         await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_get_job_raises_expired_for_sqlite_reloaded_naive_expiry_and_expired_status() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-expired-get", country="IN", category="gambling"
+                ),
+            )
+            created.job.status = "completed"
+            created.job.stage = "completed"
+            created.job.result_json = {"ads": [{"ad_library_id": "ad-1"}]}
+            created.job.result_expires_at = utcnow() - timedelta(seconds=1)
+            job_id = created.job.id
+            await session.commit()
+
+        async with factory() as session:
+            reloaded = await session.get(AdResearchJob, job_id)
+            assert reloaded is not None
+            assert reloaded.result_expires_at is not None
+            assert reloaded.result_expires_at.tzinfo is None
+            with pytest.raises(AdResearchResultExpired):
+                await service.get_job(session, job_id)
+
+        async with factory() as session:
+            with pytest.raises(AdResearchResultExpired):
+                await service.get_job(session, job_id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("status", "poll_after_seconds"),
+    [("queued", 3), ("processing", 3), ("expired", None)],
+)
+def test_poll_response_status_contract_hides_results_for_non_completed_statuses(
+    status: str, poll_after_seconds: int | None
+) -> None:
+    job = AdResearchJob(
+        id=f"adr-poll-{status}",
+        external_user_id="research-poll-contract",
+        request_fingerprint="fingerprint",
+        country="IN",
+        category="gambling",
+        seed_keywords_json=["rummy"],
+        target_count=1,
+        status=status,
+        stage=status,
+        current_round=0,
+        progress_json={},
+        summary_json={},
+        result_json={"ads": [{"ad_library_id": "should-not-leak"}]},
+        result_expires_at=utcnow() + timedelta(hours=1),
+    )
+
+    response = AdResearchService().poll_response(job)
+
+    assert response.poll_after_seconds == poll_after_seconds
+    assert response.ads is None
