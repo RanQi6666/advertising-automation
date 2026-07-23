@@ -361,21 +361,152 @@ async def test_orchestrator_returns_insufficient_when_query_planning_is_empty() 
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_feeds_high_score_visual_elements_into_next_round() -> None:
-    first = candidate(7)
-    second = candidate(8)
+async def test_orchestrator_attributes_multi_source_ads_and_query_metrics() -> None:
+    shared = candidate(7)
+    second_only = candidate(8)
+    plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="first",
+                intent="game_gambling",
+                rationale="First structured query.",
+            ),
+            PlannedQuery(
+                query_id="r1_q02",
+                query="second",
+                intent="sports_betting",
+                rationale="Second structured query.",
+            ),
+        )
+    )
+    collector = QueryCollector({"first": [shared], "second": [shared, second_only]})
+    media = Media()
+    model = Model(plans=[plan])
+
+    result = await run_custom(collector=collector, media=media, model=model, target_count=2)
+
+    assert result.status == "completed"
+    ads_by_id = {item["ad_library_id"]: item for item in result.ads}
+    assert ads_by_id[shared.ad_library_id]["first_source_query_id"] == "r1_q01"
+    assert ads_by_id[shared.ad_library_id]["source_query_ids"] == ["r1_q01", "r1_q02"]
+    assert ads_by_id[second_only.ad_library_id]["first_source_query_id"] == "r1_q02"
+    assert ads_by_id[second_only.ad_library_id]["source_query_ids"] == ["r1_q02"]
+    assert model.score_calls_by_ad_id == {shared.ad_library_id: 1, second_only.ad_library_id: 1}
+
+    required_metric_fields = {
+        "raw_collected",
+        "new_unique_count",
+        "duplicate_count",
+        "duration_le_30_count",
+        "technical_qualified",
+        "model_scored",
+        "game_gambling_count",
+        "sports_betting_count",
+        "gambling_adjacent_count",
+        "unrelated_count",
+        "score_above_55",
+        "average_visual_score",
+        "best_visual_score",
+    }
+    query_metrics = result.summary["query_metrics"]
+    assert [item["query_id"] for item in query_metrics] == ["r1_q01", "r1_q02"]
+    assert all(required_metric_fields <= item.keys() for item in query_metrics)
+    assert query_metrics == result.summary["rounds"][0]["query_metrics"]
+    assert query_metrics[0] == {
+        "query_id": "r1_q01",
+        "query": "first",
+        "intent": "game_gambling",
+        "raw_collected": 1,
+        "new_unique_count": 1,
+        "duplicate_count": 0,
+        "duration_le_30_count": 1,
+        "technical_qualified": 1,
+        "model_scored": 1,
+        "game_gambling_count": 1,
+        "sports_betting_count": 0,
+        "gambling_adjacent_count": 0,
+        "unrelated_count": 0,
+        "score_above_55": 1,
+        "average_visual_score": 80.0,
+        "best_visual_score": 80.0,
+    }
+    assert query_metrics[1]["raw_collected"] == 2
+    assert query_metrics[1]["new_unique_count"] == 1
+    assert query_metrics[1]["duplicate_count"] == 1
+    # Category and score metrics are attribution-inclusive: the shared ad counts for both sources.
+    assert query_metrics[1]["technical_qualified"] == 2
+    assert query_metrics[1]["model_scored"] == 2
+    assert query_metrics[1]["game_gambling_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_passes_controlled_gap_summary_to_next_round() -> None:
+    first = candidate(17)
+    second = candidate(18)
+    first.advertiser_name = "Sensitive advertiser"
+    first.text_variants = ["Sensitive ad copy"]
+    first.headline = "Sensitive headline"
+    first.cta_text = "Sensitive CTA"
+    first.ad_snapshot_url = "https://sensitive.example/landing"
+    first.video_url = "https://sensitive.example/video.mp4"
+    plan_one = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="first",
+                intent="game_gambling",
+                rationale="Initial query.",
+            ),
+        )
+    )
+    plan_two = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r2_q01",
+                query="second",
+                intent="sports_betting",
+                rationale="Supplement query.",
+            ),
+        )
+    )
     collector = QueryCollector({"first": [first], "second": [second]})
     media = Media()
-    model = Model(plans=[["first"], ["second"]])
+    model = Model(plans=[plan_one, plan_two])
 
     result = await run_custom(collector=collector, media=media, model=model, target_count=2)
 
     assert result.status == "completed"
     second_gap = model.plan_calls[1]["gap_summary"]
+    assert {
+        "target_count",
+        "missing_count",
+        "priority_counts",
+        "query_metrics",
+        "previous_queries",
+        "technical_rejection_summary",
+        "model_scoring_failed",
+    } <= second_gap.keys()
+    assert second_gap["target_count"] == 2
+    assert second_gap["missing_count"] == 1
     assert second_gap["previous_queries"] == ["first"]
-    assert second_gap["technical_rejection_summary"] == {}
-    assert second_gap["high_score_visible_elements"] == ["visible-ad-7", "slot ui"]
-
+    assert set(second_gap["priority_counts"]) == {
+        "game_gambling",
+        "sports_betting",
+        "gambling_adjacent",
+        "unrelated",
+    }
+    assert second_gap["query_metrics"][0]["query_id"] == "r1_q01"
+    assert "high_score_visible_elements" not in second_gap
+    serialized_gap = repr(second_gap)
+    for forbidden in (
+        "Sensitive advertiser",
+        "Sensitive ad copy",
+        "Sensitive headline",
+        "Sensitive CTA",
+        "sensitive.example",
+    ):
+        assert forbidden not in serialized_gap
 
 @pytest.mark.asyncio
 async def test_orchestrator_does_not_collect_a_query_twice_across_rounds() -> None:

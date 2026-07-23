@@ -40,6 +40,13 @@ class AdResearchRunResult:
     summary: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _ResolvedQuery:
+    query_id: str
+    query: str
+    intent: str
+
+
 class AdResearchOrchestrator:
     def __init__(
         self,
@@ -62,12 +69,14 @@ class AdResearchOrchestrator:
         await session.commit()
 
         seen: dict[str, CollectorAd] = {}
+        source_query_ids_by_ad_library_id: dict[str, list[str]] = {}
         technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification] = {}
         scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
         model_scoring_failed_ids: set[str] = set()
         used_query_keys: set[str] = set()
         used_queries: list[str] = []
         round_summaries: list[dict[str, Any]] = []
+        all_query_metrics: list[dict[str, Any]] = []
         raw_collected = 0
         gap_summary: dict[str, Any] = {}
         termination_reason: str | None = None
@@ -86,24 +95,46 @@ class AdResearchOrchestrator:
                 termination_reason = "query_planning_empty"
                 break
 
-            queries = _new_queries(planned_queries, used_query_keys, used_queries)
+            queries = _new_queries(
+                planned_queries,
+                used_query_keys,
+                used_queries,
+                round_number=round_number,
+            )
             job.stage = "collecting"
             round_raw_collected = 0
             candidates_before_round = len(seen)
+            collected_queries: list[_ResolvedQuery] = []
+            query_collection_counts: dict[str, dict[str, int]] = {}
             for query in queries:
                 remaining = MAX_RAW_CANDIDATES - raw_collected
                 if remaining <= 0:
                     break
                 ads = await self.collector.collect(
                     request_id=job.id,
-                    query=query,
+                    query=query.query,
                     country=job.country,
                     limit=min(PER_QUERY_LIMIT, remaining),
                 )
-                raw_collected += len(ads)
-                round_raw_collected += len(ads)
+                collected_queries.append(query)
+                raw_count = len(ads)
+                new_unique_count = 0
                 for ad in ads:
-                    seen.setdefault(ad.ad_library_id, ad)
+                    if ad.ad_library_id not in seen:
+                        seen[ad.ad_library_id] = ad
+                        new_unique_count += 1
+                    source_query_ids = source_query_ids_by_ad_library_id.setdefault(
+                        ad.ad_library_id, []
+                    )
+                    if query.query_id not in source_query_ids:
+                        source_query_ids.append(query.query_id)
+                query_collection_counts[query.query_id] = {
+                    "raw_collected": raw_count,
+                    "new_unique_count": new_unique_count,
+                    "duplicate_count": raw_count - new_unique_count,
+                }
+                raw_collected += raw_count
+                round_raw_collected += raw_count
 
             candidates = list(seen.values())
             job.stage = "technical_filtering"
@@ -136,7 +167,10 @@ class AdResearchOrchestrator:
                     continue
                 technical_diagnostics_by_ad_library_id[ad.ad_library_id] = qualification
                 scored_by_ad_library_id[ad.ad_library_id] = _public_result(
-                    ad, qualification, visual_score
+                    ad,
+                    qualification,
+                    visual_score,
+                    source_query_ids=source_query_ids_by_ad_library_id[ad.ad_library_id],
                 )
 
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
@@ -160,31 +194,40 @@ class AdResearchOrchestrator:
             technical_rejection_summary = _technical_rejection_summary(
                 technical_diagnostics_by_ad_library_id
             )
+            query_metrics = _query_metrics(
+                collected_queries,
+                query_collection_counts=query_collection_counts,
+                source_query_ids_by_ad_library_id=source_query_ids_by_ad_library_id,
+                technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                scored_by_ad_library_id=scored_by_ad_library_id,
+            )
+            all_query_metrics.extend(query_metrics)
+            priority_counts = _priority_counts(scored)
             round_new_candidates = len(candidates) - candidates_before_round
             round_summaries.append(
                 {
                     "round": round_number,
-                    "queries": queries,
+                    "queries": [query.query for query in collected_queries],
                     "planned_query_count": len(planned_queries),
                     "skipped_repeated_query_count": len(planned_queries) - len(queries),
                     "round_raw_collected": round_raw_collected,
                     "round_new_candidates": round_new_candidates,
+                    "query_metrics": query_metrics,
+                    "priority_counts": priority_counts,
                     **progress,
                     "technical_rejection_summary": technical_rejection_summary,
                 }
             )
             gap_summary = {
-                "raw_collected": raw_collected,
-                "technical_qualified": len(qualified),
-                "model_scored": len(scored),
-                "model_relevant": len(scored),
                 "target_count": job.target_count,
                 "missing_count": max(job.target_count - len(scored), 0),
+                "priority_counts": priority_counts,
+                "query_metrics": query_metrics,
+                "query_performance": _planner_query_performance(query_metrics),
                 "previous_queries": list(used_queries),
                 "technical_rejection_summary": technical_rejection_summary,
                 "model_scoring_failed": len(model_scoring_failed_ids),
                 "duplicate_count": raw_collected - len(candidates),
-                "high_score_visible_elements": _high_score_visible_elements(scored),
             }
 
             has_target = len(scored) >= job.target_count
@@ -205,6 +248,7 @@ class AdResearchOrchestrator:
                     scored=scored,
                     model_scoring_failed_ids=model_scoring_failed_ids,
                     round_summaries=round_summaries,
+                    query_metrics=all_query_metrics,
                 )
             if round_number == MAX_ROUNDS or raw_collected >= MAX_RAW_CANDIDATES:
                 termination_reason = (
@@ -231,6 +275,7 @@ class AdResearchOrchestrator:
             scored=scored,
             model_scoring_failed_ids=model_scoring_failed_ids,
             round_summaries=round_summaries,
+            query_metrics=all_query_metrics,
             reason=termination_reason
             or (
                 "quality_supplement_exhausted"
@@ -302,6 +347,7 @@ class AdResearchOrchestrator:
         scored: list[dict[str, Any]],
         model_scoring_failed_ids: set[str],
         round_summaries: list[dict[str, Any]],
+        query_metrics: list[dict[str, Any]],
         reason: str | None = None,
     ) -> AdResearchRunResult:
         await self.media.retain_only(job.id, {ad["ad_library_id"] for ad in selected})
@@ -313,6 +359,7 @@ class AdResearchOrchestrator:
             selected=selected,
             model_scoring_failed_ids=model_scoring_failed_ids,
             round_summaries=round_summaries,
+            query_metrics=query_metrics,
             target_count=job.target_count,
             reason=reason,
         )
@@ -347,22 +394,46 @@ class AdResearchOrchestrator:
 
 
 def _new_queries(
-    planned_queries: QueryPlan | list[str], used_query_keys: set[str], used_queries: list[str]
-) -> list[str]:
+    planned_queries: QueryPlan | list[str],
+    used_query_keys: set[str],
+    used_queries: list[str],
+    *,
+    round_number: int,
+) -> list[_ResolvedQuery]:
     source_queries = (
-        (planned_query.query for planned_query in planned_queries.queries)
+        (
+            _ResolvedQuery(
+                query_id=planned_query.query_id,
+                query=planned_query.query,
+                intent=planned_query.intent,
+            )
+            for planned_query in planned_queries.queries
+        )
         if isinstance(planned_queries, QueryPlan)
-        else planned_queries
+        else (
+            _ResolvedQuery(
+                query_id=f"legacy_r{round_number}_q{index:02d}",
+                query=str(query),
+                intent="legacy",
+            )
+            for index, query in enumerate(planned_queries, start=1)
+        )
     )
-    queries: list[str] = []
-    for query in source_queries:
-        normalized = " ".join(str(query).split())
+    queries: list[_ResolvedQuery] = []
+    for planned_query in source_queries:
+        normalized = " ".join(planned_query.query.split())
         query_key = normalized.casefold()
         if not normalized or query_key in used_query_keys:
             continue
         used_query_keys.add(query_key)
         used_queries.append(normalized)
-        queries.append(normalized)
+        queries.append(
+            _ResolvedQuery(
+                query_id=planned_query.query_id,
+                query=normalized,
+                intent=planned_query.intent,
+            )
+        )
     return queries
 
 
@@ -381,7 +452,11 @@ def _public_continuity_points(active_days: int | None) -> float:
 
 
 def _public_result(
-    ad: CollectorAd, qualification: TechnicalQualification, visual_score: dict[str, Any]
+    ad: CollectorAd,
+    qualification: TechnicalQualification,
+    visual_score: dict[str, Any],
+    *,
+    source_query_ids: list[str],
 ) -> dict[str, Any]:
     media = qualification.media
     if media is None:
@@ -394,6 +469,8 @@ def _public_result(
     public_continuity_points = _public_continuity_points(qualification.active_days)
     return {
         "ad_library_id": ad.ad_library_id,
+        "first_source_query_id": source_query_ids[0],
+        "source_query_ids": list(source_query_ids),
         "advertiser_name": ad.advertiser_name,
         "ad_snapshot_url": ad.ad_snapshot_url,
         "text": "\n".join(ad.text_variants[:3]),
@@ -490,6 +567,90 @@ def _high_score_visible_elements(scored: list[dict[str, Any]]) -> list[str]:
     return elements
 
 
+def _priority_counts(scored: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "game_gambling": 0,
+        "sports_betting": 0,
+        "gambling_adjacent": 0,
+        "unrelated": 0,
+    }
+    for candidate in scored:
+        priority = str(candidate.get("visual_priority") or "unrelated")
+        counts[priority if priority in counts else "unrelated"] += 1
+    return counts
+
+
+def _query_metrics(
+    queries: list[_ResolvedQuery],
+    *,
+    query_collection_counts: dict[str, dict[str, int]],
+    source_query_ids_by_ad_library_id: dict[str, list[str]],
+    technical_diagnostics: dict[str, TechnicalQualification],
+    scored_by_ad_library_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    metrics: list[dict[str, Any]] = []
+    for query in sorted(queries, key=lambda item: item.query_id):
+        attributed_ad_ids = [
+            ad_library_id
+            for ad_library_id, source_query_ids in source_query_ids_by_ad_library_id.items()
+            if query.query_id in source_query_ids
+        ]
+        qualifications = [
+            technical_diagnostics[ad_library_id]
+            for ad_library_id in attributed_ad_ids
+            if ad_library_id in technical_diagnostics
+        ]
+        scored = [
+            scored_by_ad_library_id[ad_library_id]
+            for ad_library_id in attributed_ad_ids
+            if ad_library_id in scored_by_ad_library_id
+        ]
+        priority_counts = _priority_counts(scored)
+        visual_scores = [float(candidate["visual_total"]) for candidate in scored]
+        collection_counts = query_collection_counts[query.query_id]
+        metrics.append(
+            {
+                "query_id": query.query_id,
+                "query": query.query,
+                "intent": query.intent,
+                **collection_counts,
+                "duration_le_30_count": sum(
+                    qualification.duration_seconds <= MAX_VIDEO_SECONDS
+                    for qualification in qualifications
+                ),
+                "technical_qualified": sum(
+                    qualification.qualified for qualification in qualifications
+                ),
+                "model_scored": len(scored),
+                "game_gambling_count": priority_counts["game_gambling"],
+                "sports_betting_count": priority_counts["sports_betting"],
+                "gambling_adjacent_count": priority_counts["gambling_adjacent"],
+                "unrelated_count": priority_counts["unrelated"],
+                "score_above_55": sum(
+                    score > QUALITY_SUPPLEMENT_THRESHOLD for score in visual_scores
+                ),
+                "average_visual_score": (
+                    round(sum(visual_scores) / len(visual_scores), 2) if visual_scores else None
+                ),
+                "best_visual_score": max(visual_scores) if visual_scores else None,
+            }
+        )
+    return metrics
+
+
+def _planner_query_performance(query_metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "query_id": metric["query_id"],
+            "query": metric["query"],
+            "collected_count": metric["raw_collected"],
+            "selected_count": metric["model_scored"],
+            "rejected_count": metric["raw_collected"] - metric["model_scored"],
+        }
+        for metric in query_metrics
+    ]
+
+
 def _technical_rejection_summary(
     diagnostics_by_ad_library_id: dict[str, TechnicalQualification],
 ) -> dict[str, int]:
@@ -509,6 +670,7 @@ def _summary(
     selected: list[dict[str, Any]],
     model_scoring_failed_ids: set[str],
     round_summaries: list[dict[str, Any]],
+    query_metrics: list[dict[str, Any]],
     target_count: int,
     reason: str | None,
 ) -> dict[str, Any]:
@@ -530,6 +692,7 @@ def _summary(
         "high_score_visible_elements": _high_score_visible_elements(scored),
         "technical_rejection_summary": _technical_rejection_summary(technical_diagnostics),
         "rounds": round_summaries,
+        "query_metrics": sorted(query_metrics, key=lambda item: str(item["query_id"])),
         "model_relevant_notice": (
             "Compatibility field only: model_relevant equals model_scored and no longer means "
             "a text or category hard match."
