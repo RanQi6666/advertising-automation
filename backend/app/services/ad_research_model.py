@@ -4,10 +4,12 @@ import asyncio
 import base64
 import json
 import mimetypes
+import re
 import secrets
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from redis import asyncio as redis_async
@@ -16,6 +18,139 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia
+
+QueryIntent = Literal[
+    "game_gambling",
+    "sports_betting",
+    "local_exploration",
+    "format_exploration",
+]
+
+QUERY_INTENTS = frozenset(
+    {
+        "game_gambling",
+        "sports_betting",
+        "local_exploration",
+        "format_exploration",
+    }
+)
+_QUERY_ID_PATTERN = re.compile(r"r[1-9]\d*_q\d{2}")
+
+
+@dataclass(frozen=True)
+class QueryPerformance:
+    """Controlled retrieval facts from a completed research round."""
+
+    query_id: str | None = None
+    query: str | None = None
+    collected_count: int = 0
+    selected_count: int = 0
+    rejected_count: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "collected_count": self.collected_count,
+            "selected_count": self.selected_count,
+            "rejected_count": self.rejected_count,
+        }
+        if self.query_id:
+            payload["query_id"] = self.query_id
+        if self.query:
+            payload["query"] = self.query
+        return payload
+
+
+@dataclass(frozen=True)
+class RoundReview:
+    """Safe, structured facts used to change the next research round."""
+
+    query_performance: tuple[QueryPerformance, ...] = ()
+    priority_gaps: tuple[str, ...] = ()
+    missing_signals: tuple[str, ...] = ()
+    high_score_visible_elements: tuple[str, ...] = ()
+    technical_rejection_summary: tuple[tuple[str, int], ...] = ()
+    duplicate_count: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "query_performance": [item.as_dict() for item in self.query_performance],
+            "priority_gaps": list(self.priority_gaps),
+            "missing_signals": list(self.missing_signals),
+            "high_score_visible_elements": list(self.high_score_visible_elements),
+            "technical_rejection_summary": dict(self.technical_rejection_summary),
+            "duplicate_count": self.duplicate_count,
+        }
+
+
+@dataclass(frozen=True)
+class PlannedQuery:
+    query_id: str
+    query: str
+    intent: QueryIntent
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str)
+            for value in (self.query_id, self.query, self.intent, self.rationale)
+        ):
+            raise TypeError("planned query fields must be strings")
+        query_id = self.query_id.strip()
+        query = self.query.strip()
+        intent = self.intent.strip()
+        rationale = self.rationale.strip()
+        if not _QUERY_ID_PATTERN.fullmatch(query_id):
+            raise ValueError("query_id must use the r1_q01 format")
+        if not query or len(query) > 160:
+            raise ValueError("query must be a non-empty string of at most 160 characters")
+        if intent not in QUERY_INTENTS:
+            raise ValueError("intent is not allowed")
+        if not rationale or len(rationale) > 500:
+            raise ValueError("rationale must be a non-empty string of at most 500 characters")
+        object.__setattr__(self, "query_id", query_id)
+        object.__setattr__(self, "query", query)
+        object.__setattr__(self, "intent", intent)
+        object.__setattr__(self, "rationale", rationale)
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "query_id": self.query_id,
+            "query": self.query,
+            "intent": self.intent,
+            "rationale": self.rationale,
+        }
+
+
+@dataclass(frozen=True)
+class QueryPlan:
+    queries: tuple[PlannedQuery, ...]
+    round_review: RoundReview | None = None
+    summary: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.queries:
+            raise ValueError("QueryPlan requires at least one query")
+        query_ids = [item.query_id.casefold() for item in self.queries]
+        queries = [item.query.casefold() for item in self.queries]
+        if len(query_ids) != len(set(query_ids)) or len(queries) != len(set(queries)):
+            raise ValueError("QueryPlan queries and query_ids must be unique")
+        if self.summary is not None:
+            summary = self.summary.strip()
+            object.__setattr__(self, "summary", summary or None)
+
+    def __iter__(self) -> Iterator[PlannedQuery]:
+        return iter(self.queries)
+
+    def __len__(self) -> int:
+        return len(self.queries)
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"queries": [item.as_dict() for item in self.queries]}
+        if self.round_review is not None:
+            payload["round_review"] = self.round_review.as_dict()
+        if self.summary:
+            payload["summary"] = self.summary
+        return payload
 
 
 @dataclass
@@ -79,38 +214,51 @@ class AdResearchModel:
         seed_keywords: list[str],
         round_number: int,
         gap_summary: dict[str, Any] | None = None,
-    ) -> list[str]:
-        fallback = _unique_queries(seed_keywords or [category])
-        if self.settings.llm_provider == "mock":
-            return fallback[:12]
-        summary = gap_summary or {}
-        data = await self._complete_json(
-            system=(
-                "You plan lawful public-ad-library keyword research. Return JSON only: "
-                '{"queries":["short query"]}. Create up to 12 short, independent '
-                "public-library queries for the requested country/category. Use the previous "
-                "round's high-score visible elements and visual style to change retrieval "
-                "direction. Do not repeat previous_queries. If technical_rejection_summary "
-                "shows many duration_over_30 results, favor natural short-form creative terms "
-                "such as short video, reel, or promo. If duplicate_count is high, explore "
-                "different product types, local language, spelling variants, emojis, brands, "
-                "advertisers, or app terms. Keep this guidance generic across countries and "
-                "categories. Never provide instructions to evade review, tracking, access "
-                "controls, user targeting, or landing-page inspection."
-            ),
-            user={
-                "country": country,
-                "category": category,
-                "seed_keywords": seed_keywords,
-                "round_number": round_number,
-                "gap_summary": {
-                    **summary,
-                    "high_score_visible_elements": summary.get("high_score_visible_elements", []),
-                },
-            },
+    ) -> QueryPlan:
+        review = _round_review_from_summary(gap_summary) if gap_summary else None
+        fallback = _fallback_query_plan(
+            seed_keywords=seed_keywords,
+            category=category,
+            round_number=round_number,
+            round_review=review,
         )
-        values = data.get("queries") if isinstance(data, dict) else []
-        return _unique_queries(values if isinstance(values, list) else [])[:12] or fallback[:12]
+        if self.settings.llm_provider == "mock":
+            return fallback
+        try:
+            data = await self._complete_json(
+                system=(
+                    "You plan lawful public-ad-library keyword research. Return one JSON object "
+                    "only, with this exact schema: "
+                    '{"queries":[{"query_id":"r1_q01","query":"short query",'
+                    '"intent":"game_gambling","rationale":"why this query"}],'
+                    '"summary":"optional short round summary"}. '
+                    "queries must be an array of at most 12 independent objects. Every object "
+                    "must include query_id, query, intent, and rationale. query_id must use the "
+                    "r1_q01 form. intent must be exactly one of: game_gambling, sports_betting, "
+                    "local_exploration, format_exploration. Create short public-library queries "
+                    "for the requested country/category. Use only the controlled round review to "
+                    "change retrieval direction. Do not repeat prior queries. If technical "
+                    "rejections show many duration_over_30 results, favor natural short-form "
+                    "creative terms such as short video, reel, or promo. If duplicates are high, "
+                    "explore different product types, local language, spelling variants, emojis, "
+                    "brands, advertisers, or app terms. Never provide instructions to evade "
+                    "review, tracking, access controls, user targeting, or landing-page inspection."
+                ),
+                user={
+                    "country": country,
+                    "category": category,
+                    "user_keywords": _unique_queries(seed_keywords)[:12],
+                    "round_number": max(int(round_number), 1),
+                    "round_review": (review or RoundReview()).as_dict(),
+                },
+            )
+        except ProviderError:
+            return fallback
+        return _query_plan_from_response(
+            data,
+            fallback=fallback,
+            round_review=review,
+        )
 
     async def score_visual(
         self,
@@ -271,6 +419,162 @@ def _strip_json_markdown(value: str) -> str:
         if value.lower().startswith("json"):
             value = value[4:].strip()
     return value
+
+
+def _round_review_from_summary(summary: dict[str, Any] | None) -> RoundReview:
+    source = summary if isinstance(summary, dict) else {}
+    query_performance: list[QueryPerformance] = []
+    raw_performance = source.get("query_performance")
+    if isinstance(raw_performance, list):
+        for item in raw_performance[:12]:
+            if not isinstance(item, dict):
+                continue
+            query = _short_text(item.get("query"))
+            query_id = _short_text(item.get("query_id"))
+            if query_id and not _QUERY_ID_PATTERN.fullmatch(query_id):
+                query_id = None
+            if not query and not query_id:
+                continue
+            query_performance.append(
+                QueryPerformance(
+                    query_id=query_id,
+                    query=query,
+                    collected_count=_non_negative_int(item.get("collected_count")),
+                    selected_count=_non_negative_int(item.get("selected_count")),
+                    rejected_count=_non_negative_int(item.get("rejected_count")),
+                )
+            )
+    else:
+        for query in _controlled_text_list(source.get("previous_queries"), limit=12):
+            query_performance.append(QueryPerformance(query=query))
+    technical = source.get("technical_rejection_summary")
+    technical_rejections = tuple(
+        (key, _non_negative_int(value))
+        for key, value in (technical.items() if isinstance(technical, dict) else [])
+        if isinstance(key, str)
+        and key in {"duration_over_30", "missing_media", "invalid_media"}
+        and _non_negative_int(value) > 0
+    )
+    return RoundReview(
+        query_performance=tuple(query_performance),
+        priority_gaps=tuple(_controlled_text_list(source.get("priority_gaps"), limit=12)),
+        missing_signals=tuple(
+            _controlled_text_list(
+                source.get("missing_signals", source.get("missing_play_patterns")), limit=12
+            )
+        ),
+        high_score_visible_elements=tuple(
+            _controlled_text_list(source.get("high_score_visible_elements"), limit=12)
+        ),
+        technical_rejection_summary=technical_rejections,
+        duplicate_count=_non_negative_int(source.get("duplicate_count")),
+    )
+
+
+def _query_plan_from_response(
+    data: Any,
+    *,
+    fallback: QueryPlan,
+    round_review: RoundReview | None,
+) -> QueryPlan:
+    if not isinstance(data, dict) or not isinstance(data.get("queries"), list):
+        return fallback
+    planned: list[PlannedQuery] = []
+    seen_ids: set[str] = set()
+    seen_queries: set[str] = set()
+    for item in data["queries"][:12]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            candidate = PlannedQuery(
+                query_id=item.get("query_id"),
+                query=item.get("query"),
+                intent=item.get("intent"),
+                rationale=item.get("rationale"),
+            )
+        except (TypeError, ValueError):
+            continue
+        normalized_id = candidate.query_id.casefold()
+        normalized_query = candidate.query.casefold()
+        if normalized_id in seen_ids or normalized_query in seen_queries:
+            continue
+        planned.append(candidate)
+        seen_ids.add(normalized_id)
+        seen_queries.add(normalized_query)
+    if not planned:
+        return fallback
+    summary = _short_text(data.get("summary"), limit=500)
+    return QueryPlan(
+        queries=tuple(planned),
+        round_review=round_review,
+        summary=summary,
+    )
+
+
+def _fallback_query_plan(
+    *,
+    seed_keywords: list[str],
+    category: str,
+    round_number: int,
+    round_review: RoundReview | None,
+) -> QueryPlan:
+    values = _unique_queries(seed_keywords or [category])[:12]
+    if not values:
+        values = ["public ads"]
+    safe_round = max(int(round_number), 1)
+    intent = _fallback_intent(category)
+    return QueryPlan(
+        queries=tuple(
+            PlannedQuery(
+                query_id=f"r{safe_round}_q{index:02d}",
+                query=query,
+                intent=intent,
+                rationale="Deterministic fallback from the supplied seed keyword.",
+            )
+            for index, query in enumerate(values, start=1)
+        ),
+        round_review=round_review,
+    )
+
+
+def _fallback_intent(category: str) -> QueryIntent:
+    normalized = category.casefold()
+    if "sport" in normalized and ("bet" in normalized or "gambl" in normalized):
+        return "sports_betting"
+    if any(token in normalized for token in ("gambl", "casino", "rummy", "poker", "bet")):
+        return "game_gambling"
+    if any(token in normalized for token in ("local", "regional", "country")):
+        return "local_exploration"
+    return "format_exploration"
+
+
+def _controlled_text_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _short_text(item)
+        if not text or text.casefold() in seen:
+            continue
+        output.append(text)
+        seen.add(text.casefold())
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _short_text(value: Any, *, limit: int = 160) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if text and len(text) <= limit else None
+
+
+def _non_negative_int(value: Any) -> int:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return 0
+    return max(int(value), 0)
 
 
 def _unique_queries(values: list[Any]) -> list[str]:

@@ -10,6 +10,8 @@ from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia
 from backend.app.services.ad_research_model import (
     AdResearchModel,
+    PlannedQuery,
+    QueryPlan,
     RedisGlobalLimiter,
     _validated_visual_score,
 )
@@ -94,19 +96,163 @@ def test_research_model_limiter_falls_back_to_celery_broker(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_model_planner_uses_gateway_model_and_no_reasoning(monkeypatch) -> None:
+async def test_model_planner_returns_structured_query_plan(monkeypatch) -> None:
     captured: dict[str, object] = {}
     model, client = gateway_model_that_captures_request(monkeypatch, captured)
 
     async def complete_json(**kwargs):
-        return {"queries": ["rummy bonus"]}
+        return {
+            "queries": [
+                {
+                    "query_id": "r1_q01",
+                    "query": "rummy bonus",
+                    "intent": "game_gambling",
+                    "rationale": "Seed expansion for public-library recall.",
+                }
+            ],
+            "summary": "Use a game-gambling seed expansion.",
+        }
 
     model._complete_json = complete_json
-    queries = await model.plan_queries(
+    plan = await model.plan_queries(
         country="IN", category="gambling", seed_keywords=["rummy"], round_number=1
     )
 
-    assert queries == ["rummy bonus"]
+    assert isinstance(plan, QueryPlan)
+    assert list(plan) == [
+        PlannedQuery(
+            query_id="r1_q01",
+            query="rummy bonus",
+            intent="game_gambling",
+            rationale="Seed expansion for public-library recall.",
+        )
+    ]
+    assert plan.summary == "Use a game-gambling seed expansion."
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_planner_drops_illegal_intent_and_keeps_valid_structured_query(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+
+    async def complete_json(**kwargs):
+        return {
+            "queries": [
+                {
+                    "query_id": "r1_q01",
+                    "query": "invalid intent",
+                    "intent": "freeform",
+                    "rationale": "Must not be accepted.",
+                },
+                {
+                    "query_id": "r1_q02",
+                    "query": "rummy app",
+                    "intent": "game_gambling",
+                    "rationale": "A valid seed variation.",
+                },
+            ]
+        }
+
+    model._complete_json = complete_json
+    plan = await model.plan_queries(
+        country="IN", category="gambling", seed_keywords=["rummy"], round_number=1
+    )
+
+    assert [(item.query_id, item.query, item.intent) for item in plan] == [
+        ("r1_q02", "rummy app", "game_gambling")
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_planner_drops_duplicate_ids_queries_and_empty_values(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+
+    async def complete_json(**kwargs):
+        return {
+            "queries": [
+                {
+                    "query_id": "r2_q01",
+                    "query": "  rummy bonus  ",
+                    "intent": "game_gambling",
+                    "rationale": "First query.",
+                },
+                {
+                    "query_id": "r2_q01",
+                    "query": "rummy cash",
+                    "intent": "game_gambling",
+                    "rationale": "Duplicate id.",
+                },
+                {
+                    "query_id": "r2_q03",
+                    "query": "RUMMY BONUS",
+                    "intent": "game_gambling",
+                    "rationale": "Duplicate query.",
+                },
+                {
+                    "query_id": "r2_q04",
+                    "query": "   ",
+                    "intent": "game_gambling",
+                    "rationale": "Empty query.",
+                },
+            ]
+        }
+
+    model._complete_json = complete_json
+    plan = await model.plan_queries(
+        country="IN", category="gambling", seed_keywords=["rummy"], round_number=2
+    )
+
+    assert list(plan) == [
+        PlannedQuery(
+            query_id="r2_q01",
+            query="rummy bonus",
+            intent="game_gambling",
+            rationale="First query.",
+        )
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_planner_invalid_model_response_uses_deterministic_fallback(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"output_text": "not valid JSON"})
+
+    await client.aclose()
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
+    )
+    model = AdResearchModel(http_client=client, limiter=Limiter())
+    first = await model.plan_queries(
+        country="IN", category="gambling", seed_keywords=["rummy", "rummy"], round_number=3
+    )
+    second = await model.plan_queries(
+        country="IN", category="gambling", seed_keywords=["rummy", "rummy"], round_number=3
+    )
+
+    assert first == second
+    assert first.as_dict() == {
+        "queries": [
+            {
+                "query_id": "r3_q01",
+                "query": "rummy",
+                "intent": "game_gambling",
+                "rationale": "Deterministic fallback from the supplied seed keyword.",
+            }
+        ]
+    }
+    assert captured["reasoning"] == {"effort": "none"}
     await client.aclose()
 
 
@@ -204,13 +350,23 @@ async def test_mock_visual_score_does_not_read_candidate_text(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_model_planner_receives_visual_feedback(monkeypatch) -> None:
+async def test_model_planner_prompt_has_schema_and_allowed_intents(monkeypatch) -> None:
     captured: dict[str, object] = {}
     model, client = gateway_model_that_captures_request(monkeypatch, captured)
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
-        return httpx.Response(200, json={"output_text": '{"queries":["short promo"]}'})
+        output = {
+            "queries": [
+                {
+                    "query_id": "r2_q01",
+                    "query": "short promo",
+                    "intent": "format_exploration",
+                    "rationale": "Explore short-form formats.",
+                }
+            ]
+        }
+        return httpx.Response(200, json={"output_text": f"```json\n{json.dumps(output)}\n```"})
 
     await client.aclose()
     client = httpx.AsyncClient(
@@ -222,9 +378,11 @@ async def test_model_planner_receives_visual_feedback(monkeypatch) -> None:
         "technical_rejection_summary": {"duration_over_30": 12},
         "duplicate_count": 7,
         "high_score_visible_elements": ["slot reels", "coins"],
+        "ad_text": "must not be forwarded",
+        "landing_url": "https://must-not-be-forwarded.example",
     }
 
-    queries = await model.plan_queries(
+    plan = await model.plan_queries(
         country="IN",
         category="gambling",
         seed_keywords=[],
@@ -232,9 +390,25 @@ async def test_model_planner_receives_visual_feedback(monkeypatch) -> None:
         gap_summary=gap_summary,
     )
 
-    assert queries == ["short promo"]
+    assert [item.as_dict() for item in plan] == [
+        {
+            "query_id": "r2_q01",
+            "query": "short promo",
+            "intent": "format_exploration",
+            "rationale": "Explore short-form formats.",
+        }
+    ]
     system_prompt = captured["input"][0]["content"]
-    assert "visible elements and visual style" in system_prompt
+    assert '"queries"' in system_prompt
+    for intent in (
+        "game_gambling",
+        "sports_betting",
+        "local_exploration",
+        "format_exploration",
+    ):
+        assert intent in system_prompt
     user_payload = json.loads(captured["input"][1]["content"])
-    assert user_payload["gap_summary"]["high_score_visible_elements"] == ["slot reels", "coins"]
+    assert user_payload["round_review"]["high_score_visible_elements"] == ["slot reels", "coins"]
+    assert "ad_text" not in json.dumps(user_payload)
+    assert "must-not-be-forwarded" not in json.dumps(user_payload)
     await client.aclose()
