@@ -429,7 +429,7 @@ async def test_model_planner_prompt_has_schema_and_allowed_intents(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_model_planner_serializes_controlled_quality_supplement_review_to_responses(
+async def test_model_planner_serializes_only_whitelisted_round_review_data_to_responses(
     monkeypatch,
 ) -> None:
     requests: list[dict[str, object]] = []
@@ -466,58 +466,72 @@ async def test_model_planner_serializes_controlled_quality_supplement_review_to_
         transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
     )
     model = AdResearchModel(http_client=client, limiter=Limiter())
+    sensitive_values = (
+        "https://sensitive.example/offer",
+        "OCR WIN 5000",
+        "Jane Example",
+        "Install now for the VIP jackpot bonus",
+    )
     gap_summary = {
         "quality_supplement_mode": True,
         "query_performance": [
             {
                 "query_id": "r4_q01",
-                "query": "slot promo",
+                "query": sensitive_values[0],
                 "collected_count": 8,
                 "selected_count": 1,
                 "rejected_count": 7,
-                "ad_text": "must not be forwarded",
+                "intent": "game_gambling",
+                "ad_text": sensitive_values[3],
+                "ocr_text": sensitive_values[1],
+                "advertiser_name": sensitive_values[2],
+                "uncontrolled_nested": {"url": sensitive_values[0]},
             }
         ],
         "priority_gaps": ["game ui", "slot reels", "uncontrolled text"],
         "missing_signals": ["wallet or balance ui", "https://must-not-be-forwarded.example"],
+        "previous_queries": ["must not be copied into query_performance"],
         "ocr_text": "must not be forwarded",
     }
 
-    await model.plan_queries(
-        country="IN",
-        category="gambling",
-        seed_keywords=["rummy"],
-        round_number=5,
-        gap_summary=gap_summary,
-    )
-    await model.plan_queries(
-        country="IN",
-        category="gambling",
-        seed_keywords=["rummy"],
-        round_number=1,
-        gap_summary={"quality_supplement_mode": True},
-    )
+    for round_number in range(1, 6):
+        await model.plan_queries(
+            country="IN",
+            category="gambling",
+            seed_keywords=["rummy"],
+            round_number=round_number,
+            gap_summary=gap_summary,
+        )
 
-    assert len(requests) == 2
-    round_five = json.loads(requests[0]["input"][1]["content"])["round_review"]
-    assert round_five["quality_supplement_mode"] is True
-    assert round_five["query_performance"] == [
-        {
-            "query_id": "r4_q01",
-            "query": "slot promo",
-            "collected_count": 8,
-            "selected_count": 1,
-            "rejected_count": 7,
-        }
-    ]
-    assert round_five["priority_gaps"] == ["game ui", "slot reels"]
-    assert round_five["missing_signals"] == ["wallet or balance ui"]
-    assert "must-not-be-forwarded" not in json.dumps(round_five)
-    assert "P1-P3" in requests[0]["input"][0]["content"]
-    assert "quality_supplement_mode" in requests[0]["input"][0]["content"]
+    assert len(requests) == 5
+    serialized_user_payloads = [request["input"][1]["content"] for request in requests]
+    serialized_system_prompts = [request["input"][0]["content"] for request in requests]
+    for sensitive_value in sensitive_values:
+        assert all(sensitive_value not in payload for payload in serialized_user_payloads)
+        assert all(sensitive_value not in prompt for prompt in serialized_system_prompts)
 
-    round_one = json.loads(requests[1]["input"][1]["content"])["round_review"]
-    assert round_one["quality_supplement_mode"] is False
+    round_five = json.loads(serialized_user_payloads[4])["round_review"]
+    assert round_five == {
+        "query_performance": [
+            {
+                "query_id": "r4_q01",
+                "collected_count": 8,
+                "selected_count": 1,
+                "rejected_count": 7,
+            }
+        ],
+        "quality_supplement_mode": True,
+        "priority_gaps": ["game ui", "slot reels"],
+        "missing_signals": ["wallet or balance ui"],
+        "high_score_visible_elements": [],
+        "technical_rejection_summary": {},
+        "duplicate_count": 0,
+    }
+    for round_number in range(1, 5):
+        review = json.loads(serialized_user_payloads[round_number - 1])["round_review"]
+        assert review["quality_supplement_mode"] is False
+    assert "P1-P3" in serialized_system_prompts[4]
+    assert "quality_supplement_mode" in serialized_system_prompts[4]
     await client.aclose()
 
 

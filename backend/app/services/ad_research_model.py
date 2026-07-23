@@ -51,13 +51,22 @@ _VISUAL_TAXONOMY_BY_KEY = {item.casefold(): item for item in _VISUAL_TAXONOMY}
 
 @dataclass(frozen=True)
 class QueryPerformance:
-    """Controlled retrieval facts from a completed research round."""
+    """Whitelisted numeric retrieval facts keyed by a structured query ID."""
 
     query_id: str | None = None
-    query: str | None = None
     collected_count: int = 0
     selected_count: int = 0
     rejected_count: int = 0
+
+    def __post_init__(self) -> None:
+        query_id = _short_text(self.query_id)
+        object.__setattr__(
+            self,
+            "query_id",
+            query_id if query_id and _QUERY_ID_PATTERN.fullmatch(query_id) else None,
+        )
+        for field_name in ("collected_count", "selected_count", "rejected_count"):
+            object.__setattr__(self, field_name, _non_negative_int(getattr(self, field_name)))
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -67,8 +76,6 @@ class QueryPerformance:
         }
         if self.query_id:
             payload["query_id"] = self.query_id
-        if self.query:
-            payload["query"] = self.query
         return payload
 
 
@@ -501,24 +508,17 @@ def _round_review_from_summary(
         for item in raw_performance[:12]:
             if not isinstance(item, dict):
                 continue
-            query = _short_text(item.get("query"))
             query_id = _short_text(item.get("query_id"))
-            if query_id and not _QUERY_ID_PATTERN.fullmatch(query_id):
-                query_id = None
-            if not query and not query_id:
+            if not query_id or not _QUERY_ID_PATTERN.fullmatch(query_id):
                 continue
             query_performance.append(
                 QueryPerformance(
                     query_id=query_id,
-                    query=query,
                     collected_count=_non_negative_int(item.get("collected_count")),
                     selected_count=_non_negative_int(item.get("selected_count")),
                     rejected_count=_non_negative_int(item.get("rejected_count")),
                 )
             )
-    else:
-        for query in _controlled_text_list(source.get("previous_queries"), limit=12):
-            query_performance.append(QueryPerformance(query=query))
     technical = source.get("technical_rejection_summary")
     technical_rejections = tuple(
         (key, _non_negative_int(value))

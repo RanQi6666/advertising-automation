@@ -489,6 +489,36 @@ async def test_orchestrator_rescores_low_confidence_candidate_with_extra_frames(
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_preserves_first_low_confidence_score_when_frame_enrichment_fails(
+) -> None:
+    item = candidate(400)
+    collector = QueryCollector({"first": [item]})
+
+    class FrameEnrichmentFailureMedia(Media):
+        async def add_low_confidence_frames(
+            self, item: CollectorAd, qualification: TechnicalQualification, *, job_id: str
+        ) -> TechnicalQualification:
+            self.low_confidence_calls.append(item.ad_library_id)
+            raise RuntimeError("frame enrichment unavailable")
+
+    media = FrameEnrichmentFailureMedia()
+    model = Model(
+        plans=[["first"]],
+        confidence_by_ad_id={item.ad_library_id: 0.5},
+        score_by_ad_id={item.ad_library_id: 75},
+    )
+
+    result = await run_custom(collector=collector, media=media, model=model, target_count=1)
+
+    assert result.status == "completed"
+    assert result.summary["model_scoring_failed"] == 0
+    assert media.low_confidence_calls == [item.ad_library_id]
+    assert model.score_calls_by_ad_id[item.ad_library_id] == 1
+    assert result.ads[0]["visual_total"] == 75.0
+    assert result.ads[0]["media"]["frame_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_preserves_first_low_confidence_score_when_follow_up_fails() -> None:
     item = candidate(401)
     collector = QueryCollector({"first": [item]})
