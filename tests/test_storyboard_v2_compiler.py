@@ -3,6 +3,7 @@
 import pytest
 
 from backend.app.schemas.ai import (
+    DirectorOverlayInstruction,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboardDraft,
@@ -393,6 +394,71 @@ def test_compiler_preserves_creative_text_verbatim() -> None:
         assert compiled.camera_instruction == source.camera_instruction
         assert compiled.effect_timing == source.effect_timing
 
+def test_compiler_uses_director_action_ratios_over_conflicting_draft_seconds() -> None:
+    draft = _draft()
+    draft.scenes[0].end_second = 10.5
+    draft.scenes[1].start_second = 10.5
+
+    storyboard = compile_storyboard_v2(
+        draft,
+        _analysis(),
+        duration_seconds=12,
+        aspect_ratio="9:16",
+    )
+
+    assert storyboard.scenes[0].end_second == pytest.approx(3.0)
+    assert storyboard.scenes[1].start_second == pytest.approx(3.0)
+
+
+def test_compiler_replaces_conflicting_draft_overlay_with_director_lifecycle() -> None:
+    director_overlay = DirectorOverlayInstruction(
+        reference_element="reward panel",
+        strategy="omit",
+        timing_instruction="Allow the observed reward panel only as reference evidence.",
+        final_frame_requirement="Do not add it to the supplied last-frame base layer.",
+    )
+    plan = _director_plan().model_copy(
+        update={"overlay_lifecycle_plan": [director_overlay]}
+    )
+    analysis = _analysis().model_copy(update={"director_plan": plan})
+    draft = _draft()
+    draft.scenes[1].overlay_instruction = DirectorOverlayInstruction(
+        reference_element="reward panel",
+        strategy="persist_to_final",
+        timing_instruction="Keep it visible after impact.",
+        final_frame_requirement="Force it onto the final frame.",
+    )
+
+    storyboard = compile_storyboard_v2(
+        draft,
+        analysis,
+        duration_seconds=12,
+        aspect_ratio="9:16",
+    )
+
+    assert storyboard.scenes[1].overlay_instruction == director_overlay
+
+
+def test_compiler_drops_draft_overlay_missing_from_director_lifecycle() -> None:
+    analysis = _analysis()
+    draft = _draft()
+    draft.scenes[1].overlay_instruction = DirectorOverlayInstruction(
+        reference_element="unplanned badge",
+        strategy="persist_to_final",
+        timing_instruction="Keep the badge visible after impact.",
+        final_frame_requirement="Force the badge onto the final frame.",
+    )
+
+    storyboard = compile_storyboard_v2(
+        draft,
+        analysis,
+        duration_seconds=12,
+        aspect_ratio="9:16",
+    )
+
+    assert storyboard.scenes[1].overlay_instruction is None
+
+
 @pytest.mark.parametrize(
     ("duration_seconds", "scene_count", "time_hints"),
     [
@@ -454,9 +520,25 @@ def test_two_scene_storyboard_keeps_climax_when_first_scene_overlaps_director_be
         }
     )
 
+    plan = _director_plan()
+    action_window = plan.action_arc_windows[1].model_copy(update={"start_ratio": 0.5})
+    analysis = _analysis().model_copy(
+        update={
+            "director_plan": plan.model_copy(
+                update={
+                    "action_arc_windows": [
+                        plan.action_arc_windows[0],
+                        action_window,
+                        plan.action_arc_windows[2],
+                    ]
+                }
+            )
+        }
+    )
+
     storyboard = compile_storyboard_v2(
         draft,
-        _analysis(),
+        analysis,
         duration_seconds=1,
         aspect_ratio="9:16",
     )

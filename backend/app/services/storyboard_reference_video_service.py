@@ -50,8 +50,9 @@ def adapt_reference_behavior_timeline(
     """Convert reference-relative behavior beats into target-generation time windows.
 
     Reference seconds describe observed timing only.  The returned windows are a fresh,
-    non-linear target timeline: causal beats retain their order and readability, while
-    persistent reference elements may overlap the final target anchor as an overlay.
+    non-linear target timeline: causal beats retain their order and readability.  A
+    reference overlay visible at source end remains observation evidence only; the director
+    overlay lifecycle plan decides whether it belongs in the generated final frame.
     """
     if target_duration_seconds <= 0:
         raise ValueError("target_duration_seconds must be greater than zero")
@@ -157,11 +158,13 @@ def adapt_reference_behavior_timeline(
             target_end_second=target_duration_seconds,
             importance=beat.importance,
             depends_on=beat.depends_on,
-            must_remain_visible_until_final=True,
+            must_remain_visible_until_final=False,
             locked_text=beat.locked_text,
             adaptation_instruction=(
-                "Introduce this reference element in the target window and keep it visible "
-                "as a final overlay on top of the target last-frame base layer."
+                "Treat source-end visibility as observed reference evidence only. Preserve "
+                "the exact locked text when selected, but let the director overlay_lifecycle_plan "
+                "decide whether it appears, is replaced, is omitted, or persists into the "
+                "generated final frame."
             ),
         )
 
