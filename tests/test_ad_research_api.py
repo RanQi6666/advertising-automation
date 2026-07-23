@@ -1,5 +1,7 @@
 import asyncio
+import re
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -20,6 +22,55 @@ def _payload() -> dict:
         "keywords": ["rummy", "casino"],
         "target_count": 25,
     }
+
+
+def test_ad_research_api_document_preserves_external_task_state_contract() -> None:
+    document = (Path(__file__).resolve().parents[1] / "docs" / "ad-research-api.md").read_text(
+        encoding="utf-8"
+    )
+    polling_section = re.search(
+        r"^## 2\. 轮询任务结果\s*(.*?)(?=^### |^## |\Z)", document, re.MULTILINE | re.DOTALL
+    )
+    status_section = re.search(
+        r"^## 任务状态与错误\s*(.*?)(?=^## |\Z)", document, re.MULTILINE | re.DOTALL
+    )
+
+    assert polling_section is not None
+    assert status_section is not None
+    polling_contract = polling_section.group(1)
+    status_contract = status_section.group(1)
+
+    assert re.search(
+        r"新任务\s*只会.*?`queued`.*?`processing`.*?`completed`.*?`failed`.*?状态",
+        polling_contract,
+        re.DOTALL,
+    )
+    assert "insufficient" not in polling_contract
+
+    legacy_row = re.search(r"^\|\s*`insufficient`\s*\|.*$", status_contract, re.MULTILINE)
+    completed_row = re.search(r"^\|\s*`completed`\s*\|.*$", status_contract, re.MULTILINE)
+    failed_row = re.search(r"^\|\s*`failed`\s*\|.*$", status_contract, re.MULTILINE)
+    expired_row = re.search(
+        r"^\|\s*`410 Gone`\s*/\s*`expired`\s*\|.*$", status_contract, re.MULTILINE
+    )
+
+    assert legacy_row is not None
+    assert re.search(
+        r"(?:历史.*?(?:只读|兼容)|legacy(?:-only)?)", legacy_row.group(), re.IGNORECASE
+    )
+    assert re.search(r"新任务.*?(?:绝不会|不会).*?(?:产生|出现)", legacy_row.group())
+    assert not re.search(r"(?:partial|top\s*n)", legacy_row.group(), re.IGNORECASE)
+
+    assert completed_row is not None
+    assert re.search(r"严格.*?`target_count`", completed_row.group())
+    assert "停止轮询" in completed_row.group()
+
+    assert failed_row is not None
+    assert re.search(r"`ads`\s*为\s*`null`", failed_row.group())
+    assert "停止轮询" in failed_row.group()
+
+    assert expired_row is not None
+    assert re.search(r"GET.*?`410 Gone`", expired_row.group())
 
 
 def test_create_replay_conflict_and_poll(monkeypatch) -> None:
