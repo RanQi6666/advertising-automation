@@ -183,3 +183,132 @@ async def test_failed_job_deletes_ad_research_media(tmp_path, monkeypatch) -> No
     finally:
         await engine.dispose()
         get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_complete_job_rejects_non_exact_completed_result() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-exact-count", country="IN", category="gambling",
+                    target_count=3,
+                ),
+            )
+
+            with pytest.raises(
+                ValueError, match="completed ad research result must match target_count"
+            ):
+                await service.complete_job(
+                    session,
+                    created.job,
+                    status="completed",
+                    ads=[{"ad_library_id": "only-one"}],
+                    summary={},
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_clears_partial_ads_and_returns_redacted_error() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-failed-empty", country="IN", category="gambling",
+                    target_count=3,
+                ),
+            )
+            created.job.result_json = {"ads": [{"ad_library_id": "partial-ad"}]}
+            created.job.result_expires_at = utcnow() + timedelta(hours=1)
+
+            await service.complete_job(
+                session,
+                created.job,
+                status="failed",
+                ads=[],
+                summary={"reason": "insufficient_qualified_ads"},
+            )
+
+            response = service.poll_response(created.job)
+            assert created.job.result_json is None
+            assert created.job.result_expires_at is None
+            assert response.status == "failed"
+            assert response.ads is None
+            assert response.error == {
+                "code": "insufficient_qualified_ads",
+                "message": "research could not produce the requested number of scored ads",
+            }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_insufficient_job_is_pollable_and_expires() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-legacy-insufficient",
+                    country="IN",
+                    category="gambling",
+                ),
+            )
+            created.job.status = "insufficient"
+            created.job.stage = "insufficient"
+            created.job.result_json = {"ads": [{"ad_library_id": "legacy-1"}]}
+            created.job.result_expires_at = utcnow() - timedelta(seconds=1)
+            await session.commit()
+
+            assert service.poll_response(created.job).ads == [{"ad_library_id": "legacy-1"}]
+            assert await service.cleanup_expired_results(session) == 1
+            assert created.job.status == "expired"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_job_rejects_ads_for_failed_completion() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-failed-ads", country="IN", category="gambling"
+                ),
+            )
+
+            with pytest.raises(ValueError, match="failed ad research result must not include ads"):
+                await service.complete_job(
+                    session,
+                    created.job,
+                    status="failed",
+                    ads=[{"ad_library_id": "partial-ad"}],
+                    summary={},
+                )
+    finally:
+        await engine.dispose()

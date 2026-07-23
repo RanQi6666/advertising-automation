@@ -22,6 +22,7 @@ AD_RESEARCH_QUEUE_NAME = "ad_research_queue"
 AD_RESEARCH_TASK_TYPE = "ad_research"
 AD_RESEARCH_BUSINESS_TYPE = "ad_research"
 RESULT_RETENTION_HOURS = 24
+FAILED_RESULT_MESSAGE = "research could not produce the requested number of scored ads"
 
 
 class AdResearchIdempotencyConflict(AppError):
@@ -221,12 +222,12 @@ class AdResearchService:
         return job
 
     def poll_response(self, job: AdResearchJob) -> AdResearchPollResponse:
-        final = job.status in {"completed", "insufficient"}
+        result_available = job.status in {"completed", "insufficient"}
         error = None
         if job.status == "failed":
             error = {
                 "code": job.error_code or "ad_research_failed",
-                "message": job.error_message_summary or "ad research task failed",
+                "message": FAILED_RESULT_MESSAGE,
             }
         result = job.result_json or {}
         return AdResearchPollResponse(
@@ -236,10 +237,10 @@ class AdResearchService:
             stage=job.stage,
             round=job.current_round,
             progress=job.progress_json or {},
-            poll_after_seconds=None if final or job.status == "failed" else 3,
+            poll_after_seconds=None if result_available or job.status == "failed" else 3,
             research_summary=job.summary_json or {},
-            ads=list(result.get("ads") or []) if final else None,
-            result_expires_at=job.result_expires_at if final else None,
+            ads=list(result.get("ads") or []) if result_available else None,
+            result_expires_at=job.result_expires_at if result_available else None,
             error=error,
         )
 
@@ -249,7 +250,9 @@ class AdResearchService:
         job.status = "failed"
         job.stage = "dispatch_failed"
         job.error_code = "queue_dispatch_failed"
-        job.error_message_summary = _safe_error(error)
+        job.error_message_summary = FAILED_RESULT_MESSAGE
+        job.result_json = None
+        job.result_expires_at = None
         task = (
             await session.get(GenerationTask, job.generation_task_id)
             if job.generation_task_id
@@ -272,15 +275,28 @@ class AdResearchService:
         summary: dict[str, Any],
     ) -> None:
         now = utcnow()
+        if status == "completed":
+            if len(ads) != job.target_count:
+                raise ValueError("completed ad research result must match target_count")
+            job.stage = "completed"
+            job.result_json = {"ads": ads}
+            job.result_expires_at = now + timedelta(hours=RESULT_RETENTION_HOURS)
+            job.error_code = None
+            job.error_message_summary = None
+        elif status == "failed":
+            if ads:
+                raise ValueError("failed ad research result must not include ads")
+            job.stage = "failed"
+            job.result_json = None
+            job.result_expires_at = None
+            job.error_code = str(summary.get("reason") or "insufficient_qualified_ads")[:64]
+            job.error_message_summary = FAILED_RESULT_MESSAGE
+        else:
+            raise ValueError(f"unsupported ad research completion status: {status}")
         job.status = status
-        job.stage = "completed" if status == "completed" else "insufficient"
-        job.result_json = {"ads": ads}
         job.summary_json = summary
         job.progress_json = {**(job.progress_json or {}), "selected_count": len(ads)}
         job.completed_at = now
-        job.result_expires_at = now + timedelta(hours=RESULT_RETENTION_HOURS)
-        job.error_code = None
-        job.error_message_summary = None
         await session.commit()
 
     async def fail_job(self, session: AsyncSession, job: AdResearchJob, error: Exception) -> None:
@@ -288,7 +304,9 @@ class AdResearchService:
         job.status = "failed"
         job.stage = "failed"
         job.error_code = "ad_research_unexpected_error"
-        job.error_message_summary = _safe_error(error)
+        job.error_message_summary = FAILED_RESULT_MESSAGE
+        job.result_json = None
+        job.result_expires_at = None
         job.completed_at = utcnow()
         await session.commit()
 
@@ -303,7 +321,9 @@ class AdResearchService:
         job.status = "failed"
         job.stage = "failed"
         job.error_code = task.error_code or "task_stale"
-        job.error_message_summary = (task.error_message or "ad research task became stale")[:300]
+        job.error_message_summary = FAILED_RESULT_MESSAGE
+        job.result_json = None
+        job.result_expires_at = None
         job.completed_at = utcnow()
         await session.commit()
 
@@ -352,8 +372,3 @@ def _initial_progress() -> dict[str, Any]:
         "score_distribution": {},
         "twenty_fifth_score": None,
     }
-
-
-def _safe_error(error: Exception) -> str:
-    value = str(error).replace("\n", " ").strip()
-    return (value or error.__class__.__name__)[:300]
