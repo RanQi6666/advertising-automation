@@ -26,10 +26,18 @@ from backend.app.services.ad_research_model import (
 )
 from backend.app.services.ad_research_service import AdResearchService
 
-MAX_ROUNDS = 4
-MAX_RAW_CANDIDATES = 500
+STANDARD_ROUNDS = 4
+MAX_ROUNDS = 6
+MAX_RAW_CANDIDATES = 650
 PER_QUERY_LIMIT = 50
+MODEL_SCORE_ATTEMPTS = 2
 LOW_CONFIDENCE_THRESHOLD = 0.60
+
+_QUALITY_SUPPLEMENT_SIGNALS = {
+    "game_gambling": ("game ui", "slot reels", "slot ui"),
+    "sports_betting": ("sports odds board",),
+    "gambling_adjacent": ("wallet or balance ui", "reward animation"),
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,13 @@ class AdResearchOrchestrator:
         termination_reason: str | None = None
 
         for round_number in range(1, MAX_ROUNDS + 1):
+            quality_supplement_mode = round_number > STANDARD_ROUNDS
+            round_budget = _round_budget(round_number, raw_collected)
+            planner_gap_summary = {
+                **gap_summary,
+                "quality_supplement_mode": quality_supplement_mode,
+                "round_budget": round_budget,
+            }
             job.current_round = round_number
             job.stage = "planning_queries"
             planned_queries = await self.model.plan_queries(
@@ -89,7 +104,7 @@ class AdResearchOrchestrator:
                 category=job.category,
                 seed_keywords=list(job.seed_keywords_json or []),
                 round_number=round_number,
-                gap_summary=gap_summary,
+                gap_summary=planner_gap_summary,
             )
             if not planned_queries:
                 termination_reason = "query_planning_empty"
@@ -102,6 +117,10 @@ class AdResearchOrchestrator:
                 used_queries,
                 round_number=round_number,
             )
+            if not queries:
+                termination_reason = "query_planning_empty"
+                break
+
             job.stage = "collecting"
             round_raw_collected = 0
             candidates_before_round = len(seen)
@@ -111,12 +130,13 @@ class AdResearchOrchestrator:
                 remaining = MAX_RAW_CANDIDATES - raw_collected
                 if remaining <= 0:
                     break
-                ads = await self.collector.collect(
+                collected_ads = await self.collector.collect(
                     request_id=job.id,
                     query=query.query,
                     country=job.country,
                     limit=min(PER_QUERY_LIMIT, remaining),
                 )
+                ads = collected_ads[:remaining]
                 collected_queries.append(query)
                 raw_count = len(ads)
                 new_unique_count = 0
@@ -178,8 +198,11 @@ class AdResearchOrchestrator:
                 scored_by_ad_library_id, source_query_ids_by_ad_library_id
             )
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+            priority_counts = _priority_counts(scored)
             selected = _select_ranked(scored, job.target_count)
             score_distribution = _score_distribution(scored)
+            round_budget = _round_budget(round_number, raw_collected)
+            quality_summary = _quality_summary(selected)
             progress = {
                 "raw_collected": raw_collected,
                 "deduplicated": len(candidates),
@@ -189,10 +212,12 @@ class AdResearchOrchestrator:
                 "model_relevant": len(scored),
                 "selected_count": len(selected),
                 "score_distribution": score_distribution,
-                "quality_summary": _quality_summary(selected),
+                "priority_counts": priority_counts,
+                "quality_summary": quality_summary,
+                "fallback_count": quality_summary["fallback_count"],
+                "query_metrics": [],
+                "round_budget": round_budget,
             }
-            job.progress_json = progress
-            await session.commit()
 
             technical_rejection_summary = _technical_rejection_summary(
                 technical_diagnostics_by_ad_library_id
@@ -205,20 +230,28 @@ class AdResearchOrchestrator:
                 scored_by_ad_library_id=scored_by_ad_library_id,
             )
             all_query_metrics.extend(query_metrics)
-            priority_counts = _priority_counts(scored)
+            progress["query_metrics"] = list(all_query_metrics)
+            job.progress_json = progress
+            await session.commit()
             round_new_candidates = len(candidates) - candidates_before_round
+            diagnostics = ["no_new_candidates"] if round_new_candidates == 0 else []
             round_summaries.append(
                 {
+                    **progress,
                     "round": round_number,
+                    "quality_supplement_mode": quality_supplement_mode,
                     "queries": [query.query for query in collected_queries],
                     "planned_query_count": len(planned_queries),
                     "skipped_query_count": len(planned_queries) - len(queries),
                     "skipped_query_diagnostics": skipped_query_diagnostics,
                     "round_raw_collected": round_raw_collected,
                     "round_new_candidates": round_new_candidates,
+                    "diagnostics": diagnostics,
                     "query_metrics": query_metrics,
                     "priority_counts": priority_counts,
-                    **progress,
+                    "quality_summary": quality_summary,
+                    "fallback_count": quality_summary["fallback_count"],
+                    "round_budget": round_budget,
                     "technical_rejection_summary": technical_rejection_summary,
                 }
             )
@@ -226,6 +259,11 @@ class AdResearchOrchestrator:
                 "target_count": job.target_count,
                 "missing_count": max(job.target_count - len(scored), 0),
                 "priority_counts": priority_counts,
+                "priority_gap_counts": _priority_gap_counts(priority_counts, job.target_count),
+                "priority_gaps": _quality_supplement_signals(priority_counts, job.target_count),
+                "missing_play_patterns": _quality_supplement_signals(
+                    priority_counts, job.target_count
+                ),
                 "query_metrics": query_metrics,
                 "query_performance": _planner_query_performance(query_metrics),
                 "previous_queries": list(used_queries),
@@ -236,7 +274,9 @@ class AdResearchOrchestrator:
                 "skipped_query_diagnostics": skipped_query_diagnostics,
             }
 
-            if len(scored) >= job.target_count:
+            has_scored_target = len(scored) >= job.target_count
+            has_p1_target = priority_counts["game_gambling"] >= job.target_count
+            if has_p1_target:
                 return await self._complete(
                     session=session,
                     job=job,
@@ -250,24 +290,32 @@ class AdResearchOrchestrator:
                     round_summaries=round_summaries,
                     query_metrics=all_query_metrics,
                 )
+
             if round_number == MAX_ROUNDS or raw_collected >= MAX_RAW_CANDIDATES:
-                termination_reason = "insufficient_qualified_ads"
-                break
-            if round_new_candidates == 0:
-                termination_reason = "no_new_candidates"
-                break
+                return await self._complete(
+                    session=session,
+                    job=job,
+                    status="completed" if has_scored_target else "failed",
+                    selected=selected if has_scored_target else [],
+                    raw_collected=raw_collected,
+                    deduplicated=len(candidates),
+                    technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                    scored=scored,
+                    model_scoring_failed_ids=model_scoring_failed_ids,
+                    round_summaries=round_summaries,
+                    query_metrics=all_query_metrics,
+                    reason=None if has_scored_target else "insufficient_qualified_ads",
+                )
 
         _refresh_scored_source_attribution(
             scored_by_ad_library_id, source_query_ids_by_ad_library_id
         )
         scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
-        selected = _select_ranked(scored, job.target_count)
-        status = "completed" if len(scored) >= job.target_count else "insufficient"
         return await self._complete(
             session=session,
             job=job,
-            status=status,
-            selected=selected,
+            status="failed",
+            selected=[],
             raw_collected=raw_collected,
             deduplicated=len(seen),
             technical_diagnostics=technical_diagnostics_by_ad_library_id,
@@ -302,12 +350,20 @@ class AdResearchOrchestrator:
             media = qualification.media
             if media is None:
                 return candidate, qualification, None, True
+
             try:
                 score = await call_model(qualification.duration_seconds, media)
             except Exception:
-                return candidate, qualification, None, True
+                if MODEL_SCORE_ATTEMPTS < 2:
+                    return candidate, qualification, None, True
+                try:
+                    retry_score = await call_model(qualification.duration_seconds, media)
+                except Exception:
+                    return candidate, qualification, None, True
+                return candidate, qualification, retry_score, False
 
-            if float(score.get("analysis_confidence") or 0) >= LOW_CONFIDENCE_THRESHOLD:
+            confidence = float(score.get("analysis_confidence") or 0)
+            if confidence >= LOW_CONFIDENCE_THRESHOLD:
                 return candidate, qualification, score, False
 
             try:
@@ -321,6 +377,8 @@ class AdResearchOrchestrator:
             try:
                 rescored = await call_model(enriched.duration_seconds, enriched.media)
             except Exception:
+                # A low-confidence follow-up preserves the successful first score. It is not
+                # an independent retry budget beyond the two allowed model calls.
                 return candidate, qualification, score, False
             return candidate, enriched, rescored, False
 
@@ -344,20 +402,42 @@ class AdResearchOrchestrator:
         query_metrics: list[dict[str, Any]],
         reason: str | None = None,
     ) -> AdResearchRunResult:
-        await self.media.retain_only(job.id, {ad["ad_library_id"] for ad in selected})
+        completed_selected = selected if status == "completed" else []
+        if status == "completed":
+            await self.media.retain_only(
+                job.id, {ad["ad_library_id"] for ad in completed_selected}
+            )
+        else:
+            await self.media.cleanup_job_media(job.id)
         summary = _summary(
             raw=raw_collected,
             deduplicated=deduplicated,
             technical_diagnostics=technical_diagnostics,
             scored=scored,
-            selected=selected,
+            selected=completed_selected,
             model_scoring_failed_ids=model_scoring_failed_ids,
             round_summaries=round_summaries,
             query_metrics=query_metrics,
             reason=reason,
         )
-        await self.service.complete_job(session, job, status=status, ads=selected, summary=summary)
-        return AdResearchRunResult(status, selected, summary)
+        quality_summary = summary["quality_summary"]
+        job.progress_json = {
+            **(job.progress_json or {}),
+            "priority_counts": summary["priority_counts"],
+            "quality_summary": quality_summary,
+            "query_metrics": summary["query_metrics"],
+            "fallback_count": quality_summary["fallback_count"],
+            "round_budget": summary["round_budget"],
+            "selected_count": len(completed_selected),
+        }
+        await self.service.complete_job(
+            session,
+            job,
+            status=status,
+            ads=completed_selected,
+            summary=summary,
+        )
+        return AdResearchRunResult(status, completed_selected, summary)
 
     async def execute_task(self, session: AsyncSession, task: GenerationTask) -> None:
         job = await session.get(AdResearchJob, task.business_id)
@@ -704,6 +784,40 @@ def _technical_rejection_summary(
     return summary
 
 
+def _round_budget(round_number: int, raw_collected: int) -> dict[str, int | bool]:
+    current_round = max(round_number, 0)
+    return {
+        "standard_rounds": STANDARD_ROUNDS,
+        "max_rounds": MAX_ROUNDS,
+        "current_round": current_round,
+        "remaining_rounds": max(MAX_ROUNDS - current_round, 0),
+        "max_raw_candidates": MAX_RAW_CANDIDATES,
+        "remaining_raw_candidates": max(MAX_RAW_CANDIDATES - raw_collected, 0),
+        "quality_supplement_mode": current_round > STANDARD_ROUNDS,
+    }
+
+
+def _priority_gap_counts(priority_counts: dict[str, int], target_count: int) -> dict[str, int]:
+    return {
+        priority: max(target_count - count, 0)
+        for priority, count in priority_counts.items()
+        if priority != "unrelated"
+    }
+
+
+def _quality_supplement_signals(
+    priority_counts: dict[str, int], target_count: int
+) -> list[str]:
+    signals: list[str] = []
+    for priority in ("game_gambling", "sports_betting", "gambling_adjacent"):
+        if priority_counts.get(priority, 0) >= target_count:
+            continue
+        for signal in _QUALITY_SUPPLEMENT_SIGNALS[priority]:
+            if signal not in signals:
+                signals.append(signal)
+    return signals
+
+
 def _summary(
     *,
     raw: int,
@@ -716,6 +830,9 @@ def _summary(
     query_metrics: list[dict[str, Any]],
     reason: str | None,
 ) -> dict[str, Any]:
+    priority_counts = _priority_counts(scored)
+    quality_summary = _quality_summary(selected)
+    current_round = int(round_summaries[-1]["round"]) if round_summaries else 0
     summary = {
         "raw_collected": raw,
         "deduplicated": deduplicated,
@@ -730,7 +847,10 @@ def _summary(
         "maximum_video_seconds": MAX_VIDEO_SECONDS,
         "score_distribution": _score_distribution(scored),
         "high_score_visible_elements": _high_score_visible_elements(scored),
-        "quality_summary": _quality_summary(selected),
+        "priority_counts": priority_counts,
+        "quality_summary": quality_summary,
+        "fallback_count": quality_summary["fallback_count"],
+        "round_budget": _round_budget(current_round, raw),
         "technical_rejection_summary": _technical_rejection_summary(technical_diagnostics),
         "rounds": round_summaries,
         "query_metrics": sorted(query_metrics, key=lambda item: str(item["query_id"])),

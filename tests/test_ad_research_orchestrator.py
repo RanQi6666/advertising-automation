@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import backend.app.services.ad_research_orchestrator as orchestrator_module
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.schemas.ad_research import AdResearchCreateRequest, CollectorAd
@@ -51,6 +52,8 @@ class Collector:
 
     async def collect(self, **kwargs: Any) -> list[CollectorAd]:
         self.calls += 1
+        if self.calls > len(self.sizes):
+            return []
         start = sum(self.sizes[: self.calls - 1])
         return [candidate(index) for index in range(start, start + self.sizes[self.calls - 1])]
 
@@ -64,6 +67,7 @@ class Media:
         self.rejected = rejected or {}
         self.frame_count_by_ad_id = frame_count_by_ad_id or {}
         self.retain_calls: list[set[str]] = []
+        self.cleanup_calls: list[str] = []
         self.low_confidence_calls: list[str] = []
         self.inspect_calls_by_ad_id: dict[str, int] = {}
 
@@ -90,7 +94,7 @@ class Media:
         self.retain_calls.append(ad_library_ids)
 
     async def cleanup_job_media(self, job_id: str) -> None:
-        return None
+        self.cleanup_calls.append(job_id)
 
     def _qualification(self, item: CollectorAd) -> TechnicalQualification:
         reasons = self.rejected.get(item.ad_library_id, ())
@@ -116,12 +120,15 @@ class Model:
         confidence_by_ad_id: dict[str, float] | None = None,
         visual_priority_by_ad_id: dict[str, str] | None = None,
         fail_ids: set[str] | None = None,
+        fail_once_ids: set[str] | None = None,
         plans: list[list[str]] | None = None,
     ) -> None:
         self.score_by_ad_id = score_by_ad_id or {}
         self.confidence_by_ad_id = confidence_by_ad_id or {}
         self.visual_priority_by_ad_id = visual_priority_by_ad_id or {}
         self.fail_ids = fail_ids or set()
+        self.fail_once_ids = fail_once_ids or set()
+        self.failed_once_ids: set[str] = set()
         self.plans = plans
         self.plan_calls: list[dict[str, Any]] = []
         self.score_calls_by_ad_id: dict[str, int] = {}
@@ -137,9 +144,12 @@ class Model:
         self, *, category: str, duration_seconds: float, media: PreparedAdMedia
     ) -> dict[str, Any]:
         marker = str(media.cover_url or "").split("/")[-2]
+        self.score_calls_by_ad_id[marker] = self.score_calls_by_ad_id.get(marker, 0) + 1
         if marker in self.fail_ids:
             raise RuntimeError("model unavailable")
-        self.score_calls_by_ad_id[marker] = self.score_calls_by_ad_id.get(marker, 0) + 1
+        if marker in self.fail_once_ids and marker not in self.failed_once_ids:
+            self.failed_once_ids.add(marker)
+            raise RuntimeError("model temporarily unavailable")
         total = self.score_by_ad_id.get(marker, 80.0)
         confidence = self.confidence_by_ad_id.get(marker, 0.9)
         remaining = max(float(total), 0.0)
@@ -228,6 +238,134 @@ async def run(sizes: list[int], model: Model | None = None, *, target_count: int
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_completes_early_when_p1_reaches_target() -> None:
+    first = candidate(200)
+    second = candidate(201)
+    model = Model(plans=[["first"], ["second"]])
+
+    result = await run_custom(
+        collector=QueryCollector({"first": [first, second]}),
+        media=Media(),
+        model=model,
+        target_count=2,
+    )
+
+    assert result.status == "completed"
+    assert len(result.ads) == 2
+    assert len(model.plan_calls) == 1
+    assert result.summary["priority_counts"]["game_gambling"] == 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_uses_rounds_five_and_six_before_p4_fill() -> None:
+    candidates = [candidate(210 + index) for index in range(6)]
+    queries = [f"query-{index}" for index in range(1, 7)]
+    model = Model(
+        plans=[[query] for query in queries],
+        visual_priority_by_ad_id={item.ad_library_id: "unrelated" for item in candidates},
+    )
+
+    result = await run_custom(
+        collector=QueryCollector(dict(zip(queries, ([item] for item in candidates), strict=True))),
+        media=Media(),
+        model=model,
+        target_count=6,
+    )
+
+    assert result.status == "completed"
+    assert len(model.plan_calls) == 6
+    assert result.summary["rounds"][-1]["round"] == 6
+    assert result.summary["quality_summary"]["fallback_used"] is True
+    for call in model.plan_calls[4:]:
+        gap = call["gap_summary"]
+        assert gap["quality_supplement_mode"] is True
+        assert gap["query_metrics"]
+        assert gap["priority_gaps"]
+        assert gap["missing_play_patterns"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_retries_one_model_failure() -> None:
+    item = candidate(220)
+    model = Model(plans=[["first"]], fail_once_ids={item.ad_library_id})
+
+    result = await run_custom(
+        collector=QueryCollector({"first": [item]}),
+        media=Media(),
+        model=model,
+        target_count=1,
+    )
+
+    assert result.status == "completed"
+    assert model.score_calls_by_ad_id[item.ad_library_id] == 2
+    assert result.summary["model_scoring_failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fails_without_partial_ads_when_scored_below_target() -> None:
+    first = candidate(230)
+    second = candidate(231)
+    media = Media()
+    model = Model(plans=[[f"query-{index}"] for index in range(1, 7)])
+
+    result = await run_custom(
+        collector=QueryCollector({"query-1": [first, second]}),
+        media=media,
+        model=model,
+        target_count=3,
+    )
+
+    assert result.status == "failed"
+    assert result.status != "insufficient"
+    assert result.ads == []
+    assert result.summary["selected_count"] == 0
+    assert result.summary["reason"] == "insufficient_qualified_ads"
+    assert len(media.cleanup_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_continues_after_zero_new_candidate_round() -> None:
+    first = candidate(240)
+    last = candidate(241)
+    queries = [f"query-{index}" for index in range(1, 7)]
+    model = Model(plans=[[query] for query in queries])
+
+    result = await run_custom(
+        collector=QueryCollector({"query-1": [first], "query-6": [last]}),
+        media=Media(),
+        model=model,
+        target_count=2,
+    )
+
+    assert result.status == "completed"
+    assert len(model.plan_calls) == 6
+    round_new_candidates = [
+        round_summary["round_new_candidates"] for round_summary in result.summary["rounds"]
+    ]
+    assert round_new_candidates == [1, 0, 0, 0, 0, 1]
+    assert result.summary["rounds"][1]["diagnostics"] == ["no_new_candidates"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fails_when_raw_candidate_budget_is_exhausted(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator_module, "MAX_RAW_CANDIDATES", 3)
+    model = Model(plans=[["first"], ["second"]])
+
+    result = await run_custom(
+        collector=Collector([3]),
+        media=Media(),
+        model=model,
+        target_count=4,
+    )
+
+    assert result.status == "failed"
+    assert result.ads == []
+    assert result.summary["raw_collected"] == 3
+    assert result.summary["round_budget"]["max_raw_candidates"] == 3
+    assert len(model.plan_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_collects_again_when_first_round_is_short() -> None:
     collector, media, result = await run([10, 15])
 
@@ -240,12 +378,13 @@ async def test_orchestrator_collects_again_when_first_round_is_short() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_returns_insufficient_without_padding() -> None:
-    _, _, result = await run([5, 0, 0, 0])
+async def test_orchestrator_fails_without_padding_when_candidates_remain_below_target() -> None:
+    _, media, result = await run([5, 0, 0, 0, 0, 0])
 
-    assert result.status == "insufficient"
-    assert len(result.ads) == 5
-    assert result.summary["reason"] == "no_new_candidates"
+    assert result.status == "failed"
+    assert result.ads == []
+    assert result.summary["reason"] == "insufficient_qualified_ads"
+    assert len(media.cleanup_calls) == 1
     assert "twenty_fifth_score" not in result.summary
 
 
@@ -359,14 +498,15 @@ async def test_orchestrator_records_model_scoring_failure_without_zero_score() -
 
     result = await run_custom(collector=collector, media=media, model=model, target_count=2)
 
-    assert result.status == "insufficient"
-    assert [ad["ad_library_id"] for ad in result.ads] == [scored.ad_library_id]
+    assert result.status == "failed"
+    assert result.ads == []
+    assert model.score_calls_by_ad_id[failed.ad_library_id] == 2
     assert result.summary["model_scoring_failed"] == 1
     assert result.summary["model_scored"] == 1
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_returns_insufficient_when_query_planning_is_empty() -> None:
+async def test_orchestrator_fails_when_query_planning_is_empty() -> None:
     collector = Collector([1])
     media = Media()
     model = Model(plans=[])
@@ -374,7 +514,7 @@ async def test_orchestrator_returns_insufficient_when_query_planning_is_empty() 
     result = await run_custom(collector=collector, media=media, model=model, target_count=1)
 
     assert collector.calls == 0
-    assert result.status == "insufficient"
+    assert result.status == "failed"
     assert result.ads == []
     assert result.summary["reason"] == "query_planning_empty"
 
@@ -536,9 +676,9 @@ async def test_orchestrator_does_not_collect_a_query_twice_across_rounds() -> No
 
     result = await run_custom(collector=collector, media=media, model=model, target_count=3)
 
-    assert result.status == "insufficient"
+    assert result.status == "failed"
     assert collector.queries == ["Alpha", "Beta"]
-    assert [ad["ad_library_id"] for ad in result.ads] == ["ad-10", "ad-9"]
+    assert result.ads == []
 
 
 @pytest.mark.asyncio
@@ -551,10 +691,8 @@ async def test_orchestrator_summary_exposes_visual_scores_and_technical_rejectio
 
     result = await run_custom(collector=collector, media=media, model=model, target_count=25)
 
-    assert result.status == "insufficient"
-    assert len(result.ads) == 1
-    assert result.ads[0]["final_score"] == result.ads[0]["visual_total"] == 80.0
-    assert "public_continuity_points" not in result.ads[0]
+    assert result.status == "failed"
+    assert result.ads == []
     assert result.summary["minimum_active_days"] == 1
     assert result.summary["maximum_video_seconds"] == 30.0
     assert result.summary["technical_rejection_summary"] == {"active_days_below_minimum": 1}
@@ -569,7 +707,7 @@ async def test_orchestrator_ranks_game_gambling_before_higher_scoring_sports_bet
     sports = candidate(102)
     collector = QueryCollector({"first": [sports, game]})
     model = Model(
-        plans=[["first"]],
+        plans=[["first"], ["second"], ["third"], ["fourth"], ["fifth"], ["sixth"]],
         score_by_ad_id={game.ad_library_id: 30, sports.ad_library_id: 95},
         visual_priority_by_ad_id={
             game.ad_library_id: "game_gambling",
@@ -634,7 +772,7 @@ async def test_orchestrator_marks_only_selected_unrelated_ads_as_transparent_fal
     unselected_fallback = candidate(124)
     candidates = [unselected_fallback, fallback, adjacent, sports, game]
     model = Model(
-        plans=[["first"]],
+        plans=[["first"], ["second"], ["third"], ["fourth"], ["fifth"], ["sixth"]],
         score_by_ad_id={
             game.ad_library_id: 10,
             sports.ad_library_id: 90,
@@ -829,7 +967,7 @@ async def test_orchestrator_skips_reused_or_wrong_round_structured_query_ids() -
         target_count=3,
     )
 
-    assert result.status == "insufficient"
+    assert result.status == "failed"
     assert collector.queries == ["first", "second"]
     assert [item["query_id"] for item in result.summary["query_metrics"]] == ["r1_q01", "r2_q01"]
     round_two = result.summary["rounds"][1]
