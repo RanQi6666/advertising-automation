@@ -2600,3 +2600,85 @@ async def test_provider_normalizes_structured_execution_evidence() -> None:
     assert evidence.assertion == "affirmed"
     assert evidence.signature_moment_ids == ["signature_action"]
     assert evidence.source_behavior_beat_ids == ["core_behavior"]
+
+
+
+def _explicit_director_beat_storyboard(*, beat_scene_start: float, beat_scene_end: float) -> tuple[
+    FrameAnchoredStoryboard,
+    FrameAnchoredDirectorPlan,
+]:
+    director_plan = FrameAnchoredDirectorPlan(
+        narrative_objective="Place the evidence-backed impact in its planned target window.",
+        attention_path=["setup", "impact", "resolution"],
+        tension_curve=["setup", "climax", "resolution"],
+        climax_beats=[
+            DirectorBeat(
+                beat_id="timed_impact",
+                stage="climax",
+                source_evidence=["The reference establishes a readable impact."],
+                start_ratio=0.2,
+                end_ratio=0.7,
+                importance="core",
+            )
+        ],
+        anchor_adaptation_plan=["Resolve in the supplied last frame."],
+        anti_flattening_constraints=["Keep the impact inside its dynamic beat window."],
+    )
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=10,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=beat_scene_start,
+                frame_anchor="first_frame",
+                visual="Open on the supplied first-frame composition.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=beat_scene_start,
+                end_second=beat_scene_end,
+                frame_anchor="transition",
+                visual="Carry the explicitly assigned director impact.",
+                cinematic_beats=["timed_impact"],
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=3,
+                start_second=beat_scene_end,
+                end_second=10,
+                frame_anchor="last_frame",
+                visual="Resolve on the supplied last-frame composition.",
+            ),
+        ],
+    )
+    return storyboard, director_plan
+
+
+def test_director_coverage_rejects_explicit_beat_in_non_overlapping_scene() -> None:
+    storyboard, director_plan = _explicit_director_beat_storyboard(
+        beat_scene_start=8,
+        beat_scene_end=9,
+    )
+
+    with pytest.raises(ValueError, match="director beat timed_impact.*overlap"):
+        validate_director_coverage(storyboard, director_plan)
+
+
+def test_director_coverage_rejects_zero_length_boundary_contact_with_beat_window() -> None:
+    storyboard, director_plan = _explicit_director_beat_storyboard(
+        beat_scene_start=7,
+        beat_scene_end=9,
+    )
+
+    with pytest.raises(ValueError, match="director beat timed_impact.*overlap"):
+        validate_director_coverage(storyboard, director_plan)
+
+
+def test_director_coverage_accepts_explicit_beat_with_strict_positive_overlap() -> None:
+    storyboard, director_plan = _explicit_director_beat_storyboard(
+        beat_scene_start=6,
+        beat_scene_end=8,
+    )
+
+    validate_director_coverage(storyboard, director_plan)

@@ -383,7 +383,7 @@ def _matching_target_execution_evidence(
         }
         if moment_id is not None and moment_id not in evidence_moment_ids:
             continue
-        if source_ids and not source_ids.intersection(evidence_source_ids):
+        if source_ids and not source_ids.issubset(evidence_source_ids):
             continue
         matches.append(evidence)
     return matches
@@ -432,8 +432,31 @@ def _scene_links_moment(
     source_ids: set[str],
 ) -> bool:
     return moment_id in scene.signature_moment_ids and (
-        not source_ids or bool(source_ids.intersection(scene.source_behavior_beat_ids))
+        not source_ids or source_ids.issubset(set(scene.source_behavior_beat_ids))
     )
+
+
+def _scene_carries_director_beat(
+    scene: FrameAnchoredStoryboardScene, beat_id: str
+) -> bool:
+    return beat_id in {
+        *(value.strip() for value in scene.cinematic_beats if value.strip()),
+        (scene.cinematic_beat or "").strip(),
+    }
+
+
+def _scene_strictly_overlaps_director_beat(
+    scene: FrameAnchoredStoryboardScene,
+    *,
+    beat_start_ratio: float,
+    beat_end_ratio: float,
+    duration_seconds: float,
+) -> bool:
+    if scene.start_second is None or scene.end_second is None:
+        return False
+    beat_start = beat_start_ratio * duration_seconds
+    beat_end = beat_end_ratio * duration_seconds
+    return max(float(scene.start_second), beat_start) < min(float(scene.end_second), beat_end)
 
 
 def _phase_window_seconds(
@@ -713,6 +736,11 @@ def validate_final_storyboard_action_coverage(
             for index, scene in enumerate(storyboard.scenes)
             if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
         ]
+        assigned_beat_id = (moment.assigned_beat_id or "").strip()
+        assigned_beat = next(
+            (beat for beat in plan.climax_beats if beat.beat_id == assigned_beat_id),
+            None,
+        )
         execution_matches = [
             (
                 scene,
@@ -724,6 +752,14 @@ def validate_final_storyboard_action_coverage(
             )
             for scene in scenes
             if _scene_links_moment(scene, moment.moment_id, referenced_required_ids)
+            and assigned_beat is not None
+            and _scene_carries_director_beat(scene, assigned_beat_id)
+            and _scene_strictly_overlaps_director_beat(
+                scene,
+                beat_start_ratio=assigned_beat.start_ratio,
+                beat_end_ratio=assigned_beat.end_ratio,
+                duration_seconds=float(storyboard.duration_seconds),
+            )
         ]
         execution_matches = [
             (scene, evidence)
@@ -775,7 +811,7 @@ def validate_final_storyboard_action_coverage(
                 frame_analysis=frame_analysis,
                 plan=plan,
                 moment_id=moment.moment_id,
-                source_ids=executable_required_ids,
+                source_ids=referenced_required_ids,
                 linked_scene_indexes=linked_scene_indexes,
                 execution_scene_indexes=moment_execution_indexes,
                 final_hold_index=final_hold_index,

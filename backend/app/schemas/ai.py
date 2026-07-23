@@ -727,6 +727,19 @@ def _scene_can_carry_director_beat(scene: FrameAnchoredStoryboardScene) -> bool:
     )
 
 
+def _scene_strictly_overlaps_director_beat(
+    scene: FrameAnchoredStoryboardScene,
+    beat: DirectorBeat,
+    *,
+    duration: float,
+) -> bool:
+    if scene.start_second is None or scene.end_second is None:
+        return False
+    beat_start = beat.start_ratio * duration
+    beat_end = beat.end_ratio * duration
+    return max(float(scene.start_second), beat_start) < min(float(scene.end_second), beat_end)
+
+
 def _assign_missing_director_beat_ids(
     storyboard: FrameAnchoredStoryboard,
     plan: FrameAnchoredDirectorPlan,
@@ -753,6 +766,13 @@ def _assign_missing_director_beat_ids(
         beat_start = beat.start_ratio * duration
         beat_end = beat.end_ratio * duration
         beat_midpoint = (beat_start + beat_end) / 2
+        overlapping_scenes = [
+            scene
+            for scene in candidate_scenes
+            if _scene_strictly_overlaps_director_beat(scene, beat, duration=duration)
+        ]
+        if not overlapping_scenes:
+            continue
 
         def scene_score(
             scene: FrameAnchoredStoryboardScene,
@@ -774,7 +794,7 @@ def _assign_missing_director_beat_ids(
                 1 if scene.frame_anchor == "transition" else 0,
             )
 
-        scene = max(candidate_scenes, key=scene_score)
+        scene = max(overlapping_scenes, key=scene_score)
         if beat.beat_id not in scene.cinematic_beats:
             scene.cinematic_beats.append(beat.beat_id)
         if not (scene.cinematic_beat or "").strip():
@@ -789,7 +809,18 @@ def validate_director_coverage(
     if plan is None:
         return
     _assign_missing_director_beat_ids(storyboard, plan)
-    valid_beat_ids = {beat.beat_id for beat in plan.climax_beats}
+    beats_by_id = {beat.beat_id: beat for beat in plan.climax_beats}
+    valid_beat_ids = set(beats_by_id)
+    duration = float(storyboard.duration_seconds)
+    for scene in storyboard.scenes:
+        for beat_id in _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids):
+            if not _scene_strictly_overlaps_director_beat(
+                scene, beats_by_id[beat_id], duration=duration
+            ):
+                raise ValueError(
+                    f"director beat {beat_id} must strictly overlap its assigned scene"
+                )
+
     covered_beat_ids = set().union(
         *(
             _scene_director_beat_ids(scene, valid_beat_ids=valid_beat_ids)

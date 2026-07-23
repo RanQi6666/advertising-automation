@@ -641,6 +641,19 @@ def test_one_short_scene_may_share_all_required_action_phases() -> None:
 
 def test_final_validation_rejects_execution_before_linked_preparation() -> None:
     storyboard, analysis, review = _valid_final_inputs()
+    plan = analysis.director_plan
+    assert plan is not None
+    plan = plan.model_copy(
+        update={
+            "climax_beats": [
+                beat.model_copy(update={"start_ratio": 0.0, "end_ratio": 0.1})
+                if beat.beat_id == "core_peak"
+                else beat
+                for beat in plan.climax_beats
+            ]
+        }
+    )
+    analysis = analysis.model_copy(update={"director_plan": plan})
     storyboard.scenes[0].visual = (
         "Temporarily diverge and execute the linked causal action immediately."
     )
@@ -648,6 +661,7 @@ def test_final_validation_rejects_execution_before_linked_preparation() -> None:
     storyboard.scenes[0].transition_goal = None
     storyboard.scenes[0].signature_moment_ids = ["signature_action"]
     storyboard.scenes[0].source_behavior_beat_ids = ["core_behavior"]
+    storyboard.scenes[0].cinematic_beats = ["core_peak"]
     storyboard.scenes[0].execution_evidence = [
         StoryboardExecutionEvidence(
             claim_id="execution_claim",
@@ -659,6 +673,7 @@ def test_final_validation_rejects_execution_before_linked_preparation() -> None:
         )
     ]
     storyboard.scenes[1].execution_evidence = []
+    storyboard.scenes[1].cinematic_beats = []
     storyboard.scenes[1].visual = "Prepare after the action has already started."
     storyboard.scenes[1].motion = "Prepare the subject after execution begins."
 
@@ -730,6 +745,7 @@ def test_final_validation_does_not_borrow_second_beat_preparation() -> None:
                     "action_result_requirement": "Show the first linked result.",
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior_1"],
+                    "cinematic_beats": ["core_peak"],
                     "execution_evidence": [
                         {
                             "claim_id": "first_execution_claim",
@@ -753,6 +769,7 @@ def test_final_validation_does_not_borrow_second_beat_preparation() -> None:
                     "action_result_requirement": "Show the second linked result.",
                     "signature_moment_ids": ["signature_state"],
                     "source_behavior_beat_ids": ["core_behavior_2"],
+                    "cinematic_beats": ["core_peak"],
                     "execution_evidence": [
                         {
                             "claim_id": "second_execution_claim",
@@ -1028,6 +1045,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "motion": "The subject performs the first state-changing action.",
                     "signature_moment_ids": ["signature_action"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "cinematic_beats": ["core_peak"],
                     "execution_evidence": [
                         {
                             "claim_id": "first_signature_claim",
@@ -1061,6 +1079,7 @@ def test_final_validation_does_not_borrow_payoff_or_return_from_same_source_mome
                     "action_result_requirement": "Show only the second moment's payoff.",
                     "signature_moment_ids": ["signature_state"],
                     "source_behavior_beat_ids": ["core_behavior"],
+                    "cinematic_beats": ["core_peak"],
                     "execution_evidence": [
                         {
                             "claim_id": "second_signature_claim",
@@ -1266,3 +1285,168 @@ def test_structured_omission_rejects_endpoint_or_negated_fact_despite_positive_p
 
     assert review.status == "unrecoverable"
     assert review.invalid_omission_moment_ids == ["signature_action"]
+
+
+
+def _two_moment_exact_binding_inputs() -> tuple[
+    FrameAnchoredStoryboard,
+    FrameAnalysis,
+    DirectorActionCoverageReview,
+]:
+    source_ids = ["core_behavior_1", "core_behavior_2"]
+    analysis = _analysis_with_core_beats(behavior_types=["action", "state"])
+    plan_payload = _plan(source_ids=source_ids).model_dump()
+    second_beat = dict(plan_payload["climax_beats"][0])
+    second_beat.update(
+        {
+            "beat_id": "secondary_peak",
+            "start_ratio": 0.25,
+            "end_ratio": 0.65,
+            "source_evidence": ["The second required behavior has a readable causal peak."],
+        }
+    )
+    plan_payload["climax_beats"].append(second_beat)
+    second_moment = dict(plan_payload["signature_moment_plan"][0])
+    second_moment.update(
+        {
+            "moment_id": "signature_state",
+            "source_evidence": ["The second required state change is visibly executed."],
+            "source_behavior_beat_ids": [source_ids[1]],
+            "adapted_action": "Execute the second target-compatible state change.",
+            "visible_payoff": "Show the second resulting target state.",
+            "assigned_beat_id": "secondary_peak",
+        }
+    )
+    plan_payload["signature_moment_plan"].append(second_moment)
+    plan = FrameAnchoredDirectorPlan.model_validate(plan_payload)
+    analysis = analysis.model_copy(update={"director_plan": plan})
+    review = review_director_action_coverage(analysis, plan)
+    assert review.status == "pass"
+
+    shared_moment_ids = ["signature_action", "signature_state"]
+    storyboard = FrameAnchoredStoryboard.model_validate(
+        {
+            "duration_seconds": 10,
+            "aspect_ratio": "9:16",
+            "scenes": [
+                {
+                    "scene_index": 1,
+                    "start_second": 0,
+                    "end_second": 1,
+                    "frame_anchor": "first_frame",
+                    "visual": "Hold the opening anchor and prepare both linked actions.",
+                    "motion": "Prepare the subject for both continuous causal actions.",
+                    "signature_moment_ids": shared_moment_ids,
+                    "source_behavior_beat_ids": source_ids,
+                },
+                {
+                    "scene_index": 2,
+                    "start_second": 1,
+                    "end_second": 6,
+                    "frame_anchor": "transition",
+                    "visual": "Execute both target-compatible state-changing actions.",
+                    "motion": "The subject completes both linked causal actions visibly.",
+                    "cinematic_beats": ["core_peak", "secondary_peak"],
+                    "camera_instruction": "Reframe continuously around both executions.",
+                    "effect_timing": "Support both consequences after their actions read.",
+                    "signature_moment_ids": shared_moment_ids,
+                    "source_behavior_beat_ids": source_ids,
+                    "execution_evidence": [
+                        {
+                            "claim_id": "joint_execution_claim",
+                            "executor_kind": "target_subject",
+                            "assertion": "affirmed",
+                            "action_or_state_change": (
+                                "both linked causal actions complete visibly in one scene"
+                            ),
+                            "signature_moment_ids": shared_moment_ids,
+                            "source_behavior_beat_ids": source_ids,
+                        }
+                    ],
+                },
+                {
+                    "scene_index": 3,
+                    "start_second": 6,
+                    "end_second": 7,
+                    "frame_anchor": "transition",
+                    "visual": "Reveal the visible payoff for both linked actions.",
+                    "action_result_requirement": "Show both resulting target-state changes.",
+                    "signature_moment_ids": shared_moment_ids,
+                    "source_behavior_beat_ids": source_ids,
+                },
+                {
+                    "scene_index": 4,
+                    "start_second": 7,
+                    "end_second": 9,
+                    "frame_anchor": "transition",
+                    "visual": "Return both moments continuously to the supplied ending anchor.",
+                    "anchor_return_instruction": (
+                        "Continuously restore the final pose, framing, and camera for both moments."
+                    ),
+                    "signature_moment_ids": shared_moment_ids,
+                    "source_behavior_beat_ids": source_ids,
+                },
+                {
+                    "scene_index": 5,
+                    "start_second": 9,
+                    "end_second": 10,
+                    "frame_anchor": "last_frame",
+                    "visual": "Hold and lock the exact supplied last frame.",
+                },
+            ],
+        }
+    )
+    return storyboard, analysis, review
+
+
+def test_final_validation_rejects_partial_source_binding_hidden_by_another_moment() -> None:
+    storyboard, analysis, review = _two_moment_exact_binding_inputs()
+    storyboard.scenes[1].execution_evidence = [
+        StoryboardExecutionEvidence(
+            claim_id="first_partial_claim",
+            executor_kind="target_subject",
+            assertion="affirmed",
+            action_or_state_change="only the first required action executes visibly",
+            signature_moment_ids=["signature_action"],
+            source_behavior_beat_ids=["core_behavior_1"],
+        ),
+        StoryboardExecutionEvidence(
+            claim_id="second_complete_claim",
+            executor_kind="target_state",
+            assertion="affirmed",
+            action_or_state_change="the second required state change executes visibly",
+            signature_moment_ids=["signature_state"],
+            source_behavior_beat_ids=["core_behavior_2"],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="signature_action lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_phases_borrowed_from_incomplete_other_moment_binding() -> None:
+    storyboard, analysis, review = _two_moment_exact_binding_inputs()
+    for scene_index in (0, 2, 3):
+        storyboard.scenes[scene_index].source_behavior_beat_ids = ["core_behavior_2"]
+
+    with pytest.raises(
+        ValueError, match="preparation evidence for signature moment signature_action"
+    ):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_allows_joint_scene_with_complete_bindings() -> None:
+    storyboard, analysis, review = _two_moment_exact_binding_inputs()
+
+    validate_director_coverage(storyboard, analysis.director_plan)
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
+
+
+def test_final_validation_rejects_execution_scene_without_its_assigned_director_beat() -> None:
+    storyboard, analysis, review = _valid_final_inputs()
+    storyboard.scenes[1].cinematic_beats = []
+    storyboard.scenes[2].cinematic_beats = ["core_peak"]
+
+    validate_director_coverage(storyboard, analysis.director_plan)
+    with pytest.raises(ValueError, match="signature_action lacks subject/state execution"):
+        validate_final_storyboard_action_coverage(storyboard, analysis, review)
