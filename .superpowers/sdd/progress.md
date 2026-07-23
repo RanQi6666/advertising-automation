@@ -6,3 +6,5 @@ Task 5: complete (commits 5ff4dfd..7380cd5, review clean)
 Final fix 1-8: complete (commits 7380cd5..6d56887; independent review 8 requested two Important fixes)
 Final fix 9: complete (stable private claim_id, same-scene and cross-scene consistency, provider/mock propagation, namespace normalization/collision/scrub/revalidation, fix-8 UTF-8 report reconstruction)
 Final fix 9 verification: focused 164 passed; Ruff passed; full pytest 670 passed; call-count checks 2 passed; strict UTF-8 and private/public boundary scans passed; only existing Starlette httpx2 deprecation warning remains
+Final fix 10: complete (Unicode-adjacent raw/canonical claim ID scrub, exact structured claim lookup, single-pass longest alias replacement, non-cascading normalization)
+Final fix 10 verification: TDD RED 6 failed; regression GREEN 6 passed; focused 170 passed; Ruff passed; full pytest 676 passed; strict 3/2 call-count checks 2 passed; scope, hardcoding, sensitive-file and diff checks passed; only existing Starlette httpx2 deprecation warning remains

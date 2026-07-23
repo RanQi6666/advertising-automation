@@ -56,6 +56,7 @@ from backend.app.services.external_ai_generation_service import (
     _format_frame_anchored_storyboard_text,
     _format_optional_intensity,
     _normalize_private_storyboard_namespace,
+    _replace_private_id_aliases,
 )
 from backend.app.services.storyboard_reference_video_service import PreparedReferenceVideo
 
@@ -2475,3 +2476,214 @@ async def test_storyboard_v2_normalizes_all_private_id_shapes_without_scrubbing_
         ] == ["__sbv2_claim_002__", "__sbv2_claim_001__"]
 
     await engine.dispose()
+
+
+def test_claim_alias_replacement_is_longest_single_pass_and_unicode_safe() -> None:
+    mapping = {
+        "primary-claim": "__sbv2_claim_001__",
+        "primary-claim-extra": "__sbv2_claim_002__",
+        "first-id": "second-id",
+        "second-id": "third-id",
+    }
+
+    normalized = _replace_private_id_aliases(
+        {
+            "claim_id": "primary-claim-extra",
+            "visual": (
+                "执行primary-claim动作；動作primary-claim-extra完了；"
+                "primary-claimant 保持原样。"
+            ),
+            "motion": "first-id",
+        },
+        mapping,
+    )
+
+    assert normalized["claim_id"] == "__sbv2_claim_002__"
+    assert normalized["visual"] == (
+        "执行__sbv2_claim_001__动作；動作__sbv2_claim_002__完了；"
+        "primary-claimant 保持原样。"
+    )
+    assert normalized["motion"] == "second-id"
+
+
+def test_formatter_scrubs_canonical_claim_ids_adjacent_to_unicode_letters() -> None:
+    canonical_claim_id = "__sbv2_claim_001__"
+    natural_sentence = "primary-claimant 是普通自然语言，不是完整 private ID。"
+    storyboard = FrameAnchoredStoryboard(
+        duration_seconds=4,
+        aspect_ratio="9:16",
+        scenes=[
+            FrameAnchoredStoryboardScene(
+                scene_index=1,
+                start_second=0,
+                end_second=1,
+                frame_anchor="first_frame",
+                visual="Opening anchor.",
+            ),
+            FrameAnchoredStoryboardScene(
+                scene_index=2,
+                start_second=1,
+                end_second=4,
+                frame_anchor="last_frame",
+                visual=f"执行{canonical_claim_id}动作；{natural_sentence}",
+                motion=f"動作{canonical_claim_id}完了",
+                execution_evidence=[
+                    {
+                        "claim_id": canonical_claim_id,
+                        "executor_kind": "target_subject",
+                        "assertion": "affirmed",
+                        "action_or_state_change": "linked action changes state visibly",
+                        "signature_moment_ids": ["signature-action"],
+                        "source_behavior_beat_ids": ["source-behavior"],
+                    }
+                ],
+            ),
+        ],
+    )
+
+    rendered = _format_frame_anchored_storyboard_text(
+        storyboard,
+        private_sources=({"claim_id": "primary-claim"},),
+    )
+
+    assert canonical_claim_id not in rendered
+    assert "执行linked item动作" in rendered
+    assert "動作linked item完了" in rendered
+    assert natural_sentence in rendered
+
+
+@pytest.mark.parametrize(
+    "claim_pair",
+    [
+        ("primary-claim", "primary-claim-extra"),
+        ("phase:claim", "phase:claim.extra"),
+    ],
+)
+@pytest.mark.parametrize("reverse_evidence_order", [False, True])
+@pytest.mark.asyncio
+async def test_storyboard_v2_prefix_overlapping_claim_aliases_are_order_independent_and_private(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_pair: tuple[str, str],
+    reverse_evidence_order: bool,
+) -> None:
+    fake_llm = FakeExternalAILLM()
+    original_generate = fake_llm.generate_frame_anchored_video_storyboard
+    observed_raw_claim_ids: list[str] = []
+
+    async def overlapping_claim_candidate(*args, **kwargs):
+        storyboard = await original_generate(*args, **kwargs)
+        evidence = storyboard.scenes[1].execution_evidence[0]
+        ordered_claim_ids = list(claim_pair)
+        if reverse_evidence_order:
+            ordered_claim_ids.reverse()
+        observed_raw_claim_ids.extend(ordered_claim_ids)
+        storyboard.scenes[1].execution_evidence = [
+            evidence.model_copy(
+                update={
+                    "claim_id": claim_id,
+                    "executor_kind": (
+                        "target_subject" if index == 0 else "target_object"
+                    ),
+                    "action_or_state_change": (
+                        f"target action {index + 1} completes visibly"
+                    ),
+                }
+            )
+            for index, claim_id in enumerate(ordered_claim_ids)
+        ]
+        short_claim, long_claim = claim_pair
+        natural_sentence = "primary-claimant 是普通自然语言，不是完整 private ID。"
+        scene = storyboard.scenes[1]
+        scene.visual = f"{scene.visual} 中{short_claim}文；{natural_sentence}"
+        scene.motion = f"{scene.motion} 動{long_claim}く"
+        payoff_scene = storyboard.scenes[2]
+        payoff_scene.action_result_requirement = (
+            f"{payoff_scene.action_result_requirement or ''} 甲{long_claim}乙"
+        )
+        scene.effect_timing = f"{scene.effect_timing or ''} 丙{short_claim}丁"
+        final_scene = storyboard.scenes[-1]
+        final_scene.notes = (
+            f"{final_scene.notes or ''} 收__sbv2_claim_001__束"
+        )
+        return storyboard
+
+    fake_llm.generate_frame_anchored_video_storyboard = overlapping_claim_candidate
+    monkeypatch.setattr(external_ai_service_module, "get_llm_provider", lambda: fake_llm)
+    filename = (
+        "storyboard-v2-overlapping-claims-"
+        f"{claim_pair[0].replace(':', '-').replace('.', '-')}-"
+        f"{'reverse' if reverse_evidence_order else 'forward'}.db"
+    )
+    client, engine, app = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        filename=filename,
+    )
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        service = ExternalAIGenerationService()
+        async with session_factory() as session:
+            task = GenerationTask(
+                queue_name="text_queue",
+                task_type="external_video_storyboard_v2",
+                business_type="external_ai",
+                business_id=filename,
+                payload_json=_storyboard_v2_payload(),
+                queued_at=utcnow(),
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            result = await service.execute_frame_anchored_video_storyboard(session, task)
+            task.status = "succeeded"
+            task.result_json = result
+            session.add(task)
+            await session.commit()
+            job_id = task.id
+
+        polled = client.get(
+            f"/api/v1/integrations/ai/jobs/{job_id}",
+            headers=_authorized_headers(),
+        ).json()["data"]
+
+        assert polled["status"] == "succeeded"
+        storyboard_text = polled["storyboard_text"]
+        short_claim, long_claim = claim_pair
+        assert f"中{short_claim}文" not in storyboard_text
+        assert f"動{long_claim}く" not in storyboard_text
+        assert f"甲{long_claim}乙" not in storyboard_text
+        assert f"丙{short_claim}丁" not in storyboard_text
+        assert "中linked item文" in storyboard_text
+        assert "動linked itemく" in storyboard_text
+        assert "甲linked item乙" in storyboard_text
+        assert "丙linked item丁" in storyboard_text
+        assert "收linked item束" in storyboard_text
+        assert "__sbv2_claim_" not in storyboard_text
+        assert "primary-claimant 是普通自然语言，不是完整 private ID。" in storyboard_text
+        assert fake_llm.calls == [
+            "analyze_video_frame_pair",
+            "direct_frame_anchored_video_storyboard",
+            "generate_frame_anchored_video_storyboard",
+        ]
+
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            task = await session.get(GenerationTask, job_id)
+            assert task is not None
+            candidate = task.metadata_json["frame_anchored_storyboard_candidate"]
+            normalized_storyboard = FrameAnchoredStoryboard.model_validate(candidate)
+            normalized_claim_ids = [
+                evidence.claim_id
+                for evidence in normalized_storyboard.scenes[1].execution_evidence
+            ]
+            assert normalized_claim_ids == [
+                "__sbv2_claim_001__",
+                "__sbv2_claim_002__",
+            ]
+            assert observed_raw_claim_ids == list(
+                reversed(claim_pair) if reverse_evidence_order else claim_pair
+            )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()

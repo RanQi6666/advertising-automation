@@ -984,23 +984,37 @@ def _mapped_private_id(value: str | None, mapping: dict[str, str]) -> str | None
     return mapping.get(clean, clean)
 
 
+def _replace_private_ids_in_text(value: str, mapping: dict[str, str]) -> str:
+    replacements = {
+        original: replacement
+        for original, replacement in mapping.items()
+        if original and original != replacement
+    }
+    if not replacements:
+        return value
+    aliases = sorted(replacements, key=len, reverse=True)
+    alias_pattern = "|".join(re.escape(alias) for alias in aliases)
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_])(?:{alias_pattern})(?![A-Za-z0-9_])"
+    )
+    return pattern.sub(lambda match: replacements[match.group(0)], value)
+
+
 def _replace_private_id_aliases(value: Any, mapping: dict[str, str]) -> Any:
     if isinstance(value, dict):
-        return {key: _replace_private_id_aliases(item, mapping) for key, item in value.items()}
+        return {
+            key: (
+                _mapped_private_id(item, mapping)
+                if key == "claim_id" and (item is None or isinstance(item, str))
+                else _replace_private_id_aliases(item, mapping)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_replace_private_id_aliases(item, mapping) for item in value]
     if not isinstance(value, str):
         return value
-    normalized = value
-    for original, replacement in mapping.items():
-        if original == replacement:
-            continue
-        normalized = re.sub(
-            rf"(?<![\w]){re.escape(original)}(?![\w])",
-            replacement,
-            normalized,
-        )
-    return normalized
+    return _replace_private_ids_in_text(value, mapping)
 
 
 def _normalize_private_storyboard_claim_namespace(
@@ -1208,14 +1222,10 @@ def _private_storyboard_ids(
 
 
 def _scrub_private_storyboard_ids(value: str | None, private_ids: tuple[str, ...]) -> str:
-    text = value or ""
-    for private_id in private_ids:
-        text = re.sub(
-            rf"(?<![\w]){re.escape(private_id)}(?![\w])",
-            "linked item",
-            text,
-        )
-    return text
+    return _replace_private_ids_in_text(
+        value or "",
+        {private_id: "linked item" for private_id in private_ids},
+    )
 
 
 def _format_frame_anchored_storyboard_text(
