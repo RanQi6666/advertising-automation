@@ -40,6 +40,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
       LOCAL_STORAGE_ROOT: /data/storage
       AD_ANALYSIS_MEDIA_ROOT: /data/ad-analysis-media
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
@@ -113,6 +114,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
       LOCAL_STORAGE_ROOT: /data/storage
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
@@ -273,6 +275,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
       LOCAL_STORAGE_ROOT: /data/storage
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
@@ -280,6 +283,8 @@ services:
       AD_RESEARCH_COLLECTOR_BASE_URL: ${AD_RESEARCH_COLLECTOR_BASE_URL:-http://meta_ads_collector:8090}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - storage_data:/data/storage
     depends_on:
       backend:
         condition: service_healthy

@@ -3,7 +3,12 @@ import asyncio
 import pytest
 
 from backend.app.schemas.ad_research import CollectorAd
-from backend.app.services.ad_research_media import AdResearchMediaInspector
+from backend.app.core.config import get_settings
+from backend.app.services.ad_research_media import (
+    AdResearchMediaInspector,
+    PreparedAdMedia,
+    TechnicalQualification,
+)
 
 
 @pytest.fixture
@@ -139,3 +144,30 @@ async def test_media_inspector_kills_ffprobe_after_timeout(monkeypatch) -> None:
     assert await AdResearchMediaInspector().probe_duration("https://cdn.example/ad.mp4") is None
     assert process.killed is True
     assert process.waited is True
+
+
+def test_ad_research_media_settings_have_safe_parallel_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("AD_RESEARCH_MEDIA_CONCURRENCY", raising=False)
+    monkeypatch.delenv("AD_RESEARCH_FRAME_CONCURRENCY", raising=False)
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.ad_research_media_concurrency == 6
+    assert settings.ad_research_frame_concurrency == 4
+    get_settings.cache_clear()
+
+
+def test_technical_qualification_can_hold_worker_only_media_paths(tmp_path) -> None:
+    media = PreparedAdMedia(
+        cover_url="https://ai.example/storage/ad-research/job/ad/cover.jpg",
+        cover_source="generated_frame",
+        frame_urls=("https://ai.example/storage/ad-research/job/ad/frame_20.jpg",),
+        local_frame_paths=(tmp_path / "frame_20.jpg",),
+        duration_source="collector",
+        duration_probe_attempts=0,
+    )
+    result = TechnicalQualification(True, (), 12.0, 3, media)
+
+    assert result.media is media
+    assert result.media.local_frame_paths[0].name == "frame_20.jpg"

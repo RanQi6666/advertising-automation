@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.safe_public_http import SafePublicHTTPError, validate_public_http_url
@@ -11,11 +13,22 @@ MIN_ACTIVE_DAYS = 1
 
 
 @dataclass(frozen=True)
+class PreparedAdMedia:
+    cover_url: str | None
+    cover_source: Literal["original_thumbnail", "generated_frame"] | None
+    frame_urls: tuple[str, ...]
+    local_frame_paths: tuple[Path, ...]
+    duration_source: Literal["collector", "remote_ffprobe", "downloaded_ffprobe"] | None
+    duration_probe_attempts: int
+
+
+@dataclass(frozen=True)
 class TechnicalQualification:
     qualified: bool
     reasons: tuple[str, ...]
     duration_seconds: float | None
     active_days: int | None
+    media: PreparedAdMedia | None = None
 
 
 class AdResearchMediaInspector:

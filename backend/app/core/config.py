@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
     ad_research_worker_concurrency: int = Field(default=2, ge=1, le=16)
     ad_research_model_concurrency: int = Field(default=6, ge=1, le=64)
+    ad_research_media_concurrency: int = Field(default=6, ge=1, le=32)
+    ad_research_frame_concurrency: int = Field(default=4, ge=1, le=16)
+    ad_research_media_root: str = "ad-research"
+    ad_research_media_download_timeout_seconds: float = Field(default=60.0, ge=5, le=180)
+    ad_research_media_download_max_bytes: int = Field(default=80 * 1024 * 1024, ge=1024 * 1024)
+    ad_research_media_retry_attempts: int = Field(default=2, ge=0, le=3)
+    ad_research_ffprobe_timeout_seconds: float = Field(default=12.0, ge=1, le=60)
+    ad_research_ffmpeg_frame_timeout_seconds: float = Field(default=15.0, ge=1, le=60)
     ad_research_model: str = "gpt-5.4-mini"
     ad_research_model_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
     ad_research_model_lease_seconds: int = Field(default=90, ge=10, le=600)
