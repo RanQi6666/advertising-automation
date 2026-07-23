@@ -577,7 +577,7 @@ def test_final_reference_frame_seeks_before_video_end_not_container_end(
     assert captured[captured.index("-ss") + 1] == "10.016667"
 
 
-def test_timeline_adaptation_preserves_causal_order_and_final_overlay() -> None:
+def test_timeline_adaptation_preserves_causal_order_without_forcing_target_final_overlay() -> None:
     reference = ReferenceVideoAnalysis.model_validate(
         {
             "duration_seconds": 10,
@@ -645,8 +645,8 @@ def test_timeline_adaptation_preserves_causal_order_and_final_overlay() -> None:
     assert by_id["approach"].target_end_second <= by_id["contact"].target_start_second
     assert by_id["approach"].target_end_second - by_id["approach"].target_start_second >= 1.5
     assert by_id["contact"].target_end_second - by_id["contact"].target_start_second >= 1.25
-    assert by_id["reward_overlay"].target_end_second == 6
-    assert by_id["reward_overlay"].must_remain_visible_until_final is True
+    assert by_id["reward_overlay"].must_remain_visible_until_final is False
+    assert "director overlay_lifecycle_plan" in by_id["reward_overlay"].adaptation_instruction
 
 def test_reference_behavior_only_allows_a_visual_overlay_to_lock_the_final_frame() -> None:
     with pytest.raises(ValueError, match="only visual overlays"):
@@ -702,5 +702,5 @@ def test_timeline_adaptation_carries_exact_locked_text_for_final_overlay() -> No
 
     plan = adapt_reference_behavior_timeline(reference, target_duration_seconds=6)
 
-    assert plan.beats[0].must_remain_visible_until_final is True
+    assert plan.beats[0].must_remain_visible_until_final is False
     assert plan.beats[0].locked_text == "x200,000"

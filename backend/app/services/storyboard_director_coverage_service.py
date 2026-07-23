@@ -34,6 +34,46 @@ def _required_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[Referen
     ]
 
 
+def _anchor_covered_core_state_ids(
+    frame_analysis: FrameAnalysis,
+    plan: FrameAnchoredDirectorPlan,
+) -> set[str]:
+    """Return endpoint state beats already guaranteed by explicit anchor windows."""
+    reference = frame_analysis.reference_video_analysis
+    graph = reference.behavior_graph if reference is not None else None
+    if reference is None or graph is None:
+        return set()
+
+    opening_anchor = any(
+        window.phase == "anchor_hold"
+        and window.start_ratio <= _TIMELINE_TOLERANCE_SECONDS
+        for window in plan.action_arc_windows
+    )
+    ending_anchor = any(
+        window.phase in {"return", "final_lock"}
+        and window.end_ratio >= 1.0 - _TIMELINE_TOLERANCE_SECONDS
+        for window in plan.action_arc_windows
+    )
+    reference_end = float(reference.duration_seconds)
+    return {
+        beat.beat_id
+        for beat in graph.beats
+        if beat.importance == "core"
+        and beat.behavior_type == "state"
+        and (
+            (
+                opening_anchor
+                and beat.reference_start_second <= _TIMELINE_TOLERANCE_SECONDS
+            )
+            or (
+                ending_anchor
+                and beat.reference_end_second
+                >= reference_end - _TIMELINE_TOLERANCE_SECONDS
+            )
+        )
+    }
+
+
 def _has_required_arc(plan: FrameAnchoredDirectorPlan) -> bool:
     phases = [window.phase for window in plan.action_arc_windows]
     required = ("preparation", "action", "payoff", "return", "final_lock")
@@ -138,7 +178,8 @@ def review_director_action_coverage(
     if not required_ids:
         return DirectorActionCoverageReview(status="pass")
 
-    linked_required_ids = {
+    anchor_covered_ids = _anchor_covered_core_state_ids(frame_analysis, director_plan)
+    linked_required_ids = anchor_covered_ids | {
         source_id
         for moment in director_plan.signature_moment_plan
         for source_id in moment.source_behavior_beat_ids
@@ -159,7 +200,7 @@ def review_director_action_coverage(
     plan_core_beat_ids = {
         beat.beat_id for beat in director_plan.climax_beats if beat.importance == "core"
     }
-    covered_id_set: set[str] = set()
+    covered_id_set: set[str] = set(anchor_covered_ids)
     validly_omitted_id_set: set[str] = set()
     invalid_omission_ids: list[str] = []
     missing_execution_ids: list[str] = []
@@ -272,7 +313,10 @@ def review_director_action_coverage(
         if beat_id not in covered_id_set and beat_id not in validly_omitted_id_set
     ]
 
-    has_executable_required = bool(set(required_ids) - validly_omitted_id_set)
+    executable_required_id_set = (
+        set(required_ids) - validly_omitted_id_set - anchor_covered_ids
+    )
+    has_executable_required = bool(executable_required_id_set)
     correction_moments = [
         moment
         for moment in director_plan.signature_moment_plan
@@ -307,7 +351,12 @@ def review_director_action_coverage(
             source_ids=correction_source_ids,
             instruction=instruction,
         )
-    if has_executable_required and _support_only_flattened(core_beats, director_plan):
+    executable_core_beats = [
+        beat for beat in core_beats if beat.beat_id in executable_required_id_set
+    ]
+    if has_executable_required and _support_only_flattened(
+        executable_core_beats, director_plan
+    ):
         instruction = (
             "Increase subject/state motion for the core action; camera or effects alone "
             "cannot execute it."
@@ -833,7 +882,10 @@ def validate_final_storyboard_action_coverage(
         if beat_id in required_id_set
     }
     validly_omitted_ids.intersection_update(review.validly_omitted_core_behavior_beat_ids)
-    executable_required_ids = required_id_set - validly_omitted_ids
+    anchor_covered_ids = _anchor_covered_core_state_ids(frame_analysis, plan)
+    executable_required_ids = (
+        required_id_set - validly_omitted_ids - anchor_covered_ids
+    )
 
     scene_by_signature: dict[str, list[FrameAnchoredStoryboardScene]] = {}
     for scene in storyboard.scenes:

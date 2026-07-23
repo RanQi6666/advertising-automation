@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from backend.app.schemas.ai import (
     DirectorActionCoverageReview,
@@ -415,6 +415,120 @@ def test_review_marks_unlinked_core_behavior_as_unrecoverable() -> None:
     assert review.unrecoverable_reasons == [
         "Core behavior beat core_behavior has no signature/source linkage."
     ]
+
+
+def _plan_with_opening_anchor_hold(*, source_ids: list[str]) -> FrameAnchoredDirectorPlan:
+    plan = _plan(source_ids=source_ids)
+    anchor_hold = plan.action_arc_windows[0].model_copy(
+        update={
+            "window_id": "anchor_hold",
+            "phase": "anchor_hold",
+            "start_ratio": 0.0,
+            "end_ratio": 0.08,
+            "objective": "Hold the exact supplied opening state before departure.",
+            "depends_on": [],
+        }
+    )
+    return plan.model_copy(
+        update={"action_arc_windows": [anchor_hold, *plan.action_arc_windows]}
+    )
+
+
+def test_review_accepts_unlinked_opening_core_state_covered_by_anchor_hold() -> None:
+    analysis = _analysis(behavior_type="state")
+    reference = analysis.reference_video_analysis
+    assert reference is not None and reference.behavior_graph is not None
+    opening_state = reference.behavior_graph.beats[0].model_copy(
+        update={"reference_start_second": 0.0, "reference_end_second": 1.0}
+    )
+    analysis = analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "behavior_graph": reference.behavior_graph.model_copy(
+                        update={"beats": [opening_state]}
+                    )
+                }
+            )
+        }
+    )
+
+    review = review_director_action_coverage(
+        analysis,
+        _plan_with_opening_anchor_hold(source_ids=[]),
+    )
+
+    assert review.status == "pass"
+    assert review.covered_core_behavior_beat_ids == ["core_behavior"]
+    assert review.uncovered_core_behavior_beat_ids == []
+
+
+def test_review_accepts_unlinked_ending_core_state_covered_by_final_lock() -> None:
+    analysis = _analysis(behavior_type="state")
+    reference = analysis.reference_video_analysis
+    assert reference is not None and reference.behavior_graph is not None
+    ending_state = reference.behavior_graph.beats[0].model_copy(
+        update={
+            "reference_start_second": reference.duration_seconds - 1.0,
+            "reference_end_second": reference.duration_seconds,
+        }
+    )
+    analysis = analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "behavior_graph": reference.behavior_graph.model_copy(
+                        update={"beats": [ending_state]}
+                    )
+                }
+            )
+        }
+    )
+
+    review = review_director_action_coverage(
+        analysis,
+        _plan(source_ids=[]),
+    )
+
+    assert review.status == "pass"
+    assert review.covered_core_behavior_beat_ids == ["core_behavior"]
+    assert review.uncovered_core_behavior_beat_ids == []
+
+
+def test_final_validation_does_not_require_execution_claim_for_opening_anchor_state() -> None:
+    storyboard, analysis, _review = _valid_final_inputs()
+    reference = analysis.reference_video_analysis
+    plan = analysis.director_plan
+    assert reference is not None and reference.behavior_graph is not None and plan is not None
+    opening_state = reference.behavior_graph.beats[0].model_copy(
+        update={
+            "beat_id": "opening_state",
+            "reference_start_second": 0.0,
+            "reference_end_second": 1.0,
+            "description": "The supplied opening state holds before the action begins.",
+            "behavior_type": "state",
+        }
+    )
+    analysis = analysis.model_copy(
+        update={
+            "reference_video_analysis": reference.model_copy(
+                update={
+                    "behavior_graph": reference.behavior_graph.model_copy(
+                        update={"beats": [opening_state, *reference.behavior_graph.beats]}
+                    )
+                }
+            ),
+            "director_plan": _plan_with_opening_anchor_hold(
+                source_ids=["core_behavior"]
+            ),
+        }
+    )
+    plan = analysis.director_plan
+    assert plan is not None
+    review = review_director_action_coverage(analysis, plan)
+
+    assert review.status == "pass"
+    validate_final_storyboard_action_coverage(storyboard, analysis, review)
 
 
 def test_review_binds_linked_return_correction_to_private_ids() -> None:

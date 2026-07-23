@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from backend.app.schemas.ai import (
+    DirectorActionArcWindow,
+    DirectorOverlayInstruction,
     DirectorTensionStage,
     FrameAnalysis,
     FrameAnchoredStoryboard,
@@ -75,6 +77,7 @@ def compile_storyboard_v2(
     boundaries = _compile_scene_boundaries(
         normalized_draft.scenes,
         duration_seconds=float(duration_seconds),
+        action_arc_windows=plan.action_arc_windows if plan is not None else None,
     )
     unknown_moments: set[str] = set()
     unknown_sources: set[str] = set()
@@ -158,7 +161,12 @@ def compile_storyboard_v2(
                 camera_intensity=_clamp_intensity(draft_scene.camera_intensity),
                 effect_intensity=_clamp_intensity(draft_scene.effect_intensity),
                 anchor_return_instruction=draft_scene.anchor_return_instruction,
-                overlay_instruction=draft_scene.overlay_instruction,
+                overlay_instruction=_compile_overlay_instruction(
+                    draft_scene.overlay_instruction,
+                    director_instructions=(
+                        plan.overlay_lifecycle_plan if plan is not None else None
+                    ),
+                ),
                 anti_flattening_requirement=draft_scene.anti_flattening_requirement,
             )
         )
@@ -310,10 +318,69 @@ def _compile_phase_evidence(
     return evidence
 
 
+def _normalize_phase_tag(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return {
+        "final_hold": "final_lock",
+        "opening_hold": "anchor_hold",
+    }.get(normalized, normalized)
+
+
+def _matching_action_windows(
+    scene: FrameAnchoredStoryboardDraftScene,
+    action_arc_windows: list[DirectorActionArcWindow],
+) -> list[DirectorActionArcWindow]:
+    phases = {_normalize_phase_tag(value) for value in scene.phase_tags}
+    return [window for window in action_arc_windows if window.phase in phases]
+
+
+def _director_boundary_candidate(
+    left_scene: FrameAnchoredStoryboardDraftScene,
+    right_scene: FrameAnchoredStoryboardDraftScene,
+    *,
+    action_arc_windows: list[DirectorActionArcWindow],
+    duration_seconds: float,
+) -> float | None:
+    right_windows = _matching_action_windows(right_scene, action_arc_windows)
+    if right_windows:
+        return min(window.start_ratio for window in right_windows) * duration_seconds
+
+    left_windows = _matching_action_windows(left_scene, action_arc_windows)
+    if left_windows:
+        return max(window.end_ratio for window in left_windows) * duration_seconds
+    return None
+
+
+def _normalize_reference_element(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _compile_overlay_instruction(
+    draft_instruction: DirectorOverlayInstruction | None,
+    *,
+    director_instructions: list[DirectorOverlayInstruction] | None,
+) -> DirectorOverlayInstruction | None:
+    if director_instructions is None:
+        return draft_instruction
+    if draft_instruction is None:
+        return None
+
+    draft_key = _normalize_reference_element(draft_instruction.reference_element)
+    return next(
+        (
+            instruction
+            for instruction in director_instructions
+            if _normalize_reference_element(instruction.reference_element) == draft_key
+        ),
+        None,
+    )
+
+
 def _compile_scene_boundaries(
     scenes: list[FrameAnchoredStoryboardDraftScene],
     *,
     duration_seconds: float,
+    action_arc_windows: list[DirectorActionArcWindow] | None = None,
 ) -> list[tuple[float, float]]:
     scene_count = len(scenes)
     if scene_count < 2:
@@ -325,12 +392,19 @@ def _compile_scene_boundaries(
         for index in range(1, scene_count)
     ]
     proposed_boundaries: list[float] = []
+    director_windows = action_arc_windows or []
     for index, fallback in enumerate(fallback_boundaries):
-        candidates = (scenes[index].end_second, scenes[index + 1].start_second)
+        director_candidate = _director_boundary_candidate(
+            scenes[index],
+            scenes[index + 1],
+            action_arc_windows=director_windows,
+            duration_seconds=duration_seconds,
+        ) if director_windows else None
+        draft_candidates = (scenes[index].end_second, scenes[index + 1].start_second)
         candidate = next(
             (
                 float(value)
-                for value in candidates
+                for value in (director_candidate, *draft_candidates)
                 if value is not None
                 and math.isfinite(float(value))
                 and 0 < float(value) < duration_seconds

@@ -764,6 +764,8 @@ async def test_gateway_director_plan_uses_target_frames_and_evidence_analysis() 
     assert "scope other than endpoint_only" in system_prompt
     assert "never infer polarity or scope from prose" in system_prompt
     assert "assigned core beat" in system_prompt
+    assert "observed reference ending only" in system_prompt
+    assert "overlay_lifecycle_plan is the sole generated-final-frame authority" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -2114,6 +2116,12 @@ async def test_gateway_storyboard_prioritizes_target_truth_and_reference_constra
     assert "behavior_graph" in system_prompt
     assert "timeline_adaptation_plan" in system_prompt
     assert "reference seconds" in system_prompt
+    assert (
+        "action_arc_windows and climax_beats are the sole target-timing authority"
+        in system_prompt
+    )
+    assert "overlay_lifecycle_plan is the sole generated-final-frame authority" in system_prompt
+    assert "required final overlay" not in system_prompt
     assert "causal behavior" in system_prompt
     assert "camera" in system_prompt
     assert "transitions" in system_prompt
@@ -2123,7 +2131,6 @@ async def test_gateway_storyboard_prioritizes_target_truth_and_reference_constra
     assert "replace_with_target" in system_prompt
     assert "morph_to_target" in system_prompt
     assert "preserve_through_last_anchor" in system_prompt
-    assert "required final overlay" in system_prompt
     assert "diamond" not in system_prompt
 
 

@@ -490,7 +490,9 @@ class FakeExternalAILLM:
                 == "preferred"
             )
             assert frame_analysis.timeline_adaptation_plan is not None
-            assert frame_analysis.timeline_adaptation_plan.beats[-1].must_remain_visible_until_final
+            final_reference_beat = frame_analysis.timeline_adaptation_plan.beats[-1]
+            assert final_reference_beat.must_remain_visible_until_final is False
+            assert "director overlay_lifecycle_plan" in final_reference_beat.adaptation_instruction
 
         return FrameAnchoredStoryboardDraft(
             duration_seconds=duration_seconds,
@@ -1204,12 +1206,9 @@ async def test_external_storyboard_v2_reference_video_runs_joint_analysis_then_s
             ]["strength"]
             == "preferred"
         )
-        assert (
-            task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1][
-                "must_remain_visible_until_final"
-            ]
-            is True
-        )
+        final_beat = task.metadata_json["frame_analysis"]["timeline_adaptation_plan"]["beats"][-1]
+        assert final_beat["must_remain_visible_until_final"] is False
+        assert "director overlay_lifecycle_plan" in final_beat["adaptation_instruction"]
         assert task.metadata_json["director_action_coverage_review"]["status"] == "pass"
     await engine.dispose()
 
