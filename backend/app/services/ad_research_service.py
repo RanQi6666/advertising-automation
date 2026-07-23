@@ -16,6 +16,7 @@ from backend.app.db.base import utcnow
 from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.schemas.ad_research import AdResearchCreateRequest, AdResearchPollResponse
+from backend.app.services.ad_research_media import AdResearchMediaInspector
 
 AD_RESEARCH_QUEUE_NAME = "ad_research_queue"
 AD_RESEARCH_TASK_TYPE = "ad_research"
@@ -59,6 +60,9 @@ def request_fingerprint(country: str, category: str, keywords: list[str], target
 
 
 class AdResearchService:
+    def __init__(self, *, media: AdResearchMediaInspector | None = None) -> None:
+        self.media = media or AdResearchMediaInspector()
+
     async def create_job(
         self, session: AsyncSession, payload: AdResearchCreateRequest
     ) -> AdResearchCreateResult:
@@ -279,9 +283,8 @@ class AdResearchService:
         job.error_message_summary = None
         await session.commit()
 
-    async def fail_job(
-        self, session: AsyncSession, job: AdResearchJob, error: Exception
-    ) -> None:
+    async def fail_job(self, session: AsyncSession, job: AdResearchJob, error: Exception) -> None:
+        await self.media.cleanup_job_media(job.id)
         job.status = "failed"
         job.stage = "failed"
         job.error_code = "ad_research_unexpected_error"
@@ -296,6 +299,7 @@ class AdResearchService:
         job = await session.get(AdResearchJob, task.business_id)
         if job is None or job.status in {"completed", "insufficient", "expired", "failed"}:
             return
+        await self.media.cleanup_job_media(job.id)
         job.status = "failed"
         job.stage = "failed"
         job.error_code = task.error_code or "task_stale"
@@ -324,6 +328,7 @@ class AdResearchService:
     async def _expire_job(
         self, session: AsyncSession, job: AdResearchJob, *, commit: bool = True
     ) -> None:
+        await self.media.cleanup_job_media(job.id)
         job.status = "expired"
         job.stage = "expired"
         job.result_json = None
@@ -335,13 +340,17 @@ class AdResearchService:
             await session.commit()
 
 
-def _initial_progress() -> dict[str, int]:
+def _initial_progress() -> dict[str, Any]:
     return {
         "raw_collected": 0,
         "deduplicated": 0,
         "technical_qualified": 0,
+        "model_scored": 0,
+        "model_scoring_failed": 0,
         "model_relevant": 0,
         "selected_count": 0,
+        "score_distribution": {},
+        "twenty_fifth_score": None,
     }
 
 

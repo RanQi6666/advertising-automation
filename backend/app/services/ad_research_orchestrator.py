@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
-from backend.app.core.errors import ProviderError
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.models.generation_task import GenerationTask
@@ -17,6 +16,7 @@ from backend.app.services.ad_research_media import (
     MAX_VIDEO_SECONDS,
     MIN_ACTIVE_DAYS,
     AdResearchMediaInspector,
+    PreparedAdMedia,
     TechnicalQualification,
 )
 from backend.app.services.ad_research_model import AdResearchModel
@@ -25,7 +25,8 @@ from backend.app.services.ad_research_service import AdResearchService
 MAX_ROUNDS = 4
 MAX_RAW_CANDIDATES = 500
 PER_QUERY_LIMIT = 50
-MIN_CATEGORY_CONFIDENCE = 0.85
+QUALITY_SUPPLEMENT_THRESHOLD = 55.0
+LOW_CONFIDENCE_THRESHOLD = 0.60
 
 
 @dataclass(frozen=True)
@@ -59,14 +60,13 @@ class AdResearchOrchestrator:
         seen: dict[str, CollectorAd] = {}
         technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification] = {}
         scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
-        classification_diagnostics_by_ad_library_id: dict[str, dict[str, Any]] = {}
+        model_scoring_failed_ids: set[str] = set()
         used_query_keys: set[str] = set()
         used_queries: list[str] = []
         round_summaries: list[dict[str, Any]] = []
-        scored: list[dict[str, Any]] = []
         raw_collected = 0
-        technical_qualified = 0
         gap_summary: dict[str, Any] = {}
+        termination_reason: str | None = None
 
         for round_number in range(1, MAX_ROUNDS + 1):
             job.current_round = round_number
@@ -79,18 +79,10 @@ class AdResearchOrchestrator:
                 gap_summary=gap_summary,
             )
             if not planned_queries:
+                termination_reason = "query_planning_empty"
                 break
 
-            queries: list[str] = []
-            for query in planned_queries:
-                normalized = " ".join(str(query).split())
-                query_key = normalized.casefold()
-                if not normalized or query_key in used_query_keys:
-                    continue
-                used_query_keys.add(query_key)
-                used_queries.append(normalized)
-                queries.append(normalized)
-
+            queries = _new_queries(planned_queries, used_query_keys, used_queries)
             job.stage = "collecting"
             round_raw_collected = 0
             candidates_before_round = len(seen)
@@ -111,60 +103,60 @@ class AdResearchOrchestrator:
 
             candidates = list(seen.values())
             job.stage = "technical_filtering"
-            for ad in candidates:
-                if ad.ad_library_id not in technical_diagnostics_by_ad_library_id:
-                    technical_diagnostics_by_ad_library_id[
-                        ad.ad_library_id
-                    ] = await self.media.inspect(ad)
+            uninspected = [
+                ad
+                for ad in candidates
+                if ad.ad_library_id not in technical_diagnostics_by_ad_library_id
+            ]
+            if uninspected:
+                technical_diagnostics_by_ad_library_id.update(
+                    await self.media.inspect_many(uninspected, job_id=job.id)
+                )
             qualified = [
                 ad
                 for ad in candidates
                 if technical_diagnostics_by_ad_library_id[ad.ad_library_id].qualified
             ]
-            technical_qualified = len(qualified)
-            scored = sorted(scored_by_ad_library_id.values(), key=_sort_key, reverse=True)
-            job.progress_json = {
+
+            job.stage = "model_visual_scoring"
+            unscored_pairs = [
+                (ad, technical_diagnostics_by_ad_library_id[ad.ad_library_id])
+                for ad in qualified
+                if ad.ad_library_id not in scored_by_ad_library_id
+                and ad.ad_library_id not in model_scoring_failed_ids
+            ]
+            scored_pairs = await self._score_candidates(job.category, unscored_pairs, job.id)
+            for ad, qualification, visual_score, model_failed in scored_pairs:
+                if model_failed or visual_score is None or qualification.media is None:
+                    model_scoring_failed_ids.add(ad.ad_library_id)
+                    continue
+                technical_diagnostics_by_ad_library_id[ad.ad_library_id] = qualification
+                scored_by_ad_library_id[ad.ad_library_id] = _public_result(
+                    ad, qualification, visual_score
+                )
+
+            scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+            selected = scored[: job.target_count]
+            twenty_fifth_score = _target_score(scored, job.target_count)
+            score_distribution = _score_distribution(scored)
+            progress = {
                 "raw_collected": raw_collected,
                 "deduplicated": len(candidates),
-                "technical_qualified": technical_qualified,
+                "technical_qualified": len(qualified),
+                "model_scored": len(scored),
+                "model_scoring_failed": len(model_scoring_failed_ids),
                 "model_relevant": len(scored),
-                "selected_count": min(len(scored), job.target_count),
+                "selected_count": len(selected),
+                "score_distribution": score_distribution,
+                "twenty_fifth_score": twenty_fifth_score,
             }
-            await session.commit()
-
-            job.stage = "model_classifying"
-            unclassified = [
-                ad
-                for ad in qualified
-                if ad.ad_library_id not in classification_diagnostics_by_ad_library_id
-            ]
-            classifications = await self._classify_candidates(job.category, unclassified)
-            classification_failures = 0
-            for ad, classification in zip(unclassified, classifications, strict=True):
-                if isinstance(classification, Exception):
-                    classification_failures += 1
-                    continue
-                classification_diagnostics_by_ad_library_id[ad.ad_library_id] = (
-                    _classification_diagnostic(ad, classification)
-                )
-                if _keep(classification):
-                    scored_by_ad_library_id[ad.ad_library_id] = _public_result(ad, classification)
-            scored = sorted(scored_by_ad_library_id.values(), key=_sort_key, reverse=True)
-            job.progress_json = {
-                **job.progress_json,
-                "model_relevant": len(scored),
-                "model_classification_failed": classification_failures,
-                "selected_count": min(len(scored), job.target_count),
-            }
+            job.progress_json = progress
             await session.commit()
 
             technical_rejection_summary = _technical_rejection_summary(
                 technical_diagnostics_by_ad_library_id
             )
-            model_exclusion_summary = _model_exclusion_summary(
-                classification_diagnostics_by_ad_library_id
-            )
-            duplicate_count = raw_collected - len(candidates)
+            round_new_candidates = len(candidates) - candidates_before_round
             round_summaries.append(
                 {
                     "round": round_number,
@@ -172,82 +164,152 @@ class AdResearchOrchestrator:
                     "planned_query_count": len(planned_queries),
                     "skipped_repeated_query_count": len(planned_queries) - len(queries),
                     "round_raw_collected": round_raw_collected,
-                    "round_new_candidates": len(candidates) - candidates_before_round,
-                    "raw_collected": raw_collected,
-                    "deduplicated": len(candidates),
-                    "technical_qualified": technical_qualified,
-                    "model_relevant": len(scored),
-                    "selected_count": min(len(scored), job.target_count),
+                    "round_new_candidates": round_new_candidates,
+                    **progress,
+                    "technical_rejection_summary": technical_rejection_summary,
                 }
             )
             gap_summary = {
                 "raw_collected": raw_collected,
-                "technical_qualified": technical_qualified,
+                "technical_qualified": len(qualified),
+                "model_scored": len(scored),
                 "model_relevant": len(scored),
                 "target_count": job.target_count,
                 "missing_count": max(job.target_count - len(scored), 0),
                 "previous_queries": list(used_queries),
                 "technical_rejection_summary": technical_rejection_summary,
-                "model_exclusion_summary": model_exclusion_summary,
-                "duplicate_count": duplicate_count,
+                "model_scoring_failed": len(model_scoring_failed_ids),
+                "duplicate_count": raw_collected - len(candidates),
+                "high_score_visible_elements": _high_score_visible_elements(scored),
             }
 
-            if len(scored) >= job.target_count:
-                selected = scored[: job.target_count]
-                summary = _summary(
-                    raw_collected,
-                    len(candidates),
-                    technical_qualified,
-                    selected,
-                    technical_diagnostics_by_ad_library_id,
-                    classification_diagnostics_by_ad_library_id,
-                    round_summaries,
+            has_target = len(scored) >= job.target_count
+            needs_quality_supplement = (
+                has_target
+                and twenty_fifth_score is not None
+                and twenty_fifth_score < QUALITY_SUPPLEMENT_THRESHOLD
+            )
+            if has_target and not needs_quality_supplement:
+                return await self._complete(
+                    session=session,
+                    job=job,
+                    status="completed",
+                    selected=selected,
+                    raw_collected=raw_collected,
+                    deduplicated=len(candidates),
+                    technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                    scored=scored,
+                    model_scoring_failed_ids=model_scoring_failed_ids,
+                    round_summaries=round_summaries,
                 )
-                await self.service.complete_job(
-                    session, job, status="completed", ads=selected, summary=summary
+            if round_number == MAX_ROUNDS or raw_collected >= MAX_RAW_CANDIDATES:
+                termination_reason = (
+                    "quality_supplement_exhausted" if has_target else "insufficient_qualified_ads"
                 )
-                return AdResearchRunResult("completed", selected, summary)
-            if classification_failures:
-                raise ProviderError(
-                    "ad research model classification failed for "
-                    f"{classification_failures} candidates"
+                break
+            if round_new_candidates == 0:
+                termination_reason = (
+                    "quality_supplement_exhausted" if has_target else "no_new_candidates"
                 )
-            if raw_collected >= MAX_RAW_CANDIDATES:
                 break
 
+        scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
         selected = scored[: job.target_count]
-        summary = {
-            **_summary(
-                raw_collected,
-                len(seen),
-                technical_qualified,
-                selected,
-                technical_diagnostics_by_ad_library_id,
-                classification_diagnostics_by_ad_library_id,
-                round_summaries,
+        status = "completed" if len(scored) >= job.target_count else "insufficient"
+        return await self._complete(
+            session=session,
+            job=job,
+            status=status,
+            selected=selected,
+            raw_collected=raw_collected,
+            deduplicated=len(seen),
+            technical_diagnostics=technical_diagnostics_by_ad_library_id,
+            scored=scored,
+            model_scoring_failed_ids=model_scoring_failed_ids,
+            round_summaries=round_summaries,
+            reason=termination_reason
+            or (
+                "quality_supplement_exhausted"
+                if status == "completed"
+                else "insufficient_qualified_ads"
             ),
-            "reason": "insufficient_qualified_ads",
-            "max_rounds": MAX_ROUNDS,
-            "max_raw_candidates": MAX_RAW_CANDIDATES,
-        }
-        await self.service.complete_job(
-            session, job, status="insufficient", ads=selected, summary=summary
         )
-        return AdResearchRunResult("insufficient", selected, summary)
 
-    async def _classify_candidates(
-        self, category: str, candidates: list[CollectorAd]
-    ) -> list[dict[str, Any] | Exception]:
+    async def _score_candidates(
+        self,
+        category: str,
+        candidates: list[tuple[CollectorAd, TechnicalQualification]],
+        job_id: str,
+    ) -> list[tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, bool]]:
         semaphore = asyncio.Semaphore(max(int(self.settings.ad_research_model_concurrency), 1))
 
-        async def classify_one(candidate: CollectorAd) -> dict[str, Any] | Exception:
+        async def call_model(candidate: CollectorAd, media: PreparedAdMedia) -> dict[str, Any]:
             async with semaphore:
-                try:
-                    return await self.model.classify(category=category, candidate=candidate)
-                except Exception as exc:  # Preserve failure state for the caller/job status.
-                    return exc
+                return await self.model.score_visual(
+                    category=category, candidate=candidate, media=media
+                )
 
-        return await asyncio.gather(*(classify_one(candidate) for candidate in candidates))
+        async def score_one(
+            candidate: CollectorAd, qualification: TechnicalQualification
+        ) -> tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, bool]:
+            media = qualification.media
+            if media is None:
+                return candidate, qualification, None, True
+            try:
+                score = await call_model(candidate, media)
+            except Exception:
+                return candidate, qualification, None, True
+
+            if float(score.get("analysis_confidence") or 0) >= LOW_CONFIDENCE_THRESHOLD:
+                return candidate, qualification, score, False
+
+            try:
+                enriched = await self.media.add_low_confidence_frames(
+                    candidate, qualification, job_id=job_id
+                )
+            except Exception:
+                return candidate, qualification, score, False
+            if enriched.media is None:
+                return candidate, qualification, score, False
+            try:
+                rescored = await call_model(candidate, enriched.media)
+            except Exception:
+                return candidate, qualification, score, False
+            return candidate, enriched, rescored, False
+
+        return await asyncio.gather(
+            *(score_one(candidate, qualification) for candidate, qualification in candidates)
+        )
+
+    async def _complete(
+        self,
+        *,
+        session: AsyncSession,
+        job: AdResearchJob,
+        status: str,
+        selected: list[dict[str, Any]],
+        raw_collected: int,
+        deduplicated: int,
+        technical_diagnostics: dict[str, TechnicalQualification],
+        scored: list[dict[str, Any]],
+        model_scoring_failed_ids: set[str],
+        round_summaries: list[dict[str, Any]],
+        reason: str | None = None,
+    ) -> AdResearchRunResult:
+        await self.media.retain_only(job.id, {ad["ad_library_id"] for ad in selected})
+        summary = _summary(
+            raw=raw_collected,
+            deduplicated=deduplicated,
+            technical_diagnostics=technical_diagnostics,
+            scored=scored,
+            selected=selected,
+            model_scoring_failed_ids=model_scoring_failed_ids,
+            round_summaries=round_summaries,
+            target_count=job.target_count,
+            reason=reason,
+        )
+        await self.service.complete_job(session, job, status=status, ads=selected, summary=summary)
+        return AdResearchRunResult(status, selected, summary)
 
     async def execute_task(self, session: AsyncSession, task: GenerationTask) -> None:
         job = await session.get(AdResearchJob, task.business_id)
@@ -260,6 +322,7 @@ class AdResearchOrchestrator:
         try:
             result = await self.run(session, job)
         except Exception as exc:
+            await self.media.cleanup_job_media(job.id)
             await self.service.fail_job(session, job, exc)
             task.status = "failed"
             task.error_code = "ad_research_failed"
@@ -275,16 +338,43 @@ class AdResearchOrchestrator:
             await session.commit()
 
 
-def _keep(classification: dict[str, Any]) -> bool:
-    return (
-        classification.get("recommendation") == "keep"
-        and bool(classification.get("category_match"))
-        and not bool(classification.get("is_obviously_unrelated"))
-        and float(classification.get("category_confidence") or 0) >= MIN_CATEGORY_CONFIDENCE
-    )
+def _new_queries(
+    planned_queries: list[str], used_query_keys: set[str], used_queries: list[str]
+) -> list[str]:
+    queries: list[str] = []
+    for query in planned_queries:
+        normalized = " ".join(str(query).split())
+        query_key = normalized.casefold()
+        if not normalized or query_key in used_query_keys:
+            continue
+        used_query_keys.add(query_key)
+        used_queries.append(normalized)
+        queries.append(normalized)
+    return queries
 
 
-def _public_result(ad: CollectorAd, classification: dict[str, Any]) -> dict[str, Any]:
+def _public_continuity_points(active_days: int | None) -> float:
+    if active_days is None or active_days < 1:
+        return 0.0
+    if active_days <= 2:
+        return 1.0
+    if active_days <= 6:
+        return 3.0
+    if active_days <= 13:
+        return 5.0
+    if active_days <= 29:
+        return 7.0
+    return 10.0
+
+
+def _public_result(
+    ad: CollectorAd, qualification: TechnicalQualification, visual_score: dict[str, Any]
+) -> dict[str, Any]:
+    media = qualification.media
+    if media is None:
+        raise ValueError("qualified ad research candidate has no prepared media")
+    visual_total = float(visual_score.get("visual_total") or 0)
+    public_continuity_points = _public_continuity_points(qualification.active_days)
     return {
         "ad_library_id": ad.ad_library_id,
         "advertiser_name": ad.advertiser_name,
@@ -294,78 +384,81 @@ def _public_result(ad: CollectorAd, classification: dict[str, Any]) -> dict[str,
         "cta_text": ad.cta_text,
         "video_url": ad.video_url,
         "thumbnail_url": ad.thumbnail_url,
-        "duration_seconds": ad.duration_seconds,
-        "active_days": ad.days_running,
+        "duration_seconds": qualification.duration_seconds,
+        "active_days": qualification.active_days,
         "platforms": ad.platforms,
-        "category_confidence": classification["category_confidence"],
-        "creative_relevance_score": classification["creative_relevance_score"],
-        "public_performance_signal_score": classification["public_performance_signal_score"],
-        "real_money_signal_score": classification["real_money_signal_score"],
-        "business_type": classification["business_type"],
-        "evidence": {
-            "text": classification["text_evidence"],
-            "visual": classification["visual_evidence"],
-            "public_signals": classification["public_signal_evidence"],
-            "public_risk_signals": classification["public_risk_signals"],
-        },
+        "final_score": round(visual_total + public_continuity_points, 2),
+        "visual_total": visual_total,
+        "public_continuity_points": public_continuity_points,
+        "analysis_confidence": float(visual_score.get("analysis_confidence") or 0),
+        "visible_elements": list(visual_score.get("visible_elements") or []),
+        "visual_evidence": list(visual_score.get("visual_evidence") or []),
+        "media": _public_media(media),
     }
 
 
-def _sort_key(ad: dict[str, Any]) -> tuple[float, float, float, float]:
+def _public_media(media: PreparedAdMedia) -> dict[str, Any]:
+    return {
+        "cover_url": media.cover_url,
+        "cover_source": media.cover_source,
+        "frame_urls": list(media.frame_urls),
+        "frame_count": len(media.frame_urls),
+        "duration_source": media.duration_source,
+        "duration_probe_attempts": media.duration_probe_attempts,
+    }
+
+
+def _sort_key(ad: dict[str, Any]) -> tuple[float, float, int, int, str]:
     return (
-        float(ad["category_confidence"]),
-        float(ad["creative_relevance_score"]),
-        float(ad["public_performance_signal_score"]),
-        float(ad.get("active_days") or 0),
+        -float(ad["final_score"]),
+        -float(ad["visual_total"]),
+        -int(ad.get("active_days") or 0),
+        -int(ad["media"]["frame_count"]),
+        str(ad["ad_library_id"]),
     )
 
 
-def _classification_diagnostic(ad: CollectorAd, classification: dict[str, Any]) -> dict[str, Any]:
-    keep = _keep(classification)
-    return {
-        "ad_library_id": ad.ad_library_id,
-        "category_match": bool(classification["category_match"]),
-        "category_confidence": float(classification["category_confidence"]),
-        "business_type": classification["business_type"],
-        "creative_relevance_score": float(classification["creative_relevance_score"]),
-        "public_performance_signal_score": float(classification["public_performance_signal_score"]),
-        "real_money_signal_score": float(classification["real_money_signal_score"]),
-        "is_obviously_unrelated": bool(classification["is_obviously_unrelated"]),
-        "recommendation": classification["recommendation"],
-        "decision": "keep" if keep else "exclude",
-        "exclusion_reasons": [] if keep else _exclusion_reasons(classification),
-        "text_evidence": classification["text_evidence"][:2],
-        "visual_evidence": classification["visual_evidence"][:2],
-        "public_signal_evidence": classification["public_signal_evidence"][:2],
-        "public_risk_signals": classification["public_risk_signals"][:2],
-    }
+def _target_score(scored: list[dict[str, Any]], target_count: int) -> float | None:
+    if len(scored) < target_count:
+        return None
+    return float(scored[target_count - 1]["final_score"])
 
 
-def _exclusion_reasons(classification: dict[str, Any]) -> list[str]:
-    reasons: list[str] = []
-    if classification.get("recommendation") != "keep":
-        reasons.append("recommendation_not_keep")
-    if not classification.get("category_match"):
-        reasons.append("category_not_matched")
-    if classification.get("is_obviously_unrelated"):
-        reasons.append("obviously_unrelated")
-    if float(classification.get("category_confidence") or 0) < MIN_CATEGORY_CONFIDENCE:
-        reasons.append("category_confidence_below_threshold")
-    return reasons
+def _score_distribution(scored: list[dict[str, Any]]) -> dict[str, int]:
+    distribution = {"0_19": 0, "20_39": 0, "40_54": 0, "55_69": 0, "70_89": 0, "90_100": 0}
+    for candidate in scored:
+        score = float(candidate["final_score"])
+        if score < 20:
+            distribution["0_19"] += 1
+        elif score < 40:
+            distribution["20_39"] += 1
+        elif score < QUALITY_SUPPLEMENT_THRESHOLD:
+            distribution["40_54"] += 1
+        elif score < 70:
+            distribution["55_69"] += 1
+        elif score < 90:
+            distribution["70_89"] += 1
+        else:
+            distribution["90_100"] += 1
+    return distribution
 
 
-def _classification_diagnostics_summary(
-    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    candidates = list(diagnostics_by_ad_library_id.values())
-    kept_count = sum(item["decision"] == "keep" for item in candidates)
-    return {
-        "classified_count": len(candidates),
-        "kept_count": kept_count,
-        "excluded_count": len(candidates) - kept_count,
-        "minimum_category_confidence": MIN_CATEGORY_CONFIDENCE,
-        "candidates": candidates,
-    }
+def _high_score_visible_elements(scored: list[dict[str, Any]]) -> list[str]:
+    elements: list[str] = []
+    seen: set[str] = set()
+    for candidate in scored:
+        if float(candidate["final_score"]) < QUALITY_SUPPLEMENT_THRESHOLD:
+            continue
+        for item in candidate.get("visible_elements") or []:
+            element = str(item).strip()
+            key = element.casefold()
+            if not element or key in seen:
+                continue
+            seen.add(key)
+            elements.append(element)
+            if len(elements) == 24:
+                return elements
+    return elements
 
 
 def _technical_rejection_summary(
@@ -378,45 +471,45 @@ def _technical_rejection_summary(
     return summary
 
 
-def _model_exclusion_summary(
-    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
-) -> dict[str, int]:
-    summary: dict[str, int] = {}
-    for diagnostic in diagnostics_by_ad_library_id.values():
-        for reason in diagnostic["exclusion_reasons"]:
-            summary[reason] = summary.get(reason, 0) + 1
-    return summary
-
-
 def _summary(
+    *,
     raw: int,
     deduplicated: int,
-    qualified: int,
+    technical_diagnostics: dict[str, TechnicalQualification],
+    scored: list[dict[str, Any]],
     selected: list[dict[str, Any]],
-    technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification],
-    classification_diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
+    model_scoring_failed_ids: set[str],
     round_summaries: list[dict[str, Any]],
+    target_count: int,
+    reason: str | None,
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "raw_collected": raw,
         "deduplicated": deduplicated,
-        "technical_qualified": qualified,
-        "model_relevant": len(selected),
+        "technical_qualified": sum(
+            diagnostic.qualified for diagnostic in technical_diagnostics.values()
+        ),
+        "model_scored": len(scored),
+        "model_scoring_failed": len(model_scoring_failed_ids),
+        "model_relevant": len(scored),
         "selected_count": len(selected),
         "minimum_active_days": MIN_ACTIVE_DAYS,
         "maximum_video_seconds": MAX_VIDEO_SECONDS,
-        "technical_rejection_summary": _technical_rejection_summary(
-            technical_diagnostics_by_ad_library_id
-        ),
-        "model_exclusion_summary": _model_exclusion_summary(
-            classification_diagnostics_by_ad_library_id
-        ),
+        "quality_supplement_threshold": QUALITY_SUPPLEMENT_THRESHOLD,
+        "score_distribution": _score_distribution(scored),
+        "twenty_fifth_score": _target_score(scored, target_count),
+        "high_score_visible_elements": _high_score_visible_elements(scored),
+        "technical_rejection_summary": _technical_rejection_summary(technical_diagnostics),
         "rounds": round_summaries,
-        "classification_diagnostics": _classification_diagnostics_summary(
-            classification_diagnostics_by_ad_library_id
+        "model_relevant_notice": (
+            "Compatibility field only: model_relevant equals model_scored and no longer means "
+            "a text or category hard match."
         ),
         "performance_signal_notice": (
-            "public_performance_signal_score is a public continuity proxy, not actual spend, "
-            "CPC, CPA, ROAS, or conversion data."
+            "public_continuity_points is a public active-duration proxy, not actual spend, "
+            "CPC, CPA, ROAS, conversion data, or profit."
         ),
     }
+    if reason is not None:
+        summary["reason"] = reason
+    return summary
