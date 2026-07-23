@@ -428,6 +428,99 @@ async def test_model_planner_prompt_has_schema_and_allowed_intents(monkeypatch) 
     await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_model_planner_serializes_controlled_quality_supplement_review_to_responses(
+    monkeypatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        user_payload = json.loads(payload["input"][1]["content"])
+        round_number = user_payload["round_number"]
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "queries": [
+                            {
+                                "query_id": f"r{round_number}_q01",
+                                "query": f"controlled query {round_number}",
+                                "intent": "game_gambling",
+                                "rationale": "Controlled quality supplement.",
+                                "expected_visuals": ["slot reels"],
+                            }
+                        ]
+                    }
+                )
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://gateway.example/v1/"
+    )
+    model = AdResearchModel(http_client=client, limiter=Limiter())
+    gap_summary = {
+        "quality_supplement_mode": True,
+        "query_performance": [
+            {
+                "query_id": "r4_q01",
+                "query": "slot promo",
+                "collected_count": 8,
+                "selected_count": 1,
+                "rejected_count": 7,
+                "ad_text": "must not be forwarded",
+            }
+        ],
+        "priority_gaps": ["game ui", "slot reels", "uncontrolled text"],
+        "missing_signals": ["wallet or balance ui", "https://must-not-be-forwarded.example"],
+        "ocr_text": "must not be forwarded",
+    }
+
+    await model.plan_queries(
+        country="IN",
+        category="gambling",
+        seed_keywords=["rummy"],
+        round_number=5,
+        gap_summary=gap_summary,
+    )
+    await model.plan_queries(
+        country="IN",
+        category="gambling",
+        seed_keywords=["rummy"],
+        round_number=1,
+        gap_summary={"quality_supplement_mode": True},
+    )
+
+    assert len(requests) == 2
+    round_five = json.loads(requests[0]["input"][1]["content"])["round_review"]
+    assert round_five["quality_supplement_mode"] is True
+    assert round_five["query_performance"] == [
+        {
+            "query_id": "r4_q01",
+            "query": "slot promo",
+            "collected_count": 8,
+            "selected_count": 1,
+            "rejected_count": 7,
+        }
+    ]
+    assert round_five["priority_gaps"] == ["game ui", "slot reels"]
+    assert round_five["missing_signals"] == ["wallet or balance ui"]
+    assert "must-not-be-forwarded" not in json.dumps(round_five)
+    assert "P1-P3" in requests[0]["input"][0]["content"]
+    assert "quality_supplement_mode" in requests[0]["input"][0]["content"]
+
+    round_one = json.loads(requests[1]["input"][1]["content"])["round_review"]
+    assert round_one["quality_supplement_mode"] is False
+    await client.aclose()
+
+
 @pytest.mark.parametrize("query_id", ["r0_q01", "r7_q01", "r1_q00", "r1_q13", "r1_q99"])
 def test_planned_query_rejects_query_ids_outside_supported_rounds_and_slots(query_id: str) -> None:
     with pytest.raises(ValueError, match="query_id"):

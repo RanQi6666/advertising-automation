@@ -77,6 +77,7 @@ class RoundReview:
     """Safe, structured facts used to change the next research round."""
 
     query_performance: tuple[QueryPerformance, ...] = ()
+    quality_supplement_mode: bool = False
     priority_gaps: tuple[str, ...] = ()
     missing_signals: tuple[str, ...] = ()
     high_score_visible_elements: tuple[str, ...] = ()
@@ -84,6 +85,11 @@ class RoundReview:
     duplicate_count: int = 0
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "quality_supplement_mode",
+            self.quality_supplement_mode is True,
+        )
         object.__setattr__(
             self,
             "priority_gaps",
@@ -103,6 +109,7 @@ class RoundReview:
     def as_dict(self) -> dict[str, Any]:
         return {
             "query_performance": [item.as_dict() for item in self.query_performance],
+            "quality_supplement_mode": self.quality_supplement_mode,
             "priority_gaps": list(self.priority_gaps),
             "missing_signals": list(self.missing_signals),
             "high_score_visible_elements": list(self.high_score_visible_elements),
@@ -250,7 +257,14 @@ class AdResearchModel:
         round_number: int,
         gap_summary: dict[str, Any] | None = None,
     ) -> QueryPlan:
-        review = _round_review_from_summary(gap_summary) if gap_summary else None
+        review = (
+            _round_review_from_summary(
+                gap_summary,
+                quality_supplement_allowed=_safe_round_number(round_number) > 4,
+            )
+            if gap_summary
+            else None
+        )
         fallback = _fallback_query_plan(
             seed_keywords=seed_keywords,
             category=category,
@@ -276,7 +290,13 @@ class AdResearchModel:
                     "characters. intent must be exactly one of: game_gambling, sports_betting, "
                     "local_exploration, format_exploration. Create short public-library queries "
                     "for the requested country/category. Use only the controlled round review to "
-                    "change retrieval direction. Do not repeat prior queries. If technical "
+                    "change retrieval direction. When round_review.quality_supplement_mode is true "
+                    "(only rounds 5 and 6), prioritize the controlled query_performance, "
+                    "priority_gaps, and missing_signals to fill P1-P3 visual modes "
+                    "(game_gambling, sports_betting, gambling_adjacent); do not plan P4/unrelated "
+                    "queries merely to fill count. Do not use or request ad text, URLs, OCR, or "
+                    "other uncontrolled free-form content. Do not repeat prior queries. "
+                    "If technical "
                     "rejections show many duration_over_30 results, favor natural short-form "
                     "creative terms such as short video, reel, or promo. If duplicates are high, "
                     "explore different product types, local language, spelling variants, emojis, "
@@ -471,7 +491,9 @@ def _strip_json_markdown(value: str) -> str:
     return value
 
 
-def _round_review_from_summary(summary: dict[str, Any] | None) -> RoundReview:
+def _round_review_from_summary(
+    summary: dict[str, Any] | None, *, quality_supplement_allowed: bool
+) -> RoundReview:
     source = summary if isinstance(summary, dict) else {}
     query_performance: list[QueryPerformance] = []
     raw_performance = source.get("query_performance")
@@ -507,6 +529,9 @@ def _round_review_from_summary(summary: dict[str, Any] | None) -> RoundReview:
     )
     return RoundReview(
         query_performance=tuple(query_performance),
+        quality_supplement_mode=(
+            quality_supplement_allowed and source.get("quality_supplement_mode") is True
+        ),
         priority_gaps=tuple(_visual_taxonomy_list(source.get("priority_gaps"), limit=12)),
         missing_signals=tuple(
             _visual_taxonomy_list(

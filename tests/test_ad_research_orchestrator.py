@@ -489,6 +489,66 @@ async def test_orchestrator_rescores_low_confidence_candidate_with_extra_frames(
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_preserves_first_low_confidence_score_when_follow_up_fails() -> None:
+    item = candidate(401)
+    collector = QueryCollector({"first": [item]})
+    media = Media()
+
+    class FollowUpFailureModel(Model):
+        async def score_visual(self, **kwargs: Any) -> dict[str, Any]:
+            score = await super().score_visual(**kwargs)
+            marker = str(kwargs["media"].cover_url or "").split("/")[-2]
+            if self.score_calls_by_ad_id[marker] == 2:
+                raise RuntimeError("follow-up scoring unavailable")
+            return score
+
+    model = FollowUpFailureModel(
+        plans=[["first"]],
+        confidence_by_ad_id={item.ad_library_id: 0.5},
+        score_by_ad_id={item.ad_library_id: 75},
+    )
+
+    result = await run_custom(collector=collector, media=media, model=model, target_count=1)
+
+    assert result.status == "completed"
+    assert result.summary["model_scoring_failed"] == 0
+    assert media.low_confidence_calls == [item.ad_library_id]
+    assert model.score_calls_by_ad_id[item.ad_library_id] == 2
+    assert result.ads[0]["visual_total"] == 75.0
+    assert result.ads[0]["media"]["frame_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_caps_oversized_collector_result_at_remaining_raw_budget(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(orchestrator_module, "MAX_RAW_CANDIDATES", 3)
+    returned_ads = [candidate(500 + index) for index in range(10)]
+
+    class OversizedCollector:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        async def collect(self, **kwargs: Any) -> list[CollectorAd]:
+            self.limits.append(kwargs["limit"])
+            return returned_ads
+
+    collector = OversizedCollector()
+    result = await run_custom(
+        collector=collector,
+        media=Media(),
+        model=Model(plans=[["first"]]),
+        target_count=4,
+    )
+
+    assert result.status == "failed"
+    assert result.ads == []
+    assert collector.limits == [3]
+    assert result.summary["raw_collected"] == 3
+    assert result.summary["deduplicated"] == 3
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_records_model_scoring_failure_without_zero_score() -> None:
     failed = candidate(5)
     scored = candidate(6)
