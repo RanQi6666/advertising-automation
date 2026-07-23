@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import secrets
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,6 +15,7 @@ from redis import asyncio as redis_async
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.schemas.ad_research import CollectorAd
+from backend.app.services.ad_research_media import PreparedAdMedia
 
 
 @dataclass
@@ -31,7 +35,7 @@ class RedisLease:
 
 
 class RedisGlobalLimiter:
-    """A Redis lease, shared by all research workers rather than per-process semaphores."""
+    """A Redis lease shared by all research workers, not a per-process semaphore."""
 
     def __init__(self, redis_url: str | None = None) -> None:
         settings = get_settings()
@@ -79,70 +83,67 @@ class AdResearchModel:
         fallback = _unique_queries(seed_keywords or [category])
         if self.settings.llm_provider == "mock":
             return fallback[:12]
+        summary = gap_summary or {}
         data = await self._complete_json(
             system=(
                 "You plan lawful public-ad-library keyword research. Return JSON only: "
                 '{"queries":["short query"]}. Create up to 12 short, independent '
-                "public-library queries for the requested country/category. Use gap_summary "
-                "to change retrieval direction after weak rounds. Do not repeat "
-                "previous_queries. If technical_rejection_summary shows many "
-                "duration_over_30 results, favor natural short-form creative terms such as "
-                "short video, reel, or promo. If model exclusion signals show category "
-                "mismatch, strengthen the intersection between the business category and "
-                "observable product or conversion language. If duplicate_count is high, "
-                "explore different product types, local language, brands, advertisers, or "
-                "app terms. Keep this guidance generic across countries and categories. "
-                "Never provide instructions to evade review, tracking, access controls, or "
-                "landing-page inspection."
+                "public-library queries for the requested country/category. Use the previous "
+                "round's high-score visible elements and visual style to change retrieval "
+                "direction. Do not repeat previous_queries. If technical_rejection_summary "
+                "shows many duration_over_30 results, favor natural short-form creative terms "
+                "such as short video, reel, or promo. If duplicate_count is high, explore "
+                "different product types, local language, spelling variants, emojis, brands, "
+                "advertisers, or app terms. Keep this guidance generic across countries and "
+                "categories. Never provide instructions to evade review, tracking, access "
+                "controls, user targeting, or landing-page inspection."
             ),
             user={
                 "country": country,
                 "category": category,
                 "seed_keywords": seed_keywords,
                 "round_number": round_number,
-                "gap_summary": gap_summary or {},
+                "gap_summary": {
+                    **summary,
+                    "high_score_visible_elements": summary.get("high_score_visible_elements", []),
+                },
             },
         )
         values = data.get("queries") if isinstance(data, dict) else []
         return _unique_queries(values if isinstance(values, list) else [])[:12] or fallback[:12]
 
-    async def classify(self, *, category: str, candidate: CollectorAd) -> dict[str, Any]:
+    async def score_visual(
+        self,
+        *,
+        category: str,
+        candidate: CollectorAd,
+        media: PreparedAdMedia,
+    ) -> dict[str, Any]:
         if self.settings.llm_provider == "mock":
-            return _mock_classification(category, candidate)
+            return _mock_visual_score(media)
         user: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": json.dumps(
                     {
                         "category": category,
-                        "candidate": candidate.model_dump(mode="json"),
-                        "rules": {
-                            "public_proxy_only": True,
-                            "do_not_infer_cost_or_conversion": True,
-                            "do_not_confirm_cloaking": True,
+                        "media": {
+                            "duration_seconds": candidate.duration_seconds,
+                            "active_days": candidate.days_running,
+                            "frame_count": len(media.local_frame_paths),
                         },
                     },
                     ensure_ascii=False,
                 ),
-            }
+            },
+            *[_image_part(path) for path in media.local_frame_paths],
         ]
-        if candidate.thumbnail_url:
-            user.append({"type": "image_url", "image_url": {"url": candidate.thumbnail_url}})
         data = await self._complete_json(
-            system=(
-                "Classify a technically qualified public advertisement. Return JSON only. "
-                "Keys: category_match, category_confidence, business_type, "
-                "creative_relevance_score, public_performance_signal_score, "
-                "real_money_signal_score, is_obviously_unrelated, text_evidence, "
-                "visual_evidence, public_signal_evidence, public_risk_signals, recommendation. "
-                "recommendation must be exactly the enum value keep or exclude; never prose. "
-                "public_performance_signal_score is a public continuity proxy, not actual cost, "
-                "CPA, ROAS, spend, or conversion. Do not confirm cloaking; "
-                "use public mismatch signals."
-            ),
+            system=_VISUAL_SCORING_SYSTEM_PROMPT,
             user=user,
+            effort="none",
         )
-        return _validated_classification(data)
+        return _validated_visual_score(data, frame_count=len(media.local_frame_paths))
 
     async def _complete_json(
         self, *, system: str, user: Any, effort: str = "none"
@@ -191,9 +192,6 @@ class AdResearchModel:
                 await client.aclose()
 
     async def _wait_for_lease(self) -> RedisLease:
-        # A globally shared slot can be held for a full model request. Wait long enough
-        # for an in-flight request to finish instead of treating a saturated limiter as
-        # an irrelevant candidate.
         wait_seconds = max(self.settings.ad_research_model_timeout_seconds + 5.0, 60.0)
         attempts = max(int(wait_seconds / 0.1), 1)
         lease_seconds = max(
@@ -210,6 +208,34 @@ class AdResearchModel:
                 return lease
             await asyncio.sleep(0.1)
         raise ProviderError("ad research model queue remained at capacity")
+
+
+_VISUAL_SCORING_SYSTEM_PROMPT = """
+Score this public advertisement only from the supplied video-frame images. Return JSON only with:
+core_gambling_points, reward_ui_points, gambling_style_points, casino_context_points,
+media_quality_points, analysis_confidence, visible_elements, visual_evidence, uncertain.
+Use these maximums: core_gambling_points 40, reward_ui_points 20, gambling_style_points 15,
+casino_context_points 10, media_quality_points 5. Direct gambling gameplay or UI gets the
+strongest score: slots, 777, roulette, cards, live dealers, dice, Aviator/Crash, fishing-game
+gambling UI, bets, odds, or balances. Coins, crystals, reward chests, Jackpot, Bonus,
+multipliers, big-win effects, WIN, VIP, and reward UI/effects can also receive points as
+casino-style evidence. Score only visible content in the provided images. Do not infer from
+ad copy, audio, advertiser, page, URL, landing page, or facts not provided. visual_evidence
+must be a list of objects with frame_index and detail. Do not return a recommendation,
+category_match, category_confidence, or is_obviously_unrelated field.
+""".strip()
+
+
+def _image_part(path: Path) -> dict[str, Any]:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ProviderError("ad research visual frame cannot be read") from exc
+    if not payload:
+        raise ProviderError("ad research visual frame is empty")
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    encoded = base64.b64encode(payload).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}
 
 
 def _responses_content(user: Any) -> str | list[dict[str, Any]]:
@@ -259,80 +285,90 @@ def _unique_queries(values: list[Any]) -> list[str]:
     return output
 
 
-def _mock_classification(category: str, candidate: CollectorAd) -> dict[str, Any]:
-    haystack = " ".join(
-        candidate.text_variants + [candidate.headline or "", candidate.cta_text or ""]
-    ).casefold()
-    matched = category.casefold() in haystack or bool(haystack)
+def _mock_visual_score(media: PreparedAdMedia) -> dict[str, Any]:
+    media_quality_points = 5.0 if media.local_frame_paths else 0.0
     return {
-        "category_match": matched,
-        "category_confidence": 0.9 if matched else 0.0,
-        "business_type": category,
-        "creative_relevance_score": 80 if matched else 0,
-        "public_performance_signal_score": min(100, 40 + (candidate.days_running or 0) * 5),
-        "real_money_signal_score": 0.0,
-        "is_obviously_unrelated": not matched,
-        "text_evidence": candidate.text_variants[:2],
+        "core_gambling_points": 0.0,
+        "reward_ui_points": 0.0,
+        "gambling_style_points": 0.0,
+        "casino_context_points": 0.0,
+        "media_quality_points": media_quality_points,
+        "analysis_confidence": 1.0 if media.local_frame_paths else 0.0,
+        "visible_elements": [],
         "visual_evidence": [],
-        "public_signal_evidence": [f"active_days={candidate.days_running or 0}"],
-        "public_risk_signals": [],
-        "recommendation": "keep" if matched else "exclude",
+        "uncertain": not bool(media.local_frame_paths),
+        "visual_total": media_quality_points,
     }
 
 
-def _validated_classification(data: Any) -> dict[str, Any]:
-    data = data if isinstance(data, dict) else {}
-    category_match = bool(data.get("category_match"))
-    is_obviously_unrelated = bool(data.get("is_obviously_unrelated"))
+def _validated_visual_score(data: Any, *, frame_count: int) -> dict[str, Any]:
+    payload = data if isinstance(data, dict) else {}
     result = {
-        "category_match": category_match,
-        "category_confidence": _score(data.get("category_confidence"), fractional=True),
-        "business_type": str(data.get("business_type") or "unknown")[:128],
-        "creative_relevance_score": _score(data.get("creative_relevance_score")),
-        "public_performance_signal_score": _score(data.get("public_performance_signal_score")),
-        "real_money_signal_score": _score(data.get("real_money_signal_score"), fractional=True),
-        "is_obviously_unrelated": is_obviously_unrelated,
-        "text_evidence": _strings(data.get("text_evidence")),
-        "visual_evidence": _strings(data.get("visual_evidence")),
-        "public_signal_evidence": _strings(data.get("public_signal_evidence")),
-        "public_risk_signals": _strings(data.get("public_risk_signals")),
-        "recommendation": _normalize_recommendation(
-            data.get("recommendation"),
-            category_match=category_match,
-            is_obviously_unrelated=is_obviously_unrelated,
-        ),
+        "core_gambling_points": _bounded_score(payload.get("core_gambling_points"), 40.0),
+        "reward_ui_points": _bounded_score(payload.get("reward_ui_points"), 20.0),
+        "gambling_style_points": _bounded_score(payload.get("gambling_style_points"), 15.0),
+        "casino_context_points": _bounded_score(payload.get("casino_context_points"), 10.0),
+        "media_quality_points": _bounded_score(payload.get("media_quality_points"), 5.0),
+        "analysis_confidence": _bounded_score(payload.get("analysis_confidence"), 1.0),
+        "visible_elements": _strings(payload.get("visible_elements"), limit=12, width=120),
+        "visual_evidence": _visual_evidence(payload.get("visual_evidence"), frame_count),
+        "uncertain": bool(payload.get("uncertain")),
     }
+    result["visual_total"] = round(
+        sum(
+            float(result[key])
+            for key in (
+                "core_gambling_points",
+                "reward_ui_points",
+                "gambling_style_points",
+                "casino_context_points",
+                "media_quality_points",
+            )
+        ),
+        2,
+    )
     return result
 
 
-def _normalize_recommendation(
-    value: Any, *, category_match: bool, is_obviously_unrelated: bool
-) -> str:
-    recommendation = str(value or "").strip().casefold()
-    if recommendation in {"keep", "include", "retain"}:
-        return "keep"
-    if recommendation in {"exclude", "drop", "reject"}:
-        return "exclude"
-    if recommendation.startswith(("exclude", "drop", "reject")) or any(
-        phrase in recommendation
-        for phrase in ("do not keep", "don't keep", "do not classify", "not gambling", "unrelated")
-    ):
-        return "exclude"
-    if any(
-        phrase in recommendation
-        for phrase in ("keep", "include", "retain", "high-confidence match", "gambling-related")
-    ):
-        return "keep"
-    return "keep" if category_match and not is_obviously_unrelated else "exclude"
-
-
-def _score(value: Any, *, fractional: bool = False) -> float:
+def _bounded_score(value: Any, maximum: float) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return 0.0
-    return max(0.0, min(1.0 if fractional else 100.0, parsed))
+    return max(0.0, min(maximum, parsed))
 
 
-def _strings(value: Any) -> list[str]:
-    return [str(item)[:300] for item in value] if isinstance(value, list) else []
+def _strings(value: Any, *, limit: int, width: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    values: list[str] = []
+    for item in value:
+        rendered = str(item).strip()
+        if rendered:
+            values.append(rendered[:width])
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _visual_evidence(value: Any, frame_count: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        frame_index = item.get("frame_index")
+        detail = str(item.get("detail") or "").strip()
+        if (
+            isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index < 0
+            or frame_index >= frame_count
+            or not detail
+        ):
+            continue
+        evidence.append({"frame_index": frame_index, "detail": detail[:300]})
+        if len(evidence) >= 12:
+            break
+    return evidence
