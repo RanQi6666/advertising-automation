@@ -82,9 +82,18 @@ class AdResearchModel:
         data = await self._complete_json(
             system=(
                 "You plan lawful public-ad-library keyword research. Return JSON only: "
-                '{"queries":["short query"]}. Create up to 12 short, independent public-library '
-                "queries for the requested country/category. Never provide instructions to evade "
-                "review, tracking, access controls, or landing-page inspection."
+                '{"queries":["short query"]}. Create up to 12 short, independent '
+                "public-library queries for the requested country/category. Use gap_summary "
+                "to change retrieval direction after weak rounds. Do not repeat "
+                "previous_queries. If technical_rejection_summary shows many "
+                "duration_over_30 results, favor natural short-form creative terms such as "
+                "short video, reel, or promo. If model exclusion signals show category "
+                "mismatch, strengthen the intersection between the business category and "
+                "observable product or conversion language. If duplicate_count is high, "
+                "explore different product types, local language, brands, advertisers, or "
+                "app terms. Keep this guidance generic across countries and categories. "
+                "Never provide instructions to evade review, tracking, access controls, or "
+                "landing-page inspection."
             ),
             user={
                 "country": country,

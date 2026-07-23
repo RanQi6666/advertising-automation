@@ -10,7 +10,7 @@
 
 - 不访问、不跟踪或不模拟广告落地页用户行为；不尝试识别、确认或复现 Cloaking。
 - 不返回真实花费、CPC、CPA、ROAS、转化量或真实投放成本；公开可见的持续投放信号仅作为排序代理信号。
-- 只保留 `ACTIVE`、具有公开视频与封面、投放超过 2 天、且视频时长不超过 30 秒的候选。
+- 只保留 `ACTIVE`、具有公开视频与封面、投放时间大于等于 1 天、且视频时长不超过 30 秒的候选。
 - 最多检索 4 轮、最多 500 条原始候选；达到 `target_count` 前会继续补采。最终不足目标数量时不会用低质量结果凑满。
 
 ## 鉴权
@@ -127,6 +127,25 @@ GET /api/v1/integrations/ad-research/jobs/{task_id}
     "technical_qualified": 34,
     "model_relevant": 25,
     "selected_count": 25,
+    "minimum_active_days": 1,
+    "maximum_video_seconds": 30.0,
+    "technical_rejection_summary": {
+      "duration_over_30": 42,
+      "active_days_below_minimum": 8
+    },
+    "model_exclusion_summary": {
+      "category_not_matched": 5,
+      "category_confidence_below_threshold": 3
+    },
+    "rounds": [
+      {
+        "round": 1,
+        "queries": ["..."],
+        "round_raw_collected": 50,
+        "technical_qualified": 17,
+        "selected_count": 12
+      }
+    ],
     "performance_signal_notice": "public_performance_signal_score is a public continuity proxy, not actual spend, CPC, CPA, ROAS, or conversion data."
   },
   "ads": [
@@ -181,6 +200,8 @@ GET /api/v1/integrations/ad-research/jobs/{task_id}
 5. 每轮结束后，若合格结果不足目标数量，系统使用新的查询词继续补采；达到目标或上限后返回结果。
 
 模型调用采用 Redis 全局租约限流：广告研究 Worker 并发为 2，模型并发总上限为 6。最终结果仅在任务库中临时保留 24 小时供轮询，过期后自动清除完整结果。
+
+每轮补采前，系统会把 `previous_queries`、`technical_rejection_summary`、`model_exclusion_summary` 和 `duplicate_count` 传给 GPT-5.4 mini。模型据此调整下一轮公开广告库查询方向；编排层会对模型返回的 query 做大小写无关的跨轮去重，避免重复采集。`research_summary.rounds` 记录每轮实际使用的查询、原始召回、新增去重候选和最终保留进度，但不会返回全部技术淘汰广告的完整内容。
 
 Production: set `REDIS_URL=redis://redis:6379/2` explicitly for the shared model-lease store. If omitted, the service falls back to `CELERY_BROKER_URL`; a separate Redis DB is recommended so lease keys do not share the Celery broker namespace.
 

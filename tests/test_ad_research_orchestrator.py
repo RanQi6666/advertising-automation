@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.schemas.ad_research import AdResearchCreateRequest, CollectorAd
+from backend.app.services.ad_research_media import TechnicalQualification
 from backend.app.services.ad_research_orchestrator import AdResearchOrchestrator
 from backend.app.services.ad_research_service import AdResearchService
 
@@ -35,13 +36,18 @@ class Collector:
 
 
 class Media:
-    async def is_technically_qualified(self, item):
-        return True
+    async def inspect(self, item):
+        return TechnicalQualification(
+            qualified=True,
+            reasons=(),
+            duration_seconds=item.duration_seconds,
+            active_days=item.days_running,
+        )
 
 
 class Model:
     async def plan_queries(self, **kwargs):
-        return ["query"]
+        return [f"query-{kwargs['round_number']}"]
 
     async def classify(self, *, category, candidate):
         return {
@@ -75,9 +81,7 @@ class SlowModel(Model):
             self.active -= 1
 
 
-async def run(
-    sizes: list[int], model: Model | None = None, *, target_count: int = 25
-):
+async def run(sizes: list[int], model: Model | None = None, *, target_count: int = 25):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
@@ -90,7 +94,7 @@ async def run(
                 external_user_id=f"job-{sizes}-{target_count}",
                 country="IN",
                 category="gambling",
-                target_count=target_count
+                target_count=target_count,
             ),
         )
         collector = Collector(sizes)
@@ -226,3 +230,149 @@ async def test_orchestrator_returns_insufficient_when_query_planning_is_empty() 
     assert result.status == "insufficient"
     assert result.ads == []
     assert result.summary["classification_diagnostics"]["classified_count"] == 0
+
+
+class QueryCollector:
+    def __init__(self, results_by_query: dict[str, list[CollectorAd]]) -> None:
+        self.results_by_query = results_by_query
+        self.queries: list[str] = []
+
+    async def collect(self, **kwargs):
+        query = kwargs["query"]
+        self.queries.append(query)
+        return self.results_by_query.get(query.casefold().strip(), [])
+
+
+class DiagnosticMedia:
+    def __init__(self, rejected: dict[str, tuple[str, ...]] | None = None) -> None:
+        self.rejected = rejected or {}
+
+    async def inspect(self, item):
+        reasons = self.rejected.get(item.ad_library_id, ())
+        return TechnicalQualification(
+            qualified=not reasons,
+            reasons=reasons,
+            duration_seconds=item.duration_seconds,
+            active_days=item.days_running,
+        )
+
+
+class AdaptivePlanningModel(Model):
+    def __init__(self, plans: list[list[str]], *, exclude_ids: set[str] | None = None) -> None:
+        self.plans = plans
+        self.exclude_ids = exclude_ids or set()
+        self.plan_calls: list[dict] = []
+
+    async def plan_queries(self, **kwargs):
+        self.plan_calls.append(kwargs)
+        index = len(self.plan_calls) - 1
+        return self.plans[index] if index < len(self.plans) else []
+
+    async def classify(self, *, category, candidate):
+        result = await super().classify(category=category, candidate=candidate)
+        if candidate.ad_library_id in self.exclude_ids:
+            result.update(
+                {
+                    "category_match": False,
+                    "category_confidence": 0.2,
+                    "is_obviously_unrelated": True,
+                    "recommendation": "exclude",
+                }
+            )
+        return result
+
+
+async def run_custom(*, collector, media, model, target_count: int):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with factory() as session:
+        service = AdResearchService()
+        created = await service.create_job(
+            session,
+            AdResearchCreateRequest(
+                external_user_id=f"custom-{target_count}-{id(collector)}",
+                country="IN",
+                category="gambling",
+                target_count=target_count,
+            ),
+        )
+        result = await AdResearchOrchestrator(
+            collector=collector, media=media, model=model, service=service
+        ).run(session, created.job)
+    await engine.dispose()
+    return result
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_feeds_rejection_evidence_into_next_query_round() -> None:
+    technical_reject = candidate(100)
+    model_reject = candidate(101)
+    collector = QueryCollector({"first": [technical_reject, model_reject]})
+    model = AdaptivePlanningModel([["first"], []], exclude_ids={model_reject.ad_library_id})
+
+    result = await run_custom(
+        collector=collector,
+        media=DiagnosticMedia({technical_reject.ad_library_id: ("duration_over_30",)}),
+        model=model,
+        target_count=2,
+    )
+
+    assert result.status == "insufficient"
+    second_gap = model.plan_calls[1]["gap_summary"]
+    assert second_gap["previous_queries"] == ["first"]
+    assert second_gap["technical_rejection_summary"] == {"duration_over_30": 1}
+    assert second_gap["model_exclusion_summary"] == {
+        "recommendation_not_keep": 1,
+        "category_not_matched": 1,
+        "obviously_unrelated": 1,
+        "category_confidence_below_threshold": 1,
+    }
+    assert second_gap["duplicate_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_collect_a_query_twice_across_rounds() -> None:
+    collector = QueryCollector(
+        {
+            "alpha": [candidate(200)],
+            "beta": [candidate(201)],
+        }
+    )
+    model = AdaptivePlanningModel([["Alpha"], [" alpha ", "Beta"], []])
+
+    result = await run_custom(
+        collector=collector,
+        media=DiagnosticMedia(),
+        model=model,
+        target_count=3,
+    )
+
+    assert result.status == "insufficient"
+    assert collector.queries == ["Alpha", "Beta"]
+    assert [ad["ad_library_id"] for ad in result.ads] == ["ad-200", "ad-201"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_summary_exposes_thresholds_rejections_and_rounds() -> None:
+    rejected = candidate(300)
+    kept = candidate(301)
+    collector = QueryCollector({"first": [rejected, kept]})
+    model = AdaptivePlanningModel([["first"], []])
+
+    result = await run_custom(
+        collector=collector,
+        media=DiagnosticMedia({rejected.ad_library_id: ("active_days_below_minimum",)}),
+        model=model,
+        target_count=25,
+    )
+
+    assert result.status == "insufficient"
+    assert len(result.ads) == 1
+    assert result.summary["minimum_active_days"] == 1
+    assert result.summary["maximum_video_seconds"] == 30.0
+    assert result.summary["technical_rejection_summary"] == {"active_days_below_minimum": 1}
+    assert result.summary["model_exclusion_summary"] == {}
+    assert result.summary["rounds"][0]["queries"] == ["first"]
+    assert result.summary["rounds"][0]["selected_count"] == 1

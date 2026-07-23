@@ -13,7 +13,12 @@ from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.schemas.ad_research import CollectorAd
 from backend.app.services.ad_research_collector import AdSourceAdapter, MetaAdsBridgeAdapter
-from backend.app.services.ad_research_media import AdResearchMediaInspector
+from backend.app.services.ad_research_media import (
+    MAX_VIDEO_SECONDS,
+    MIN_ACTIVE_DAYS,
+    AdResearchMediaInspector,
+    TechnicalQualification,
+)
 from backend.app.services.ad_research_model import AdResearchModel
 from backend.app.services.ad_research_service import AdResearchService
 
@@ -52,8 +57,12 @@ class AdResearchOrchestrator:
         await session.commit()
 
         seen: dict[str, CollectorAd] = {}
+        technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification] = {}
         scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
         classification_diagnostics_by_ad_library_id: dict[str, dict[str, Any]] = {}
+        used_query_keys: set[str] = set()
+        used_queries: list[str] = []
+        round_summaries: list[dict[str, Any]] = []
         scored: list[dict[str, Any]] = []
         raw_collected = 0
         technical_qualified = 0
@@ -62,16 +71,29 @@ class AdResearchOrchestrator:
         for round_number in range(1, MAX_ROUNDS + 1):
             job.current_round = round_number
             job.stage = "planning_queries"
-            queries = await self.model.plan_queries(
+            planned_queries = await self.model.plan_queries(
                 country=job.country,
                 category=job.category,
                 seed_keywords=list(job.seed_keywords_json or []),
                 round_number=round_number,
                 gap_summary=gap_summary,
             )
-            if not queries:
+            if not planned_queries:
                 break
+
+            queries: list[str] = []
+            for query in planned_queries:
+                normalized = " ".join(str(query).split())
+                query_key = normalized.casefold()
+                if not normalized or query_key in used_query_keys:
+                    continue
+                used_query_keys.add(query_key)
+                used_queries.append(normalized)
+                queries.append(normalized)
+
             job.stage = "collecting"
+            round_raw_collected = 0
+            candidates_before_round = len(seen)
             for query in queries:
                 remaining = MAX_RAW_CANDIDATES - raw_collected
                 if remaining <= 0:
@@ -83,11 +105,22 @@ class AdResearchOrchestrator:
                     limit=min(PER_QUERY_LIMIT, remaining),
                 )
                 raw_collected += len(ads)
+                round_raw_collected += len(ads)
                 for ad in ads:
                     seen.setdefault(ad.ad_library_id, ad)
+
             candidates = list(seen.values())
             job.stage = "technical_filtering"
-            qualified = [ad for ad in candidates if await self.media.is_technically_qualified(ad)]
+            for ad in candidates:
+                if ad.ad_library_id not in technical_diagnostics_by_ad_library_id:
+                    technical_diagnostics_by_ad_library_id[
+                        ad.ad_library_id
+                    ] = await self.media.inspect(ad)
+            qualified = [
+                ad
+                for ad in candidates
+                if technical_diagnostics_by_ad_library_id[ad.ad_library_id].qualified
+            ]
             technical_qualified = len(qualified)
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key, reverse=True)
             job.progress_json = {
@@ -124,6 +157,41 @@ class AdResearchOrchestrator:
                 "selected_count": min(len(scored), job.target_count),
             }
             await session.commit()
+
+            technical_rejection_summary = _technical_rejection_summary(
+                technical_diagnostics_by_ad_library_id
+            )
+            model_exclusion_summary = _model_exclusion_summary(
+                classification_diagnostics_by_ad_library_id
+            )
+            duplicate_count = raw_collected - len(candidates)
+            round_summaries.append(
+                {
+                    "round": round_number,
+                    "queries": queries,
+                    "planned_query_count": len(planned_queries),
+                    "skipped_repeated_query_count": len(planned_queries) - len(queries),
+                    "round_raw_collected": round_raw_collected,
+                    "round_new_candidates": len(candidates) - candidates_before_round,
+                    "raw_collected": raw_collected,
+                    "deduplicated": len(candidates),
+                    "technical_qualified": technical_qualified,
+                    "model_relevant": len(scored),
+                    "selected_count": min(len(scored), job.target_count),
+                }
+            )
+            gap_summary = {
+                "raw_collected": raw_collected,
+                "technical_qualified": technical_qualified,
+                "model_relevant": len(scored),
+                "target_count": job.target_count,
+                "missing_count": max(job.target_count - len(scored), 0),
+                "previous_queries": list(used_queries),
+                "technical_rejection_summary": technical_rejection_summary,
+                "model_exclusion_summary": model_exclusion_summary,
+                "duplicate_count": duplicate_count,
+            }
+
             if len(scored) >= job.target_count:
                 selected = scored[: job.target_count]
                 summary = _summary(
@@ -131,7 +199,9 @@ class AdResearchOrchestrator:
                     len(candidates),
                     technical_qualified,
                     selected,
+                    technical_diagnostics_by_ad_library_id,
                     classification_diagnostics_by_ad_library_id,
+                    round_summaries,
                 )
                 await self.service.complete_job(
                     session, job, status="completed", ads=selected, summary=summary
@@ -142,13 +212,6 @@ class AdResearchOrchestrator:
                     "ad research model classification failed for "
                     f"{classification_failures} candidates"
                 )
-            gap_summary = {
-                "raw_collected": raw_collected,
-                "technical_qualified": technical_qualified,
-                "model_relevant": len(scored),
-                "target_count": job.target_count,
-                "missing_count": max(job.target_count - len(scored), 0),
-            }
             if raw_collected >= MAX_RAW_CANDIDATES:
                 break
 
@@ -159,7 +222,9 @@ class AdResearchOrchestrator:
                 len(seen),
                 technical_qualified,
                 selected,
+                technical_diagnostics_by_ad_library_id,
                 classification_diagnostics_by_ad_library_id,
+                round_summaries,
             ),
             "reason": "insufficient_qualified_ads",
             "max_rounds": MAX_ROUNDS,
@@ -255,9 +320,7 @@ def _sort_key(ad: dict[str, Any]) -> tuple[float, float, float, float]:
     )
 
 
-def _classification_diagnostic(
-    ad: CollectorAd, classification: dict[str, Any]
-) -> dict[str, Any]:
+def _classification_diagnostic(ad: CollectorAd, classification: dict[str, Any]) -> dict[str, Any]:
     keep = _keep(classification)
     return {
         "ad_library_id": ad.ad_library_id,
@@ -265,9 +328,7 @@ def _classification_diagnostic(
         "category_confidence": float(classification["category_confidence"]),
         "business_type": classification["business_type"],
         "creative_relevance_score": float(classification["creative_relevance_score"]),
-        "public_performance_signal_score": float(
-            classification["public_performance_signal_score"]
-        ),
+        "public_performance_signal_score": float(classification["public_performance_signal_score"]),
         "real_money_signal_score": float(classification["real_money_signal_score"]),
         "is_obviously_unrelated": bool(classification["is_obviously_unrelated"]),
         "recommendation": classification["recommendation"],
@@ -307,12 +368,34 @@ def _classification_diagnostics_summary(
     }
 
 
+def _technical_rejection_summary(
+    diagnostics_by_ad_library_id: dict[str, TechnicalQualification],
+) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for diagnostic in diagnostics_by_ad_library_id.values():
+        for reason in diagnostic.reasons:
+            summary[reason] = summary.get(reason, 0) + 1
+    return summary
+
+
+def _model_exclusion_summary(
+    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for diagnostic in diagnostics_by_ad_library_id.values():
+        for reason in diagnostic["exclusion_reasons"]:
+            summary[reason] = summary.get(reason, 0) + 1
+    return summary
+
+
 def _summary(
     raw: int,
     deduplicated: int,
     qualified: int,
     selected: list[dict[str, Any]],
-    diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
+    technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification],
+    classification_diagnostics_by_ad_library_id: dict[str, dict[str, Any]],
+    round_summaries: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "raw_collected": raw,
@@ -320,8 +403,17 @@ def _summary(
         "technical_qualified": qualified,
         "model_relevant": len(selected),
         "selected_count": len(selected),
+        "minimum_active_days": MIN_ACTIVE_DAYS,
+        "maximum_video_seconds": MAX_VIDEO_SECONDS,
+        "technical_rejection_summary": _technical_rejection_summary(
+            technical_diagnostics_by_ad_library_id
+        ),
+        "model_exclusion_summary": _model_exclusion_summary(
+            classification_diagnostics_by_ad_library_id
+        ),
+        "rounds": round_summaries,
         "classification_diagnostics": _classification_diagnostics_summary(
-            diagnostics_by_ad_library_id
+            classification_diagnostics_by_ad_library_id
         ),
         "performance_signal_notice": (
             "public_performance_signal_score is a public continuity proxy, not actual spend, "
