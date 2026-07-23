@@ -15,6 +15,7 @@ from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardDraft,
     FrameAnchoredStoryboardScene,
     FrameLanguageAnalysis,
     FrameTransitionBrief,
@@ -30,6 +31,22 @@ from backend.app.services.creative_safety_prompts import (
     contains_creative_safety_risk,
     sanitize_creative_safety_text,
 )
+
+
+def _mock_storyboard_draft_from_storyboard(
+    storyboard: FrameAnchoredStoryboard,
+) -> FrameAnchoredStoryboardDraft:
+    payload = storyboard.model_dump(mode="python")
+    for scene in payload["scenes"]:
+        scene["phase_tags"] = list(
+            dict.fromkeys(item["phase"] for item in scene.pop("phase_evidence", []))
+        )
+        scene["execution_actions"] = [
+            {key: value for key, value in item.items() if key != "claim_id"}
+            for item in scene.pop("execution_evidence", [])
+        ]
+        scene["tension_stage_hint"] = scene.pop("tension_stage", None)
+    return FrameAnchoredStoryboardDraft.model_validate(payload)
 
 
 def _mock_core_behavior_beats(frame_analysis: FrameAnalysis) -> list[Any]:
@@ -512,7 +529,7 @@ class MockLLMProvider:
         duration_seconds: int,
         aspect_ratio: str,
         director_corrections: list[DirectorActionCorrection] | None = None,
-    ) -> FrameAnchoredStoryboard:
+    ) -> FrameAnchoredStoryboardDraft:
         del first_frame_image_url, last_frame_image_url
         director_plan = frame_analysis.director_plan
         signature_moments = [
@@ -961,7 +978,7 @@ class MockLLMProvider:
                 ]
             rationale = "Mock storyboard bridges only the supplied target-frame evidence."
 
-        return FrameAnchoredStoryboard(
+        storyboard = FrameAnchoredStoryboard(
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
             scenes=scenes,
@@ -971,6 +988,7 @@ class MockLLMProvider:
             ),
             rationale=rationale,
         )
+        return _mock_storyboard_draft_from_storyboard(storyboard)
 
     async def extract_delivery_fields(self, raw_content: str) -> dict:
         url_candidates = _find_urls(raw_content)

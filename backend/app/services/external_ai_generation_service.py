@@ -54,6 +54,7 @@ from backend.app.services.storyboard_reference_video_service import (
     StoryboardReferenceVideoService,
     adapt_reference_behavior_timeline,
 )
+from backend.app.services.storyboard_v2_compiler import compile_storyboard_v2
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -512,7 +513,7 @@ class ExternalAIGenerationService:
                 )
 
             async with llm_text_rate_limiter():
-                storyboard = await llm.generate_frame_anchored_video_storyboard(
+                storyboard_draft = await llm.generate_frame_anchored_video_storyboard(
                     first_frame_image_url=payload.first_frame_image_url,
                     last_frame_image_url=payload.last_frame_image_url,
                     frame_analysis=frame_analysis,
@@ -520,17 +521,22 @@ class ExternalAIGenerationService:
                     aspect_ratio=payload.aspect_ratio,
                     director_corrections=director_review.structured_corrections,
                 )
-            try:
-                storyboard = _normalize_private_storyboard_claim_namespace(storyboard)
-            except ValidationError as exc:
-                raise ProviderError(
-                    "LLM returned invalid frame-anchored storyboard execution claims."
-                ) from exc
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
-                storyboard_candidate=storyboard.model_dump(mode="json"),
+                storyboard_candidate=storyboard_draft.model_dump(mode="json"),
             )
+            try:
+                storyboard = compile_storyboard_v2(
+                    storyboard_draft,
+                    frame_analysis,
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                )
+            except (ValidationError, ValueError) as exc:
+                raise ProviderError(
+                    "LLM returned a frame-anchored storyboard draft that could not be compiled."
+                ) from exc
             try:
                 validate_director_coverage(storyboard, director_plan)
                 validate_final_storyboard_action_coverage(
@@ -560,6 +566,7 @@ class ExternalAIGenerationService:
                             correction.model_dump(mode="json")
                             for correction in director_review.structured_corrections
                         ],
+                        storyboard_draft.model_dump(mode="json"),
                         storyboard.model_dump(mode="json"),
                     ),
                 ),

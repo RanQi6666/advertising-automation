@@ -26,7 +26,7 @@ from backend.app.schemas.ai import (
     DirectorActionCorrection,
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
-    FrameAnchoredStoryboard,
+    FrameAnchoredStoryboardDraft,
     ImageBrief,
     ReferenceVideoFrame,
     TopicCandidate,
@@ -621,7 +621,7 @@ class OpenAILLMProvider:
         duration_seconds: int,
         aspect_ratio: str,
         director_corrections: list[DirectorActionCorrection] | None = None,
-    ) -> FrameAnchoredStoryboard:
+    ) -> FrameAnchoredStoryboardDraft:
         data = await self._vision_json_completion(
             system=_frame_anchored_storyboard_system_prompt(),
             user=_frame_pair_user_content(
@@ -637,8 +637,9 @@ class OpenAILLMProvider:
                     ],
                 },
             ),
+            response_model=FrameAnchoredStoryboardDraft,
         )
-        return _frame_anchored_storyboard_from_data(
+        return _frame_anchored_storyboard_draft_from_data(
             data,
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
@@ -2016,16 +2017,22 @@ def _frame_anchored_director_system_prompt() -> str:
 
 def _frame_anchored_storyboard_system_prompt() -> str:
     return (
-        "You create a frame-anchored video storyboard from two supplied endpoint images "
-        "and their visual analysis. Return valid JSON only with duration_seconds, "
+        "You create a frame-anchored creative storyboard draft from two supplied endpoint "
+        "images and their visual analysis. Return valid JSON only with duration_seconds, "
         "aspect_ratio, scenes, sound_design, and rationale. Each scene must include "
         "scene_index, start_second, end_second, frame_anchor, visual, motion, "
         "transition_goal, subtitle, voiceover, sound_effects, notes, cinematic_beat, "
-        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, phase_evidence, "
-        "execution_evidence, "
-        "camera_instruction, tension_stage, action_result_requirement, effect_timing, "
-        "subject_motion_intensity, camera_intensity, effect_intensity, "
-        "anchor_return_instruction, overlay_instruction, and anti_flattening_requirement. "
+        "cinematic_beats, signature_moment_ids, source_behavior_beat_ids, phase_tags, "
+        "execution_actions, camera_instruction, tension_stage_hint, "
+        "action_result_requirement, effect_timing, subject_motion_intensity, "
+        "camera_intensity, effect_intensity, anchor_return_instruction, "
+        "overlay_instruction, and anti_flattening_requirement. This is a creative draft: "
+        "the backend deterministically compiles authoritative scene numbering, timing "
+        "boundaries, frame anchors, tension stages, phase evidence, and private claim IDs. "
+        "Do not output claim_id. Do not output phase_evidence. Do not output "
+        "execution_evidence. frame_anchor and tension_stage_hint are creative hints only; "
+        "the backend enforces the final first-frame, transition, last-frame, and legal "
+        "tension-stage contract. "
         "overlay_instruction must be null or an object with reference_element, strategy, "
         "timing_instruction, and final_frame_requirement; strategy must be exactly inherit, "
         "replace_with_target, persist_to_final, or omit. Do not return overlay_instruction "
@@ -2063,23 +2070,18 @@ def _frame_anchored_storyboard_system_prompt() -> str:
         "exact moment_id into signature_moment_ids, execute its action in motion and/or "
         "action_result_requirement, include camera and effect support in matching fields, show the "
         "visible payoff, and state anchor_return_instruction before final lock. Copy relevant "
-        "source behavior IDs into source_behavior_beat_ids. Every scene must return "
-        "phase_evidence as a list of objects with phase, signature_moment_ids, and "
-        "source_behavior_beat_ids. phase must be exactly preparation, action, payoff, return, "
-        "or final_hold. For each non-omitted signature moment, declare every applicable phase "
-        "with that exact one moment id and its exact complete source behavior id set; prose alone "
-        "does not prove a phase. action phase must share the affirmed target subject/state "
-        "execution, "
-        "payoff must share action_result_requirement, return must share anchor_return_instruction, "
-        "and final_hold belongs only in the last_frame scene. Every scene must return "
-        "execution_evidence as a list of objects with claim_id, executor_kind, assertion, "
-        "action_or_state_change, signature_moment_ids, and source_behavior_beat_ids. "
-        "claim_id is a stable private claim identity, not prose: use one constrained identifier "
-        "for one executor role plus the exact signature moment IDs and exact source behavior IDs. "
-        "Reuse a claim_id only for that identical binding and assertion, even across scenes. "
-        "Use different claim_id values for semantically distinct actions or for preparation/static "
-        "versus affirmed execution; never derive claim identity from action_or_state_change "
-        "wording. "
+        "source behavior IDs into source_behavior_beat_ids. Use phase_tags to mark every "
+        "applicable preparation, action, payoff, return, or final_hold role. phase_tags are "
+        "creative semantic labels, not proof records; the backend creates phase_evidence only "
+        "when a valid signature moment and its valid source behavior IDs are both present. "
+        "action must share visible target subject/state execution, payoff must share "
+        "action_result_requirement, return must share anchor_return_instruction, and final_hold "
+        "belongs only in the ending scene. Every core-action scene must return execution_actions "
+        "as objects with executor_kind, assertion, action_or_state_change, "
+        "signature_moment_ids, and source_behavior_beat_ids. Each execution action that claims a "
+        "core action or state change must carry exact valid IDs from the supplied director plan "
+        "and behavior graph; never invent IDs and never leave both ID lists empty for a required "
+        "core execution. The backend generates and reuses private claim IDs deterministically. "
         "executor_kind must be target_subject, target_object, target_state, camera_support, "
         "effect_support, or environment_support; assertion must be affirmed, negated, or static. "
         "For each executed non-omitted action/state moment, include an affirmed target_subject, "
@@ -2857,7 +2859,7 @@ def _normalize_storyboard_phase_evidence(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]:
+def _normalize_storyboard_draft_execution_actions(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     normalized: list[dict[str, Any]] = []
@@ -2866,7 +2868,6 @@ def _normalize_storyboard_execution_evidence(value: Any) -> list[dict[str, Any]]
             continue
         normalized.append(
             {
-                "claim_id": _director_first_text(item, "claim_id"),
                 "executor_kind": _director_first_text(item, "executor_kind"),
                 "assertion": _director_first_text(item, "assertion"),
                 "action_or_state_change": _director_first_text(item, "action_or_state_change"),
@@ -3183,11 +3184,11 @@ def _frame_anchored_director_plan_from_data(
         raise ProviderError("LLM returned invalid frame-anchored director-plan JSON.") from exc
 
 
-def _frame_anchored_storyboard_from_data(
+def _frame_anchored_storyboard_draft_from_data(
     data: dict[str, Any],
     duration_seconds: int,
     aspect_ratio: str,
-) -> FrameAnchoredStoryboard:
+) -> FrameAnchoredStoryboardDraft:
     normalized = dict(data)
     normalized["duration_seconds"] = duration_seconds
     normalized["aspect_ratio"] = aspect_ratio
@@ -3216,9 +3217,11 @@ def _frame_anchored_storyboard_from_data(
                 "source_behavior_beat_ids": list(
                     dict.fromkeys(_frame_string_list(scene.get("source_behavior_beat_ids")))
                 ),
-                "phase_evidence": _normalize_storyboard_phase_evidence(scene.get("phase_evidence")),
-                "execution_evidence": _normalize_storyboard_execution_evidence(
-                    scene.get("execution_evidence")
+                "phase_tags": list(
+                    dict.fromkeys(_frame_string_list(scene.get("phase_tags")))
+                ),
+                "execution_actions": _normalize_storyboard_draft_execution_actions(
+                    scene.get("execution_actions", scene.get("execution_evidence"))
                 ),
             }
             if isinstance(scene, dict)
@@ -3226,14 +3229,14 @@ def _frame_anchored_storyboard_from_data(
             for scene in scenes
         ]
     try:
-        return FrameAnchoredStoryboard.model_validate(normalized)
+        return FrameAnchoredStoryboardDraft.model_validate(normalized)
     except ValidationError as exc:
         logger.warning(
-            "Frame-anchored storyboard JSON validation failed: errors=%s response_shape=%s",
+            "Frame-anchored storyboard draft JSON validation failed: errors=%s response_shape=%s",
             _frame_analysis_validation_errors(exc),
             _frame_analysis_response_shape(data),
         )
-        raise ProviderError("LLM returned invalid frame-anchored storyboard JSON.") from exc
+        raise ProviderError("LLM returned invalid frame-anchored storyboard draft JSON.") from exc
 
 
 def _video_scene_from_data(
