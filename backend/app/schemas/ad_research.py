@@ -56,7 +56,12 @@ class AdResearchCreateResponse(BaseModel):
 class AdResearchPollResponse(BaseModel):
     task_id: str
     external_user_id: str | None = None
-    status: str = Field(description="completed, failed, expired, or legacy insufficient status.")
+    status: str = Field(
+        description=(
+            "Task status: queued or processing while non-terminal; completed, failed, or "
+            "expired when terminal; insufficient is a legacy-only status."
+        )
+    )
     stage: str
     round: int
     progress: dict[str, Any] = Field(default_factory=dict)
@@ -65,8 +70,9 @@ class AdResearchPollResponse(BaseModel):
     ads: list[dict[str, Any]] | None = Field(
         default=None,
         description=(
-            "Completed responses contain exactly target_count ads; failed responses use null; "
-            "insufficient is legacy-only and may retain historical ads."
+            "Only completed and legacy insufficient responses include ads. Completed responses "
+            "contain exactly target_count ads; failed responses use null and require no further "
+            "polling."
         ),
     )
     result_expires_at: datetime | None = None

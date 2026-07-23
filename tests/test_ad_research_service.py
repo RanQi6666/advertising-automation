@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, timedelta
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -217,6 +217,64 @@ async def test_complete_job_rejects_non_exact_completed_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_completion_persists_exact_result_for_24_hours_and_clears_errors() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        ads = [{"ad_library_id": "ad-1"}, {"ad_library_id": "ad-2"}]
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id="research-completed-result",
+                    country="IN",
+                    category="gambling",
+                    target_count=2,
+                ),
+            )
+            created.job.error_code = "old_error"
+            created.job.error_message_summary = "old error message"
+            before_completion = utcnow()
+
+            await service.complete_job(
+                session,
+                created.job,
+                status="completed",
+                ads=ads,
+                summary={"selected_count": 2},
+            )
+
+            after_completion = utcnow()
+            job_id = created.job.id
+
+        async with factory() as session:
+            job = await session.get(AdResearchJob, job_id)
+            assert job is not None
+            response = service.poll_response(job)
+            assert job.status == "completed"
+            assert job.stage == "completed"
+            assert job.result_json == {"ads": ads}
+            assert len(job.result_json["ads"]) == job.target_count
+            assert job.error_code is None
+            assert job.error_message_summary is None
+            assert job.result_expires_at is not None
+            expires_at = job.result_expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            assert before_completion + timedelta(hours=24) <= expires_at
+            assert expires_at <= after_completion + timedelta(hours=24)
+            assert response.status == "completed"
+            assert response.ads == ads
+            assert response.poll_after_seconds is None
+            assert response.error is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_failed_completion_clears_partial_ads_and_returns_redacted_error() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -242,11 +300,17 @@ async def test_failed_completion_clears_partial_ads_and_returns_redacted_error()
                 ads=[],
                 summary={"reason": "insufficient_qualified_ads"},
             )
+            await session.refresh(created.job)
 
             response = service.poll_response(created.job)
+            assert created.job.status == "failed"
+            assert created.job.stage == "failed"
             assert created.job.result_json is None
             assert created.job.result_expires_at is None
+            assert created.job.error_code == "insufficient_qualified_ads"
             assert response.status == "failed"
+            assert response.poll_after_seconds is None
+            assert response.result_expires_at is None
             assert response.ads is None
             assert response.error == {
                 "code": "insufficient_qualified_ads",
@@ -308,6 +372,37 @@ async def test_complete_job_rejects_ads_for_failed_completion() -> None:
                     created.job,
                     status="failed",
                     ads=[{"ad_library_id": "partial-ad"}],
+                    summary={},
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["insufficient", "unexpected_status"])
+async def test_complete_job_rejects_unsupported_completion_status(status: str) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        service = AdResearchService()
+        async with factory() as session:
+            created = await service.create_job(
+                session,
+                AdResearchCreateRequest(
+                    external_user_id=f"research-unsupported-{status}",
+                    country="IN",
+                    category="gambling",
+                ),
+            )
+
+            with pytest.raises(ValueError, match="unsupported ad research completion status"):
+                await service.complete_job(
+                    session,
+                    created.job,
+                    status=status,
+                    ads=[],
                     summary={},
                 )
     finally:

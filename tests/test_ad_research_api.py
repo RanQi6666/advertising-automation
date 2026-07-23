@@ -59,6 +59,60 @@ def test_create_replay_conflict_and_poll(monkeypatch) -> None:
     asyncio.run(engine.dispose())
 
 
+def test_poll_completed_returns_exact_ads_without_further_polling(monkeypatch) -> None:
+    monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "")
+    monkeypatch.setattr(endpoint, "schedule_ad_research_job", lambda *args, **kwargs: True)
+    get_settings.cache_clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_session():
+        async with factory() as session:
+            yield session
+
+    async def initialize() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    async def complete_as_completed(task_id: str) -> None:
+        async with factory() as session:
+            job = await session.get(AdResearchJob, task_id)
+            assert job is not None
+            await endpoint.service.complete_job(
+                session,
+                job,
+                status="completed",
+                ads=[{"ad_library_id": "ad-1"}, {"ad_library_id": "ad-2"}],
+                summary={"selected_count": 2},
+            )
+
+    asyncio.run(initialize())
+    app = create_app()
+    app.dependency_overrides[get_session] = override_session
+    client = TestClient(app)
+    try:
+        payload = _payload()
+        payload["target_count"] = 2
+        created = client.post("/api/v1/integrations/ad-research/jobs", json=payload)
+        assert created.status_code == 202
+        task_id = created.json()["task_id"]
+
+        asyncio.run(complete_as_completed(task_id))
+        poll = client.get(f"/api/v1/integrations/ad-research/jobs/{task_id}")
+
+        assert poll.status_code == 200
+        body = poll.json()
+        assert body["status"] == "completed"
+        assert body["ads"] == [{"ad_library_id": "ad-1"}, {"ad_library_id": "ad-2"}]
+        assert len(body["ads"]) == payload["target_count"]
+        assert body["poll_after_seconds"] is None
+        assert body["error"] is None
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.run(engine.dispose())
+
+
+
 def test_poll_failed_returns_success_response_without_ads(monkeypatch) -> None:
     monkeypatch.setenv("AI_ADS_ACCESS_TOKEN", "")
     monkeypatch.setattr(endpoint, "schedule_ad_research_job", lambda *args, **kwargs: True)
@@ -100,6 +154,8 @@ def test_poll_failed_returns_success_response_without_ads(monkeypatch) -> None:
 
         assert poll.status_code == 200
         assert poll.json()["status"] == "failed"
+        assert poll.json()["poll_after_seconds"] is None
+        assert poll.json()["result_expires_at"] is None
         assert poll.json()["ads"] is None
         assert poll.json()["error"] == {
             "code": "insufficient_qualified_ads",

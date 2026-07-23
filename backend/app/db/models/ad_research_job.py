@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
@@ -57,4 +57,9 @@ class AdResearchJob(TimestampMixin, Base):
 
     @property
     def is_result_expired(self) -> bool:
-        return self.result_expires_at is not None and self.result_expires_at <= utcnow()
+        if self.result_expires_at is None:
+            return False
+        expires_at = self.result_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return expires_at <= utcnow()
