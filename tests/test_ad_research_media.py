@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from pathlib import Path
@@ -102,7 +102,9 @@ async def test_duration_uses_downloaded_ffprobe_after_three_remote_failures(
     monkeypatch.setattr(inspector, "_probe_local_video", local_duration)
     monkeypatch.setattr(inspector, "_extract_frame", lambda *args: _write_frame(args[1]))
 
-    qualification = await inspector.inspect(eligible_ad(duration_seconds=None, thumbnail_url=None), job_id="job-1")
+    qualification = await inspector.inspect(
+        eligible_ad(duration_seconds=None, thumbnail_url=None), job_id="job-1"
+    )
 
     assert qualification.qualified is True
     assert qualification.duration_seconds == 18.0
@@ -146,7 +148,9 @@ async def test_inspect_many_never_exceeds_media_concurrency(tmp_path, monkeypatc
 async def test_media_inspector_rejects_ads_active_for_less_than_one_day(
     inspector_with_storage, allow_public_media, days_running
 ) -> None:
-    result = await inspector_with_storage.inspect(eligible_ad(days_running=days_running), job_id="job-1")
+    result = await inspector_with_storage.inspect(
+        eligible_ad(days_running=days_running), job_id="job-1"
+    )
 
     assert result.qualified is False
     assert "active_days_below_minimum" in result.reasons
@@ -157,7 +161,9 @@ async def test_media_inspector_rejects_ads_active_for_less_than_one_day(
 async def test_media_inspector_rejects_video_over_thirty_seconds(
     inspector_with_storage, allow_public_media
 ) -> None:
-    result = await inspector_with_storage.inspect(eligible_ad(duration_seconds=30.1), job_id="job-1")
+    result = await inspector_with_storage.inspect(
+        eligible_ad(duration_seconds=30.1), job_id="job-1"
+    )
 
     assert result.qualified is False
     assert "duration_over_30" in result.reasons
@@ -273,7 +279,9 @@ async def test_media_inspector_kills_ffprobe_after_timeout(monkeypatch) -> None:
     monkeypatch.setattr(media_module.asyncio, "create_subprocess_exec", create_process)
     monkeypatch.setattr(media_module, "validate_public_http_url", allow_public_url)
 
-    assert await AdResearchMediaInspector().probe_remote_duration("https://cdn.example/ad.mp4") is None
+    assert (
+        await AdResearchMediaInspector().probe_remote_duration("https://cdn.example/ad.mp4") is None
+    )
     assert process.killed is True
     assert process.waited is True
 

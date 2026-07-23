@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import shutil
@@ -50,7 +50,9 @@ class AdResearchMediaInspector:
     async def inspect(self, ad: CollectorAd, *, job_id: str) -> TechnicalQualification:
         reasons = await self._base_reasons(ad)
         if reasons:
-            return TechnicalQualification(False, tuple(reasons), ad.duration_seconds, ad.days_running)
+            return TechnicalQualification(
+                False, tuple(reasons), ad.duration_seconds, ad.days_running
+            )
 
         artifact_dir = self._artifact_dir(job_id, ad.ad_library_id)
         duration, duration_source, probe_attempts, downloaded_video = await self._resolve_duration(
@@ -61,12 +63,12 @@ class AdResearchMediaInspector:
             return TechnicalQualification(False, ("duration_unavailable",), None, ad.days_running)
         if duration > MAX_VIDEO_SECONDS:
             self._delete_artifact_dir(artifact_dir)
-            return TechnicalQualification(
-                False, ("duration_over_30",), duration, ad.days_running
-            )
+            return TechnicalQualification(False, ("duration_over_30",), duration, ad.days_running)
 
         if downloaded_video is None:
-            downloaded_video = await self._download_video(ad.video_url or "", artifact_dir / "video.mp4")
+            downloaded_video = await self._download_video(
+                ad.video_url or "", artifact_dir / "video.mp4"
+            )
         if downloaded_video is None:
             self._delete_artifact_dir(artifact_dir)
             return TechnicalQualification(
@@ -101,7 +103,9 @@ class AdResearchMediaInspector:
         pairs = await asyncio.gather(*(inspect_one(ad) for ad in ordered))
         return dict(pairs)
 
-    async def is_technically_qualified(self, ad: CollectorAd, *, job_id: str = "validation") -> bool:
+    async def is_technically_qualified(
+        self, ad: CollectorAd, *, job_id: str = "validation"
+    ) -> bool:
         return (await self.inspect(ad, job_id=job_id)).qualified
 
     async def _base_reasons(self, ad: CollectorAd) -> list[str]:
@@ -139,7 +143,9 @@ class AdResearchMediaInspector:
             if attempt < remote_attempts:
                 await asyncio.sleep(0.25 * (2 ** (attempt - 1)))
 
-        downloaded_video = await self._download_video(ad.video_url or "", artifact_dir / "video.mp4")
+        downloaded_video = await self._download_video(
+            ad.video_url or "", artifact_dir / "video.mp4"
+        )
         if downloaded_video is None:
             return None, None, remote_attempts, None
         duration = await self._probe_local_video(downloaded_video)
@@ -173,7 +179,9 @@ class AdResearchMediaInspector:
         duration_probe_attempts: int,
     ) -> PreparedAdMedia | None:
         frame_paths = await self._extract_frames(downloaded_video, artifact_dir, duration)
-        original_cover = await self._download_original_cover(ad.thumbnail_url, artifact_dir / "cover.jpg")
+        original_cover = await self._download_original_cover(
+            ad.thumbnail_url, artifact_dir / "cover.jpg"
+        )
         cover_source: Literal["original_thumbnail", "generated_frame"] | None = None
         cover_path: Path | None = None
         if original_cover is not None:
@@ -187,9 +195,7 @@ class AdResearchMediaInspector:
         if cover_path is None:
             return None
 
-        local_visual_paths = tuple(
-            dict.fromkeys([cover_path, *frame_paths])
-        )
+        local_visual_paths = tuple(dict.fromkeys([cover_path, *frame_paths]))
         return PreparedAdMedia(
             cover_url=self._public_url(cover_path),
             cover_source=cover_source,
@@ -199,7 +205,9 @@ class AdResearchMediaInspector:
             duration_probe_attempts=duration_probe_attempts,
         )
 
-    async def _download_original_cover(self, thumbnail_url: str | None, destination: Path) -> Path | None:
+    async def _download_original_cover(
+        self, thumbnail_url: str | None, destination: Path
+    ) -> Path | None:
         if not thumbnail_url:
             return None
         try:
@@ -228,7 +236,9 @@ class AdResearchMediaInspector:
 
         async def extract(second: float, ratio: int) -> Path | None:
             async with self._frame_semaphore:
-                return await self._extract_frame(source, artifact_dir / f"frame_{ratio}.jpg", second)
+                return await self._extract_frame(
+                    source, artifact_dir / f"frame_{ratio}.jpg", second
+                )
 
         paths = await asyncio.gather(
             *(extract(second, ratio) for second, ratio in zip(seconds, (20, 50, 80), strict=True))
@@ -254,7 +264,8 @@ class AdResearchMediaInspector:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(
-                process.communicate(), timeout=self.settings.ad_research_ffmpeg_frame_timeout_seconds
+                process.communicate(),
+                timeout=self.settings.ad_research_ffmpeg_frame_timeout_seconds,
             )
             if process.returncode == 0 and destination.exists() and destination.stat().st_size > 0:
                 return destination
@@ -368,9 +379,7 @@ class AdResearchMediaInspector:
 
 def _frame_seconds(duration: float, *, low_confidence: bool = False) -> tuple[float, ...]:
     ratios = (0.20, 0.50, 0.80, 0.35, 0.65) if low_confidence else (0.20, 0.50, 0.80)
-    return tuple(
-        min(max(duration * ratio, 0.0), max(duration - 0.05, 0.0)) for ratio in ratios
-    )
+    return tuple(min(max(duration * ratio, 0.0), max(duration - 0.05, 0.0)) for ratio in ratios)
 
 
 def _media_priority_key(ad: CollectorAd) -> tuple[bool, float, str]:
