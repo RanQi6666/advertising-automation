@@ -12,6 +12,7 @@ from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.schemas.ad_research import AdResearchCreateRequest, CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia, TechnicalQualification
+from backend.app.services.ad_research_model import PlannedQuery, QueryPlan
 from backend.app.services.ad_research_orchestrator import AdResearchOrchestrator
 from backend.app.services.ad_research_service import AdResearchService
 
@@ -357,3 +358,32 @@ async def test_orchestrator_summary_exposes_visual_scores_and_technical_rejectio
     assert result.summary["score_distribution"]["90_100"] == 1
     assert result.summary["rounds"][0]["queries"] == ["first"]
     assert result.summary["rounds"][0]["selected_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_collects_plain_query_text_from_structured_query_plan() -> None:
+    item = candidate(13)
+    collector = QueryCollector({"rummy bonus": [item]})
+    media = Media()
+    model = Model(
+        plans=[
+            QueryPlan(
+                queries=(
+                    PlannedQuery(
+                        query_id="r1_q01",
+                        query="rummy bonus",
+                        intent="local_exploration",
+                        rationale="Structured planner integration.",
+                        expected_visuals=("slot reels",),
+                    ),
+                )
+            )
+        ],
+        score_by_ad_id={item.ad_library_id: 80},
+    )
+
+    result = await run_custom(collector=collector, media=media, model=model, target_count=1)
+
+    assert result.status == "completed"
+    assert collector.queries == ["rummy bonus"]
+    assert all("PlannedQuery(" not in query for query in collector.queries)

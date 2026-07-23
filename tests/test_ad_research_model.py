@@ -247,8 +247,9 @@ async def test_model_planner_invalid_model_response_uses_deterministic_fallback(
             {
                 "query_id": "r3_q01",
                 "query": "rummy",
-                "intent": "game_gambling",
+                "intent": "local_exploration",
                 "rationale": "Deterministic fallback from the supplied seed keyword.",
+                "expected_visuals": [],
             }
         ]
     }
@@ -396,10 +397,12 @@ async def test_model_planner_prompt_has_schema_and_allowed_intents(monkeypatch) 
             "query": "short promo",
             "intent": "format_exploration",
             "rationale": "Explore short-form formats.",
+            "expected_visuals": [],
         }
     ]
     system_prompt = captured["input"][0]["content"]
     assert '"queries"' in system_prompt
+    assert '"expected_visuals"' in system_prompt
     for intent in (
         "game_gambling",
         "sports_betting",
@@ -408,7 +411,146 @@ async def test_model_planner_prompt_has_schema_and_allowed_intents(monkeypatch) 
     ):
         assert intent in system_prompt
     user_payload = json.loads(captured["input"][1]["content"])
-    assert user_payload["round_review"]["high_score_visible_elements"] == ["slot reels", "coins"]
+    assert user_payload["round_review"]["high_score_visible_elements"] == ["slot reels"]
+    assert "coins" not in json.dumps(user_payload)
     assert "ad_text" not in json.dumps(user_payload)
     assert "must-not-be-forwarded" not in json.dumps(user_payload)
+    await client.aclose()
+
+
+@pytest.mark.parametrize("query_id", ["r0_q01", "r7_q01", "r1_q00", "r1_q13", "r1_q99"])
+def test_planned_query_rejects_query_ids_outside_supported_rounds_and_slots(query_id: str) -> None:
+    with pytest.raises(ValueError, match="query_id"):
+        PlannedQuery(
+            query_id=query_id,
+            query="rummy bonus",
+            intent="local_exploration",
+            rationale="Validation boundary coverage.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_planner_normalizes_expected_visuals(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+
+    async def complete_json(**kwargs):
+        return {
+            "queries": [
+                {
+                    "query_id": "r1_q01",
+                    "query": "rummy bonus",
+                    "intent": "local_exploration",
+                    "rationale": "Controlled visual expectation.",
+                    "expected_visuals": [
+                        "  slot reels  ",
+                        "SLOT REELS",
+                        "",
+                        "x" * 81,
+                        *[f"visual {index}" for index in range(1, 10)],
+                    ],
+                }
+            ]
+        }
+
+    model._complete_json = complete_json
+    plan = await model.plan_queries(
+        country="IN", category="gambling", seed_keywords=["rummy"], round_number=1
+    )
+
+    assert plan.queries[0].expected_visuals == (
+        "slot reels",
+        "visual 1",
+        "visual 2",
+        "visual 3",
+        "visual 4",
+        "visual 5",
+        "visual 6",
+        "visual 7",
+    )
+    assert plan.queries[0].as_dict()["expected_visuals"] == [
+        "slot reels",
+        "visual 1",
+        "visual 2",
+        "visual 3",
+        "visual 4",
+        "visual 5",
+        "visual 6",
+        "visual 7",
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("round_number", "expected_prefix"),
+    [(0, "r1_"), (7, "r6_"), (99, "r6_")],
+)
+async def test_model_planner_fallback_clamps_round_number(
+    monkeypatch, round_number: int, expected_prefix: str
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    get_settings.cache_clear()
+    model = AdResearchModel(limiter=Limiter())
+
+    plan = await model.plan_queries(
+        country="IN",
+        category="gambling",
+        seed_keywords=["rummy"],
+        round_number=round_number,
+    )
+
+    assert [item.query_id for item in plan] == [f"{expected_prefix}q01"]
+    assert all(item.intent == "local_exploration" for item in plan)
+    assert all(item.expected_visuals == () for item in plan)
+
+
+@pytest.mark.asyncio
+async def test_model_planner_round_review_only_forwards_visual_taxonomy(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+
+    async def complete_json(**kwargs):
+        captured.update({"system": kwargs["system"], "user": kwargs["user"]})
+        return {
+            "queries": [
+                {
+                    "query_id": "r2_q01",
+                    "query": "rummy bonus",
+                    "intent": "local_exploration",
+                    "rationale": "Controlled round review.",
+                    "expected_visuals": ["slot reels"],
+                }
+            ]
+        }
+
+    model._complete_json = complete_json
+    forbidden = [
+        "Alicia Player",
+        "Channel 42",
+        "3-2 final score",
+        "https://tracker.example/path",
+        "Click now and win $500",
+        "avoid review detection",
+    ]
+    plan = await model.plan_queries(
+        country="IN",
+        category="gambling",
+        seed_keywords=["rummy"],
+        round_number=2,
+        gap_summary={
+            "priority_gaps": forbidden,
+            "missing_signals": forbidden,
+            "high_score_visible_elements": [" slot reels ", *forbidden],
+        },
+    )
+
+    assert plan.round_review is not None
+    assert plan.round_review.priority_gaps == ()
+    assert plan.round_review.missing_signals == ()
+    assert plan.round_review.high_score_visible_elements == ("slot reels",)
+    payload = json.dumps(captured, ensure_ascii=False)
+    assert "slot reels" in payload
+    for value in forbidden:
+        assert value not in payload
     await client.aclose()

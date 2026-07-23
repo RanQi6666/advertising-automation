@@ -19,7 +19,7 @@ from backend.app.services.ad_research_media import (
     PreparedAdMedia,
     TechnicalQualification,
 )
-from backend.app.services.ad_research_model import AdResearchModel
+from backend.app.services.ad_research_model import AdResearchModel, QueryPlan
 from backend.app.services.ad_research_service import AdResearchService
 
 MAX_ROUNDS = 4
@@ -339,10 +339,15 @@ class AdResearchOrchestrator:
 
 
 def _new_queries(
-    planned_queries: list[str], used_query_keys: set[str], used_queries: list[str]
+    planned_queries: QueryPlan | list[str], used_query_keys: set[str], used_queries: list[str]
 ) -> list[str]:
+    source_queries = (
+        (planned_query.query for planned_query in planned_queries.queries)
+        if isinstance(planned_queries, QueryPlan)
+        else planned_queries
+    )
     queries: list[str] = []
-    for query in planned_queries:
+    for query in source_queries:
         normalized = " ".join(str(query).split())
         query_key = normalized.casefold()
         if not normalized or query_key in used_query_keys:

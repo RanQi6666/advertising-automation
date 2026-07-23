@@ -34,7 +34,20 @@ QUERY_INTENTS = frozenset(
         "format_exploration",
     }
 )
-_QUERY_ID_PATTERN = re.compile(r"r[1-9]\d*_q\d{2}")
+_QUERY_ID_PATTERN = re.compile(r"r[1-6]_q(?:0[1-9]|1[0-2])")
+_VISUAL_TAXONOMY = frozenset(
+    {
+        "game ui",
+        "reward animation",
+        "slot reels",
+        "slot ui",
+        "poker table",
+        "wallet or balance ui",
+        "sports odds board",
+        "short-form vertical video",
+    }
+)
+_VISUAL_TAXONOMY_BY_KEY = {item.casefold(): item for item in _VISUAL_TAXONOMY}
 
 
 @dataclass(frozen=True)
@@ -71,6 +84,23 @@ class RoundReview:
     technical_rejection_summary: tuple[tuple[str, int], ...] = ()
     duplicate_count: int = 0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "priority_gaps",
+            tuple(_visual_taxonomy_list(self.priority_gaps, limit=12)),
+        )
+        object.__setattr__(
+            self,
+            "missing_signals",
+            tuple(_visual_taxonomy_list(self.missing_signals, limit=12)),
+        )
+        object.__setattr__(
+            self,
+            "high_score_visible_elements",
+            tuple(_visual_taxonomy_list(self.high_score_visible_elements, limit=12)),
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "query_performance": [item.as_dict() for item in self.query_performance],
@@ -88,6 +118,7 @@ class PlannedQuery:
     query: str
     intent: QueryIntent
     rationale: str
+    expected_visuals: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not all(
@@ -95,12 +126,15 @@ class PlannedQuery:
             for value in (self.query_id, self.query, self.intent, self.rationale)
         ):
             raise TypeError("planned query fields must be strings")
+        if not isinstance(self.expected_visuals, tuple):
+            raise TypeError("expected_visuals must be a tuple")
         query_id = self.query_id.strip()
         query = self.query.strip()
         intent = self.intent.strip()
         rationale = self.rationale.strip()
+        expected_visuals = tuple(_controlled_text_list(self.expected_visuals, limit=8, width=80))
         if not _QUERY_ID_PATTERN.fullmatch(query_id):
-            raise ValueError("query_id must use the r1_q01 format")
+            raise ValueError("query_id must use r1_q01 through r6_q12")
         if not query or len(query) > 160:
             raise ValueError("query must be a non-empty string of at most 160 characters")
         if intent not in QUERY_INTENTS:
@@ -111,13 +145,15 @@ class PlannedQuery:
         object.__setattr__(self, "query", query)
         object.__setattr__(self, "intent", intent)
         object.__setattr__(self, "rationale", rationale)
+        object.__setattr__(self, "expected_visuals", expected_visuals)
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "query_id": self.query_id,
             "query": self.query,
             "intent": self.intent,
             "rationale": self.rationale,
+            "expected_visuals": list(self.expected_visuals),
         }
 
 
@@ -230,11 +266,15 @@ class AdResearchModel:
                     "You plan lawful public-ad-library keyword research. Return one JSON object "
                     "only, with this exact schema: "
                     '{"queries":[{"query_id":"r1_q01","query":"short query",'
-                    '"intent":"game_gambling","rationale":"why this query"}],'
+                    '"intent":"game_gambling","rationale":"why this query",'
+                    '"expected_visuals":["slot reels"]}],'
                     '"summary":"optional short round summary"}. '
                     "queries must be an array of at most 12 independent objects. Every object "
-                    "must include query_id, query, intent, and rationale. query_id must use the "
-                    "r1_q01 form. intent must be exactly one of: game_gambling, sports_betting, "
+                    "must include query_id, query, intent, rationale, and expected_visuals. "
+                    "query_id must be from r1_q01 through r6_q12. expected_visuals must be "
+                    "an array of at "
+                    "most 8 trimmed, non-empty, case-insensitively unique strings of at most 80 "
+                    "characters. intent must be exactly one of: game_gambling, sports_betting, "
                     "local_exploration, format_exploration. Create short public-library queries "
                     "for the requested country/category. Use only the controlled round review to "
                     "change retrieval direction. Do not repeat prior queries. If technical "
@@ -248,7 +288,7 @@ class AdResearchModel:
                     "country": country,
                     "category": category,
                     "user_keywords": _unique_queries(seed_keywords)[:12],
-                    "round_number": max(int(round_number), 1),
+                    "round_number": _safe_round_number(round_number),
                     "round_review": (review or RoundReview()).as_dict(),
                 },
             )
@@ -457,14 +497,14 @@ def _round_review_from_summary(summary: dict[str, Any] | None) -> RoundReview:
     )
     return RoundReview(
         query_performance=tuple(query_performance),
-        priority_gaps=tuple(_controlled_text_list(source.get("priority_gaps"), limit=12)),
+        priority_gaps=tuple(_visual_taxonomy_list(source.get("priority_gaps"), limit=12)),
         missing_signals=tuple(
-            _controlled_text_list(
+            _visual_taxonomy_list(
                 source.get("missing_signals", source.get("missing_play_patterns")), limit=12
             )
         ),
         high_score_visible_elements=tuple(
-            _controlled_text_list(source.get("high_score_visible_elements"), limit=12)
+            _visual_taxonomy_list(source.get("high_score_visible_elements"), limit=12)
         ),
         technical_rejection_summary=technical_rejections,
         duplicate_count=_non_negative_int(source.get("duplicate_count")),
@@ -491,6 +531,9 @@ def _query_plan_from_response(
                 query=item.get("query"),
                 intent=item.get("intent"),
                 rationale=item.get("rationale"),
+                expected_visuals=tuple(
+                    _controlled_text_list(item.get("expected_visuals"), limit=8, width=80)
+                ),
             )
         except (TypeError, ValueError):
             continue
@@ -521,15 +564,15 @@ def _fallback_query_plan(
     values = _unique_queries(seed_keywords or [category])[:12]
     if not values:
         values = ["public ads"]
-    safe_round = max(int(round_number), 1)
-    intent = _fallback_intent(category)
+    safe_round = _safe_round_number(round_number)
     return QueryPlan(
         queries=tuple(
             PlannedQuery(
                 query_id=f"r{safe_round}_q{index:02d}",
                 query=query,
-                intent=intent,
+                intent="local_exploration",
                 rationale="Deterministic fallback from the supplied seed keyword.",
+                expected_visuals=(),
             )
             for index, query in enumerate(values, start=1)
         ),
@@ -537,30 +580,39 @@ def _fallback_query_plan(
     )
 
 
-def _fallback_intent(category: str) -> QueryIntent:
-    normalized = category.casefold()
-    if "sport" in normalized and ("bet" in normalized or "gambl" in normalized):
-        return "sports_betting"
-    if any(token in normalized for token in ("gambl", "casino", "rummy", "poker", "bet")):
-        return "game_gambling"
-    if any(token in normalized for token in ("local", "regional", "country")):
-        return "local_exploration"
-    return "format_exploration"
+def _safe_round_number(round_number: Any) -> int:
+    try:
+        parsed = int(round_number)
+    except (TypeError, ValueError):
+        parsed = 1
+    return min(max(parsed, 1), 6)
 
 
-def _controlled_text_list(value: Any, *, limit: int) -> list[str]:
-    if not isinstance(value, list):
+def _controlled_text_list(value: Any, *, limit: int, width: int = 160) -> list[str]:
+    if not isinstance(value, list | tuple):
         return []
     output: list[str] = []
     seen: set[str] = set()
     for item in value:
-        text = _short_text(item)
+        text = _short_text(item, limit=width)
         if not text or text.casefold() in seen:
             continue
         output.append(text)
         seen.add(text.casefold())
         if len(output) >= limit:
             break
+    return output
+
+
+def _visual_taxonomy_list(value: Any, *, limit: int) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in _controlled_text_list(value, limit=limit, width=80):
+        canonical = _VISUAL_TAXONOMY_BY_KEY.get(item.casefold())
+        if not canonical or canonical.casefold() in seen:
+            continue
+        output.append(canonical)
+        seen.add(canonical.casefold())
     return output
 
 
