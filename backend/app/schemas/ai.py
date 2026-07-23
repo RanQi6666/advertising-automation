@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TopicCandidate(BaseModel):
@@ -571,6 +571,18 @@ class StoryboardDraftExecutionAction(BaseModel):
     action_or_state_change: str
     signature_moment_ids: list[str] = Field(default_factory=list)
     source_behavior_beat_ids: list[str] = Field(default_factory=list)
+
+
+class FrameAnchoredStoryboardTextCandidate(BaseModel):
+    storyboard_text: str
+
+    @field_validator("storyboard_text")
+    @classmethod
+    def validate_storyboard_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("storyboard_text must not be blank")
+        return normalized
 
 
 class FrameAnchoredStoryboardDraftScene(BaseModel):

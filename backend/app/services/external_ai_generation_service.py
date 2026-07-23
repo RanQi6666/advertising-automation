@@ -3,7 +3,6 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +20,6 @@ from backend.app.schemas.ai import (
     FrameAnchoredStoryboard,
     TopicCandidate,
     VideoStoryboardCandidate,
-    validate_director_coverage,
 )
 from backend.app.schemas.external_ai_generation import (
     ExternalAICopyGenerationCreate,
@@ -45,16 +43,11 @@ from backend.app.services.generation_task_service import (
     GenerationTaskService,
 )
 from backend.app.services.llm_rate_limit import ExternalAIIdempotencyLock, llm_text_rate_limiter
-from backend.app.services.storyboard_director_coverage_service import (
-    review_director_action_coverage,
-    validate_final_storyboard_action_coverage,
-)
 from backend.app.services.storyboard_reference_video_service import (
     PreparedReferenceVideo,
     StoryboardReferenceVideoService,
     adapt_reference_behavior_timeline,
 )
-from backend.app.services.storyboard_v2_compiler import compile_storyboard_v2
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -447,129 +440,42 @@ class ExternalAIGenerationService:
                     frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
 
-            director_plan_added = False
-            if frame_analysis.director_plan is None:
-                async with llm_text_rate_limiter():
-                    director_plan = await llm.direct_frame_anchored_video_storyboard(
-                        first_frame_image_url=payload.first_frame_image_url,
-                        last_frame_image_url=payload.last_frame_image_url,
-                        frame_analysis=frame_analysis,
-                        duration_seconds=payload.duration_seconds,
-                        aspect_ratio=payload.aspect_ratio,
-                    )
-                frame_analysis = frame_analysis.model_copy(
-                    update={"director_plan": director_plan}
-                )
-                director_plan_added = True
-
-            try:
-                normalized_frame_analysis = _normalize_private_storyboard_namespace(
-                    frame_analysis
-                )
-            except ValidationError as exc:
-                invalid_plan = frame_analysis.director_plan
-                if invalid_plan is not None:
-                    invalid_review = review_director_action_coverage(
-                        frame_analysis,
-                        invalid_plan,
-                    )
-                    if invalid_review.status == "unrecoverable":
-                        await _store_frame_anchored_private_metadata(
-                            session,
-                            task,
-                            director_action_coverage_review=invalid_review.model_dump(
-                                mode="json"
-                            ),
-                        )
-                        raise ProviderError(
-                            "Director plan is unrecoverable before storyboard generation because "
-                            f"{_public_unrecoverable_director_reason(invalid_review)}."
-                        ) from exc
-                raise ProviderError(
-                    "Director plan is unrecoverable before storyboard generation because "
-                    "director action coverage contract is invalid."
-                ) from exc
-            if director_plan_added or normalized_frame_analysis != frame_analysis:
-                frame_analysis = normalized_frame_analysis
+            if frame_analysis.director_plan is not None:
+                frame_analysis = frame_analysis.model_copy(update={"director_plan": None})
                 await _store_frame_anchored_private_metadata(
                     session,
                     task,
                     frame_analysis=frame_analysis.model_dump(mode="json"),
                 )
 
-            director_plan = frame_analysis.director_plan
-            if director_plan is None:
-                raise ProviderError("Frame-anchored director plan is missing.")
-            director_review = review_director_action_coverage(frame_analysis, director_plan)
-            await _store_frame_anchored_private_metadata(
-                session,
-                task,
-                director_action_coverage_review=director_review.model_dump(mode="json"),
-            )
-            if director_review.status == "unrecoverable":
-                raise ProviderError(
-                    "Director plan is unrecoverable before storyboard generation because "
-                    f"{_public_unrecoverable_director_reason(director_review)}."
-                )
-
             async with llm_text_rate_limiter():
-                storyboard_draft = await llm.generate_frame_anchored_video_storyboard(
+                storyboard_candidate = await llm.generate_frame_anchored_video_storyboard_text(
                     first_frame_image_url=payload.first_frame_image_url,
                     last_frame_image_url=payload.last_frame_image_url,
                     frame_analysis=frame_analysis,
                     duration_seconds=payload.duration_seconds,
                     aspect_ratio=payload.aspect_ratio,
-                    director_corrections=director_review.structured_corrections,
                 )
+            raw_storyboard_text = getattr(storyboard_candidate, "storyboard_text", "")
+            if not isinstance(raw_storyboard_text, str) or not raw_storyboard_text.strip():
+                raise ProviderError("LLM returned empty frame-anchored storyboard text.")
+            normalized_storyboard_text = raw_storyboard_text.strip()
             await _store_frame_anchored_private_metadata(
                 session,
                 task,
-                storyboard_candidate=storyboard_draft.model_dump(mode="json"),
+                storyboard_text_candidate={
+                    "storyboard_text": normalized_storyboard_text,
+                },
             )
-            try:
-                storyboard = compile_storyboard_v2(
-                    storyboard_draft,
-                    frame_analysis,
-                    duration_seconds=payload.duration_seconds,
-                    aspect_ratio=payload.aspect_ratio,
-                )
-            except (ValidationError, ValueError) as exc:
-                raise ProviderError(
-                    "LLM returned a frame-anchored storyboard draft that could not be compiled."
-                ) from exc
-            try:
-                validate_director_coverage(storyboard, director_plan)
-                validate_final_storyboard_action_coverage(
-                    storyboard,
-                    frame_analysis,
-                    director_review,
-                )
-            except ValueError as exc:
-                raise ProviderError(
-                    "LLM storyboard does not execute the required director action and "
-                    "final-anchor return."
-                ) from exc
-            await _store_frame_anchored_private_metadata(
-                session,
-                task,
-                storyboard=storyboard.model_dump(mode="json"),
-            )
+            storyboard_text = _scrub_frame_anchored_storyboard_text(
+                normalized_storyboard_text,
+                private_sources=(frame_analysis.model_dump(mode="json"),),
+            ).strip()
+            if not storyboard_text:
+                raise ProviderError("LLM returned empty frame-anchored storyboard text.")
             return {
                 "request_id": _request_id(payload.external_request_id, task.id),
-                "storyboard_text": _format_frame_anchored_storyboard_text(
-                    storyboard,
-                    private_sources=(
-                        frame_analysis.model_dump(mode="json"),
-                        director_plan.model_dump(mode="json"),
-                        director_review.model_dump(mode="json"),
-                        [
-                            correction.model_dump(mode="json")
-                            for correction in director_review.structured_corrections
-                        ],
-                        storyboard_draft.model_dump(mode="json"),
-                        storyboard.model_dump(mode="json"),
-                    ),
-                ),
+                "storyboard_text": storyboard_text,
                 "duration_seconds": payload.duration_seconds,
                 "aspect_ratio": payload.aspect_ratio,
             }
@@ -930,6 +836,7 @@ async def _store_frame_anchored_private_metadata(
     frame_analysis: dict[str, Any] | None = None,
     director_action_coverage_review: dict[str, Any] | None = None,
     storyboard_candidate: dict[str, Any] | None = None,
+    storyboard_text_candidate: dict[str, Any] | None = None,
     storyboard: dict[str, Any] | None = None,
 ) -> None:
     metadata = task.metadata_json or {}
@@ -944,6 +851,11 @@ async def _store_frame_anchored_private_metadata(
         metadata = {
             **metadata,
             "frame_anchored_storyboard_candidate": storyboard_candidate,
+        }
+    if storyboard_text_candidate is not None:
+        metadata = {
+            **metadata,
+            "frame_anchored_storyboard_text_candidate": storyboard_text_candidate,
         }
     if storyboard is not None:
         metadata = {**metadata, "frame_anchored_storyboard": storyboard}
@@ -1235,6 +1147,27 @@ def _scrub_private_storyboard_ids(value: str | None, private_ids: tuple[str, ...
         value or "",
         {private_id: "linked item" for private_id in private_ids},
     )
+
+
+_PRIVATE_STORYBOARD_TOKEN_PATTERN = re.compile(r"__sbv2_[A-Za-z0-9_:.-]+__")
+
+
+def _scrub_frame_anchored_storyboard_text(
+    value: str,
+    *,
+    private_sources: tuple[Any, ...] = (),
+) -> str:
+    private_ids = {
+        private_id
+        for source in private_sources
+        for private_id in _private_id_values(source)
+        if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
+    }
+    scrubbed = _replace_private_ids_in_text(
+        value,
+        {private_id: "linked item" for private_id in private_ids},
+    )
+    return _PRIVATE_STORYBOARD_TOKEN_PATTERN.sub("linked item", scrubbed)
 
 
 def _format_frame_anchored_storyboard_text(

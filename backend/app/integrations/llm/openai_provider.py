@@ -27,6 +27,7 @@ from backend.app.schemas.ai import (
     FrameAnalysis,
     FrameAnchoredDirectorPlan,
     FrameAnchoredStoryboardDraft,
+    FrameAnchoredStoryboardTextCandidate,
     ImageBrief,
     ReferenceVideoFrame,
     TopicCandidate,
@@ -612,6 +613,40 @@ class OpenAILLMProvider:
             response_model=FrameAnchoredDirectorPlan,
         )
         return _frame_anchored_director_plan_from_data(data)
+
+    async def generate_frame_anchored_video_storyboard_text(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboardTextCandidate:
+        data = await self._vision_json_completion(
+            system=_frame_anchored_storyboard_text_system_prompt(),
+            user=_frame_pair_user_content(
+                first_frame_image_url,
+                last_frame_image_url,
+                {
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                    "frame_analysis": frame_analysis.model_dump(mode="json"),
+                },
+            ),
+            response_model=FrameAnchoredStoryboardTextCandidate,
+        )
+        try:
+            return FrameAnchoredStoryboardTextCandidate.model_validate(data)
+        except ValidationError as exc:
+            logger.warning(
+                "Frame-anchored storyboard text JSON validation failed: errors=%s "
+                "response_shape=%s",
+                _frame_analysis_validation_errors(exc),
+                _frame_analysis_response_shape(data),
+            )
+            raise ProviderError(
+                "LLM returned invalid frame-anchored storyboard text JSON."
+            ) from exc
 
     async def generate_frame_anchored_video_storyboard(
         self,
@@ -2013,6 +2048,39 @@ def _frame_anchored_director_system_prompt() -> str:
         "the final frame, or omit it; state the final-frame requirement without inventing a fixed "
         "overlay rule. Provide non-empty anti_flattening_constraints that preserve causal "
         "readability, the effect peak, and the ending anchor."
+    )
+
+
+def _frame_anchored_storyboard_text_system_prompt() -> str:
+    return with_meta_ad_compliance(
+        "You are a 3A game-cinematic and premium commercial director. Use the two supplied "
+        "target images and frame_analysis to write one complete production-ready director "
+        "script for a single generated video clip. Return valid JSON only with exactly one "
+        "root field named storyboard_text. storyboard_text must be a non-empty plain string; "
+        "do not return scene arrays, analysis, evidence fields, proof IDs, or backend metadata. "
+        "Treat the supplied first frame as the exact opening visual anchor and the supplied "
+        "last frame as the highest-priority ending visual anchor. Preserve their target "
+        "character or product identity, appearance, brand, readable text, reward values, UI, "
+        "composition, and setting wherever they are visibly established. The middle may "
+        "temporarily diverge in pose, framing, camera distance, lighting, and effects when that "
+        "is needed to create a strong causal action and then resolve coherently to the ending. "
+        "Use reference-video analysis as director material: understand how subjects appear, "
+        "what actions and interactions occur, their cause-and-effect payoff, camera language, "
+        "rhythm, VFX timing, transitions, UI, text, rewards, and element lifecycle. Adapt, "
+        "replace, preserve, or omit those ideas according to the target images, target identity, "
+        "physical feasibility, and requested duration; never blindly copy incompatible source "
+        "identity. A reference UI, reward, or text overlay may be retained or adapted when it "
+        "supports the target story and does not contradict the supplied ending base layer. "
+        "Build cinematic attention, escalation, impact, and resolution dynamically from the "
+        "actual evidence and duration_seconds. Do not use a fixed 0-3s, 3-9s, 9-12s, fixed "
+        "climax timestamp, or fixed number of beats. Express camera movement, subject action, "
+        "visual consequences, VFX, lighting, sound cues, and any visible text precisely enough "
+        "for a video-generation model to execute. Realize the result as one continuous shot or "
+        "one continuous generated clip using in-shot camera and staging changes; do not require "
+        "editing, stitched shots, post-production assembly, or an external compositing pass. "
+        "Never expose internal identifiers or tokens beginning with __sbv2_. Safety and ad "
+        "compliance are mandatory. "
+        + creative_safety_prompt_block()
     )
 
 
