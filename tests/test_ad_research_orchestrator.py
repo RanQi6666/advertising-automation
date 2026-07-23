@@ -56,8 +56,13 @@ class Collector:
 
 
 class Media:
-    def __init__(self, rejected: dict[str, tuple[str, ...]] | None = None) -> None:
+    def __init__(
+        self,
+        rejected: dict[str, tuple[str, ...]] | None = None,
+        frame_count_by_ad_id: dict[str, int] | None = None,
+    ) -> None:
         self.rejected = rejected or {}
+        self.frame_count_by_ad_id = frame_count_by_ad_id or {}
         self.retain_calls: list[set[str]] = []
         self.low_confidence_calls: list[str] = []
         self.inspect_calls_by_ad_id: dict[str, int] = {}
@@ -94,7 +99,12 @@ class Media:
             reasons=reasons,
             duration_seconds=item.duration_seconds,
             active_days=item.days_running,
-            media=None if reasons else prepared_media(marker=item.ad_library_id),
+            media=None
+            if reasons
+            else prepared_media(
+                frame_count=self.frame_count_by_ad_id.get(item.ad_library_id, 3),
+                marker=item.ad_library_id,
+            ),
         )
 
 
@@ -104,11 +114,13 @@ class Model:
         *,
         score_by_ad_id: dict[str, float] | None = None,
         confidence_by_ad_id: dict[str, float] | None = None,
+        visual_priority_by_ad_id: dict[str, str] | None = None,
         fail_ids: set[str] | None = None,
         plans: list[list[str]] | None = None,
     ) -> None:
         self.score_by_ad_id = score_by_ad_id or {}
         self.confidence_by_ad_id = confidence_by_ad_id or {}
+        self.visual_priority_by_ad_id = visual_priority_by_ad_id or {}
         self.fail_ids = fail_ids or set()
         self.plans = plans
         self.plan_calls: list[dict[str, Any]] = []
@@ -143,7 +155,7 @@ class Model:
             dimensions[key] = min(remaining, maximum)
             remaining -= dimensions[key]
         return {
-            "visual_priority": "game_gambling",
+            "visual_priority": self.visual_priority_by_ad_id.get(marker, "game_gambling"),
             **dimensions,
             "visual_total": -9999,
             "analysis_confidence": confidence,
@@ -222,7 +234,8 @@ async def test_orchestrator_collects_again_when_first_round_is_short() -> None:
     assert collector.calls == 2
     assert result.status == "completed"
     assert len(result.ads) == 25
-    assert result.summary["twenty_fifth_score"] == 83.0
+    assert result.summary["score_distribution"]["70_89"] == 25
+    assert "twenty_fifth_score" not in result.summary
     assert media.retain_calls == [{ad["ad_library_id"] for ad in result.ads}]
 
 
@@ -233,7 +246,7 @@ async def test_orchestrator_returns_insufficient_without_padding() -> None:
     assert result.status == "insufficient"
     assert len(result.ads) == 5
     assert result.summary["reason"] == "no_new_candidates"
-    assert result.summary["twenty_fifth_score"] is None
+    assert "twenty_fifth_score" not in result.summary
 
 
 @pytest.mark.asyncio
@@ -250,7 +263,7 @@ async def test_orchestrator_bounds_visual_model_concurrency(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_supplements_when_target_score_is_too_low() -> None:
+async def test_orchestrator_stops_when_target_is_met_regardless_of_visual_score() -> None:
     low = candidate(1)
     high = candidate(2)
     collector = QueryCollector({"first": [low], "second": [high]})
@@ -263,9 +276,10 @@ async def test_orchestrator_supplements_when_target_score_is_too_low() -> None:
     result = await run_custom(collector=collector, media=media, model=model, target_count=1)
 
     assert result.status == "completed"
-    assert collector.queries == ["first", "second"]
-    assert result.ads[0]["ad_library_id"] == high.ad_library_id
-    assert result.summary["rounds"][0]["twenty_fifth_score"] == 43.0
+    assert collector.queries == ["first"]
+    assert result.ads[0]["ad_library_id"] == low.ad_library_id
+    assert result.ads[0]["final_score"] == result.ads[0]["visual_total"] == 40.0
+    assert "twenty_fifth_score" not in result.summary["rounds"][0]
 
 
 @pytest.mark.asyncio
@@ -513,6 +527,7 @@ async def test_orchestrator_passes_controlled_gap_summary_to_next_round() -> Non
     ):
         assert forbidden not in serialized_gap
 
+
 @pytest.mark.asyncio
 async def test_orchestrator_does_not_collect_a_query_twice_across_rounds() -> None:
     collector = QueryCollector({"alpha": [candidate(9)], "beta": [candidate(10)]})
@@ -538,13 +553,169 @@ async def test_orchestrator_summary_exposes_visual_scores_and_technical_rejectio
 
     assert result.status == "insufficient"
     assert len(result.ads) == 1
-    assert result.ads[0]["public_continuity_points"] == 10.0
+    assert result.ads[0]["final_score"] == result.ads[0]["visual_total"] == 80.0
+    assert "public_continuity_points" not in result.ads[0]
     assert result.summary["minimum_active_days"] == 1
     assert result.summary["maximum_video_seconds"] == 30.0
     assert result.summary["technical_rejection_summary"] == {"active_days_below_minimum": 1}
-    assert result.summary["score_distribution"]["90_100"] == 1
+    assert result.summary["score_distribution"]["70_89"] == 1
     assert result.summary["rounds"][0]["queries"] == ["first"]
     assert result.summary["rounds"][0]["selected_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_ranks_game_gambling_before_higher_scoring_sports_betting() -> None:
+    game = candidate(101)
+    sports = candidate(102)
+    collector = QueryCollector({"first": [sports, game]})
+    model = Model(
+        plans=[["first"]],
+        score_by_ad_id={game.ad_library_id: 30, sports.ad_library_id: 95},
+        visual_priority_by_ad_id={
+            game.ad_library_id: "game_gambling",
+            sports.ad_library_id: "sports_betting",
+        },
+    )
+
+    result = await run_custom(collector=collector, media=Media(), model=model, target_count=2)
+
+    assert [ad["ad_library_id"] for ad in result.ads] == [game.ad_library_id, sports.ad_library_id]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_uses_all_secondary_visual_sort_tie_breakers_deterministically() -> None:
+    visual_total = candidate(110, active_days=1)
+    confidence = candidate(111, active_days=1)
+    active_days = candidate(112, active_days=10)
+    frame_count = candidate(113, active_days=5)
+    ad_id_first = candidate(114, active_days=5)
+    ad_id_last = candidate(115, active_days=5)
+    candidates = [ad_id_last, frame_count, active_days, confidence, visual_total, ad_id_first]
+    score_by_ad_id = {item.ad_library_id: 80 for item in candidates}
+    score_by_ad_id[visual_total.ad_library_id] = 90
+    confidence_by_ad_id = {item.ad_library_id: 0.8 for item in candidates}
+    confidence_by_ad_id[visual_total.ad_library_id] = 0.1
+    confidence_by_ad_id[confidence.ad_library_id] = 0.9
+    media = Media(
+        frame_count_by_ad_id={
+            frame_count.ad_library_id: 5,
+            ad_id_first.ad_library_id: 3,
+            ad_id_last.ad_library_id: 3,
+        }
+    )
+
+    result = await run_custom(
+        collector=QueryCollector({"first": candidates}),
+        media=media,
+        model=Model(
+            plans=[["first"]],
+            score_by_ad_id=score_by_ad_id,
+            confidence_by_ad_id=confidence_by_ad_id,
+        ),
+        target_count=6,
+    )
+
+    assert [ad["ad_library_id"] for ad in result.ads] == [
+        visual_total.ad_library_id,
+        confidence.ad_library_id,
+        active_days.ad_library_id,
+        frame_count.ad_library_id,
+        ad_id_first.ad_library_id,
+        ad_id_last.ad_library_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_only_selected_unrelated_ads_as_transparent_fallbacks() -> None:
+    game = candidate(120)
+    sports = candidate(121)
+    adjacent = candidate(122)
+    fallback = candidate(123)
+    unselected_fallback = candidate(124)
+    candidates = [unselected_fallback, fallback, adjacent, sports, game]
+    model = Model(
+        plans=[["first"]],
+        score_by_ad_id={
+            game.ad_library_id: 10,
+            sports.ad_library_id: 90,
+            adjacent.ad_library_id: 80,
+            fallback.ad_library_id: 70,
+            unselected_fallback.ad_library_id: 60,
+        },
+        visual_priority_by_ad_id={
+            game.ad_library_id: "game_gambling",
+            sports.ad_library_id: "sports_betting",
+            adjacent.ad_library_id: "gambling_adjacent",
+            fallback.ad_library_id: "unrelated",
+            unselected_fallback.ad_library_id: "unrelated",
+        },
+    )
+
+    result = await run_custom(
+        collector=QueryCollector({"first": candidates}),
+        media=Media(),
+        model=model,
+        target_count=4,
+    )
+
+    assert [ad["ad_library_id"] for ad in result.ads] == [
+        game.ad_library_id,
+        sports.ad_library_id,
+        adjacent.ad_library_id,
+        fallback.ad_library_id,
+    ]
+    assert [ad["is_fallback"] for ad in result.ads] == [False, False, False, True]
+    assert [ad["fallback_reason"] for ad in result.ads] == [
+        None,
+        None,
+        None,
+        "insufficient_high_relevance_candidates",
+    ]
+    assert result.summary["quality_summary"] == {
+        "game_gambling_count": 1,
+        "sports_betting_count": 1,
+        "gambling_adjacent_count": 1,
+        "fallback_count": 1,
+        "fallback_used": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_final_score_is_exact_validated_visual_total_without_continuity() -> (
+    None
+):
+    item = candidate(130, active_days=30)
+    result = await run_custom(
+        collector=QueryCollector({"first": [item]}),
+        media=Media(),
+        model=Model(plans=[["first"]], score_by_ad_id={item.ad_library_id: 80}),
+        target_count=1,
+    )
+
+    ad = result.ads[0]
+    recomputed_visual_total = sum(
+        ad[key]
+        for key in (
+            "gameplay_gambling_points",
+            "multi_signal_style_points",
+            "betting_mechanism_points",
+            "gambling_visual_style_points",
+            "visual_clarity_points",
+            "media_quality_points",
+        )
+    )
+    assert ad["final_score"] == ad["visual_total"] == recomputed_visual_total == 80.0
+    assert ad["active_days"] == 30
+    assert {
+        "visual_priority",
+        "gambling_signals",
+        "game_visual_present",
+        "is_fallback",
+        "fallback_reason",
+    } <= ad.keys()
+    assert ad["is_fallback"] is False
+    assert ad["fallback_reason"] is None
+    assert "public_continuity_points" not in ad
 
 
 @pytest.mark.asyncio
@@ -574,6 +745,7 @@ async def test_orchestrator_collects_plain_query_text_from_structured_query_plan
     assert result.status == "completed"
     assert collector.queries == ["rummy bonus"]
     assert all("PlannedQuery(" not in query for query in collector.queries)
+
 
 @pytest.mark.asyncio
 async def test_orchestrator_refreshes_scored_ad_sources_across_rounds_without_rescoring() -> None:
@@ -661,7 +833,8 @@ async def test_orchestrator_skips_reused_or_wrong_round_structured_query_ids() -
     assert collector.queries == ["first", "second"]
     assert [item["query_id"] for item in result.summary["query_metrics"]] == ["r1_q01", "r2_q01"]
     round_two = result.summary["rounds"][1]
-    assert round_two["skipped_repeated_query_count"] == 2
+    assert round_two["skipped_query_count"] == 2
+    assert "skipped_repeated_query_count" not in round_two
     assert round_two["skipped_query_diagnostics"] == [
         {"query_id": "r1_q01", "reason": "query_id_already_used"},
         {"query_id": "r1_q02", "reason": "query_id_wrong_round"},

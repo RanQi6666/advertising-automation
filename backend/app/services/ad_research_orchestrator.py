@@ -29,7 +29,6 @@ from backend.app.services.ad_research_service import AdResearchService
 MAX_ROUNDS = 4
 MAX_RAW_CANDIDATES = 500
 PER_QUERY_LIMIT = 50
-QUALITY_SUPPLEMENT_THRESHOLD = 55.0
 LOW_CONFIDENCE_THRESHOLD = 0.60
 
 
@@ -179,8 +178,7 @@ class AdResearchOrchestrator:
                 scored_by_ad_library_id, source_query_ids_by_ad_library_id
             )
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
-            selected = scored[: job.target_count]
-            twenty_fifth_score = _target_score(scored, job.target_count)
+            selected = _select_ranked(scored, job.target_count)
             score_distribution = _score_distribution(scored)
             progress = {
                 "raw_collected": raw_collected,
@@ -191,7 +189,7 @@ class AdResearchOrchestrator:
                 "model_relevant": len(scored),
                 "selected_count": len(selected),
                 "score_distribution": score_distribution,
-                "twenty_fifth_score": twenty_fifth_score,
+                "quality_summary": _quality_summary(selected),
             }
             job.progress_json = progress
             await session.commit()
@@ -214,7 +212,7 @@ class AdResearchOrchestrator:
                     "round": round_number,
                     "queries": [query.query for query in collected_queries],
                     "planned_query_count": len(planned_queries),
-                    "skipped_repeated_query_count": len(planned_queries) - len(queries),
+                    "skipped_query_count": len(planned_queries) - len(queries),
                     "skipped_query_diagnostics": skipped_query_diagnostics,
                     "round_raw_collected": round_raw_collected,
                     "round_new_candidates": round_new_candidates,
@@ -234,16 +232,11 @@ class AdResearchOrchestrator:
                 "technical_rejection_summary": technical_rejection_summary,
                 "model_scoring_failed": len(model_scoring_failed_ids),
                 "duplicate_count": raw_collected - len(candidates),
+                "skipped_query_count": len(planned_queries) - len(queries),
                 "skipped_query_diagnostics": skipped_query_diagnostics,
             }
 
-            has_target = len(scored) >= job.target_count
-            needs_quality_supplement = (
-                has_target
-                and twenty_fifth_score is not None
-                and twenty_fifth_score < QUALITY_SUPPLEMENT_THRESHOLD
-            )
-            if has_target and not needs_quality_supplement:
+            if len(scored) >= job.target_count:
                 return await self._complete(
                     session=session,
                     job=job,
@@ -258,21 +251,17 @@ class AdResearchOrchestrator:
                     query_metrics=all_query_metrics,
                 )
             if round_number == MAX_ROUNDS or raw_collected >= MAX_RAW_CANDIDATES:
-                termination_reason = (
-                    "quality_supplement_exhausted" if has_target else "insufficient_qualified_ads"
-                )
+                termination_reason = "insufficient_qualified_ads"
                 break
             if round_new_candidates == 0:
-                termination_reason = (
-                    "quality_supplement_exhausted" if has_target else "no_new_candidates"
-                )
+                termination_reason = "no_new_candidates"
                 break
 
         _refresh_scored_source_attribution(
             scored_by_ad_library_id, source_query_ids_by_ad_library_id
         )
         scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
-        selected = scored[: job.target_count]
+        selected = _select_ranked(scored, job.target_count)
         status = "completed" if len(scored) >= job.target_count else "insufficient"
         return await self._complete(
             session=session,
@@ -286,12 +275,7 @@ class AdResearchOrchestrator:
             model_scoring_failed_ids=model_scoring_failed_ids,
             round_summaries=round_summaries,
             query_metrics=all_query_metrics,
-            reason=termination_reason
-            or (
-                "quality_supplement_exhausted"
-                if status == "completed"
-                else "insufficient_qualified_ads"
-            ),
+            reason=termination_reason or "insufficient_qualified_ads",
         )
 
     async def _score_candidates(
@@ -370,7 +354,6 @@ class AdResearchOrchestrator:
             model_scoring_failed_ids=model_scoring_failed_ids,
             round_summaries=round_summaries,
             query_metrics=query_metrics,
-            target_count=job.target_count,
             reason=reason,
         )
         await self.service.complete_job(session, job, status=status, ads=selected, summary=summary)
@@ -483,20 +466,6 @@ def _refresh_scored_source_attribution(
         scored["source_query_ids"] = list(source_query_ids)
 
 
-def _public_continuity_points(active_days: int | None) -> float:
-    if active_days is None or active_days < 1:
-        return 0.0
-    if active_days <= 2:
-        return 1.0
-    if active_days <= 6:
-        return 3.0
-    if active_days <= 13:
-        return 5.0
-    if active_days <= 29:
-        return 7.0
-    return 10.0
-
-
 def _public_result(
     ad: CollectorAd,
     qualification: TechnicalQualification,
@@ -512,7 +481,6 @@ def _public_result(
         frame_count=len(media.local_frame_paths),
     )
     visual_total = float(visual_score["visual_total"])
-    public_continuity_points = _public_continuity_points(qualification.active_days)
     return {
         "ad_library_id": ad.ad_library_id,
         "first_source_query_id": source_query_ids[0],
@@ -527,9 +495,8 @@ def _public_result(
         "duration_seconds": qualification.duration_seconds,
         "active_days": qualification.active_days,
         "platforms": ad.platforms,
-        "final_score": round(visual_total + public_continuity_points, 2),
+        "final_score": visual_total,
         "visual_total": visual_total,
-        "public_continuity_points": public_continuity_points,
         "visual_priority": str(visual_score.get("visual_priority") or "unrelated"),
         "gameplay_gambling_points": float(visual_score.get("gameplay_gambling_points") or 0),
         "multi_signal_style_points": float(visual_score.get("multi_signal_style_points") or 0),
@@ -545,6 +512,8 @@ def _public_result(
         "visual_evidence": list(visual_score.get("visual_evidence") or []),
         "retrieval_hints": list(visual_score.get("retrieval_hints") or []),
         "uncertain": bool(visual_score.get("uncertain")),
+        "is_fallback": False,
+        "fallback_reason": None,
         "media": _public_media(media),
     }
 
@@ -560,31 +529,61 @@ def _public_media(media: PreparedAdMedia) -> dict[str, Any]:
     }
 
 
-def _sort_key(ad: dict[str, Any]) -> tuple[float, float, int, int, str]:
+def _sort_key(ad: dict[str, Any]) -> tuple[int, float, float, int, int, str]:
+    priority_rank = {
+        "game_gambling": 0,
+        "sports_betting": 1,
+        "gambling_adjacent": 2,
+        "unrelated": 3,
+    }
+    priority = str(ad.get("visual_priority") or "unrelated")
     return (
-        -float(ad["final_score"]),
+        priority_rank.get(priority, priority_rank["unrelated"]),
         -float(ad["visual_total"]),
+        -float(ad.get("analysis_confidence") or 0),
         -int(ad.get("active_days") or 0),
         -int(ad["media"]["frame_count"]),
         str(ad["ad_library_id"]),
     )
 
 
-def _target_score(scored: list[dict[str, Any]], target_count: int) -> float | None:
-    if len(scored) < target_count:
-        return None
-    return float(scored[target_count - 1]["final_score"])
+def _select_ranked(scored: list[dict[str, Any]], target_count: int) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for candidate in scored[: max(target_count, 0)]:
+        is_fallback = str(candidate.get("visual_priority") or "unrelated") == "unrelated"
+        selected.append(
+            {
+                **candidate,
+                "is_fallback": is_fallback,
+                "fallback_reason": (
+                    "insufficient_high_relevance_candidates" if is_fallback else None
+                ),
+            }
+        )
+    return selected
+
+
+def _quality_summary(selected: list[dict[str, Any]]) -> dict[str, int | bool]:
+    priority_counts = _priority_counts(selected)
+    fallback_count = sum(bool(candidate.get("is_fallback")) for candidate in selected)
+    return {
+        "game_gambling_count": priority_counts["game_gambling"],
+        "sports_betting_count": priority_counts["sports_betting"],
+        "gambling_adjacent_count": priority_counts["gambling_adjacent"],
+        "fallback_count": fallback_count,
+        "fallback_used": fallback_count > 0,
+    }
 
 
 def _score_distribution(scored: list[dict[str, Any]]) -> dict[str, int]:
     distribution = {"0_19": 0, "20_39": 0, "40_54": 0, "55_69": 0, "70_89": 0, "90_100": 0}
     for candidate in scored:
-        score = float(candidate["final_score"])
+        score = float(candidate["visual_total"])
         if score < 20:
             distribution["0_19"] += 1
         elif score < 40:
             distribution["20_39"] += 1
-        elif score < QUALITY_SUPPLEMENT_THRESHOLD:
+        elif score < 55:
             distribution["40_54"] += 1
         elif score < 70:
             distribution["55_69"] += 1
@@ -599,7 +598,7 @@ def _high_score_visible_elements(scored: list[dict[str, Any]]) -> list[str]:
     elements: list[str] = []
     seen: set[str] = set()
     for candidate in scored:
-        if float(candidate["final_score"]) < QUALITY_SUPPLEMENT_THRESHOLD:
+        if float(candidate["visual_total"]) < 55:
             continue
         for item in candidate.get("gambling_signals") or []:
             element = str(item).strip()
@@ -672,9 +671,7 @@ def _query_metrics(
                 "sports_betting_count": priority_counts["sports_betting"],
                 "gambling_adjacent_count": priority_counts["gambling_adjacent"],
                 "unrelated_count": priority_counts["unrelated"],
-                "score_above_55": sum(
-                    score > QUALITY_SUPPLEMENT_THRESHOLD for score in visual_scores
-                ),
+                "score_above_55": sum(score > 55 for score in visual_scores),
                 "average_visual_score": (
                     round(sum(visual_scores) / len(visual_scores), 2) if visual_scores else None
                 ),
@@ -717,7 +714,6 @@ def _summary(
     model_scoring_failed_ids: set[str],
     round_summaries: list[dict[str, Any]],
     query_metrics: list[dict[str, Any]],
-    target_count: int,
     reason: str | None,
 ) -> dict[str, Any]:
     summary = {
@@ -732,20 +728,15 @@ def _summary(
         "selected_count": len(selected),
         "minimum_active_days": MIN_ACTIVE_DAYS,
         "maximum_video_seconds": MAX_VIDEO_SECONDS,
-        "quality_supplement_threshold": QUALITY_SUPPLEMENT_THRESHOLD,
         "score_distribution": _score_distribution(scored),
-        "twenty_fifth_score": _target_score(scored, target_count),
         "high_score_visible_elements": _high_score_visible_elements(scored),
+        "quality_summary": _quality_summary(selected),
         "technical_rejection_summary": _technical_rejection_summary(technical_diagnostics),
         "rounds": round_summaries,
         "query_metrics": sorted(query_metrics, key=lambda item: str(item["query_id"])),
         "model_relevant_notice": (
             "Compatibility field only: model_relevant equals model_scored and no longer means "
             "a text or category hard match."
-        ),
-        "performance_signal_notice": (
-            "public_continuity_points is a public active-duration proxy, not actual spend, "
-            "CPC, CPA, ROAS, conversion data, or profit."
         ),
     }
     if reason is not None:
