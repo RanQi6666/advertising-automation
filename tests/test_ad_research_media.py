@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from backend.app.core.config import get_settings
 from backend.app.schemas.ad_research import CollectorAd
@@ -226,6 +227,57 @@ async def test_low_confidence_frames_adds_only_two_extra_keyframes(
 
 
 @pytest.mark.asyncio
+async def test_media_builds_1024_two_by_two_contact_sheet(
+    inspector_with_storage, allow_public_media, monkeypatch
+) -> None:
+    inspector = inspector_with_storage
+    monkeypatch.setattr(inspector, "_download_video", lambda *_: _write_downloaded_video(_[1]))
+
+    async def frame(source: Path, destination: Path, second: float) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (320, 568), color=(int(second * 10) % 255, 30, 60)).save(destination)
+        return destination
+
+    monkeypatch.setattr(inspector, "_extract_frame", frame)
+
+    result = await inspector.inspect(eligible_ad(thumbnail_url=None), job_id="job-1")
+
+    assert result.media is not None
+    assert result.media.local_contact_sheet_path is not None
+    assert result.media.local_contact_sheet_path.is_file()
+    assert result.media.contact_sheet_url is not None
+    assert result.media.contact_sheet_url.endswith("contact_sheet.jpg")
+    with Image.open(result.media.local_contact_sheet_path) as image:
+        assert image.size == (1024, 1024)
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_frames_rebuild_same_contact_sheet(
+    inspector_with_storage, allow_public_media, monkeypatch
+) -> None:
+    inspector = inspector_with_storage
+    monkeypatch.setattr(inspector, "_download_video", lambda *_: _write_downloaded_video(_[1]))
+
+    async def frame(source: Path, destination: Path, second: float) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (320, 568), color=(20, 30, 60)).save(destination)
+        return destination
+
+    monkeypatch.setattr(inspector, "_extract_frame", frame)
+    ad = eligible_ad(thumbnail_url=None)
+    first = await inspector.inspect(ad, job_id="job-1")
+
+    assert first.media is not None
+    path = first.media.local_contact_sheet_path
+    enriched = await inspector.add_low_confidence_frames(ad, first, job_id="job-1")
+
+    assert enriched.media is not None
+    assert enriched.media.local_contact_sheet_path == path
+    assert len(enriched.media.local_frame_paths) == 6
+
+
+
+@pytest.mark.asyncio
 async def test_retain_only_removes_unselected_ad_artifacts(inspector_with_storage) -> None:
     root = inspector_with_storage._artifact_dir("job-1", "keep").parent
     for name in ("keep", "drop"):
@@ -321,6 +373,8 @@ def test_technical_qualification_can_hold_worker_only_media_paths(tmp_path) -> N
         cover_source="generated_frame",
         frame_urls=("https://ai.example/storage/ad-research/job/ad/frame_20.jpg",),
         local_frame_paths=(tmp_path / "frame_20.jpg",),
+        contact_sheet_url="https://ai.example/storage/ad-research/job/ad/contact_sheet.jpg",
+        local_contact_sheet_path=tmp_path / "contact_sheet.jpg",
         duration_source="collector",
         duration_probe_attempts=0,
     )

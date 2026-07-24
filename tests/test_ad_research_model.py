@@ -94,6 +94,8 @@ def prepared_media_with_three_frames(tmp_path) -> PreparedAdMedia:
             f"https://ai.example/storage/ad-research/job/ad/{path.name}" for path in frames
         ),
         local_frame_paths=tuple(frames),
+        contact_sheet_url="https://ai.example/storage/ad-research/job/ad/contact_sheet.jpg",
+        local_contact_sheet_path=tmp_path / "contact_sheet.jpg",
         duration_source="collector",
         duration_probe_attempts=0,
     )

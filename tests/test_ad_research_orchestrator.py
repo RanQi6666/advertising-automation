@@ -40,6 +40,8 @@ def prepared_media(*, frame_count: int = 3, marker: str = "default") -> Prepared
         cover_source="generated_frame",
         frame_urls=frame_urls,
         local_frame_paths=tuple(Path(f"frame-{index}.jpg") for index in range(frame_count)),
+        contact_sheet_url=f"https://ai.example/storage/{marker}/contact_sheet.jpg",
+        local_contact_sheet_path=Path(f"{marker}-contact_sheet.jpg"),
         duration_source="collector",
         duration_probe_attempts=0,
     )

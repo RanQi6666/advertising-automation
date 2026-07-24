@@ -25,6 +25,8 @@ class PreparedAdMedia:
     cover_source: Literal["original_thumbnail", "generated_frame"] | None
     frame_urls: tuple[str, ...]
     local_frame_paths: tuple[Path, ...]
+    contact_sheet_url: str | None
+    local_contact_sheet_path: Path | None
     duration_source: Literal["collector", "remote_ffprobe", "downloaded_ffprobe"] | None
     duration_probe_attempts: int
 
@@ -159,6 +161,11 @@ class AdResearchMediaInspector:
             if path not in local_frame_paths:
                 local_frame_paths.append(path)
 
+        contact_sheet_path = await asyncio.to_thread(
+            _build_contact_sheet,
+            tuple(local_frame_paths),
+            artifact_dir / "contact_sheet.jpg",
+        )
         return TechnicalQualification(
             qualified=qualification.qualified,
             reasons=qualification.reasons,
@@ -169,6 +176,10 @@ class AdResearchMediaInspector:
                 cover_source=media.cover_source,
                 frame_urls=tuple(frame_urls),
                 local_frame_paths=tuple(local_frame_paths),
+                contact_sheet_url=self._public_url(contact_sheet_path)
+                if contact_sheet_path
+                else None,
+                local_contact_sheet_path=contact_sheet_path,
                 duration_source=media.duration_source,
                 duration_probe_attempts=media.duration_probe_attempts,
             ),
@@ -262,11 +273,18 @@ class AdResearchMediaInspector:
             return None
 
         local_visual_paths = tuple(dict.fromkeys([cover_path, *frame_paths]))
+        contact_sheet_path = await asyncio.to_thread(
+            _build_contact_sheet,
+            local_visual_paths,
+            artifact_dir / "contact_sheet.jpg",
+        )
         return PreparedAdMedia(
             cover_url=self._public_url(cover_path),
             cover_source=cover_source,
             frame_urls=tuple(self._public_url(path) for path in frame_paths),
             local_frame_paths=local_visual_paths,
+            contact_sheet_url=self._public_url(contact_sheet_path) if contact_sheet_path else None,
+            local_contact_sheet_path=contact_sheet_path,
             duration_source=duration_source,
             duration_probe_attempts=duration_probe_attempts,
         )
@@ -441,6 +459,35 @@ class AdResearchMediaInspector:
         _ensure_within(resolved_path, storage_root)
         relative = resolved_path.relative_to(storage_root).as_posix()
         return f"{self.settings.public_base_url.rstrip('/')}/storage/{quote(relative, safe='/')}"
+
+
+def _build_contact_sheet(paths: tuple[Path, ...], destination: Path) -> Path | None:
+    from PIL import Image, ImageOps
+
+    usable = [path for path in dict.fromkeys(paths) if path.is_file()][:4]
+    if not usable:
+        destination.unlink(missing_ok=True)
+        return None
+
+    canvas = Image.new("RGB", (1024, 1024), (0, 0, 0))
+    try:
+        for index, position in enumerate(((0, 0), (512, 0), (0, 512), (512, 512))):
+            source = usable[min(index, len(usable) - 1)]
+            with Image.open(source) as image:
+                cell = ImageOps.fit(
+                    image.convert("RGB"),
+                    (512, 512),
+                    method=Image.Resampling.LANCZOS,
+                )
+                canvas.paste(cell, position)
+        canvas.save(destination, "JPEG", quality=88, optimize=True)
+        return destination
+    except (OSError, ValueError):
+        destination.unlink(missing_ok=True)
+        return None
+    finally:
+        canvas.close()
+
 
 
 def _frame_seconds(duration: float, *, low_confidence: bool = False) -> tuple[float, ...]:
