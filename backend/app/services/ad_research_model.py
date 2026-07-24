@@ -8,6 +8,7 @@ import re
 import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,6 +25,12 @@ QueryIntent = Literal[
     "local_exploration",
     "format_exploration",
 ]
+QueryOrigin = Literal[
+    "user_exact",
+    "user_expanded",
+    "model_exploration",
+    "model_recovery",
+]
 
 QUERY_INTENTS = frozenset(
     {
@@ -33,7 +40,8 @@ QUERY_INTENTS = frozenset(
         "format_exploration",
     }
 )
-_QUERY_ID_PATTERN = re.compile(r"r[1-6]_q(?:0[1-9]|1[0-2])")
+QUERY_ORIGINS = frozenset({"user_exact", "user_expanded", "model_exploration", "model_recovery"})
+_QUERY_ID_PATTERN = re.compile(r"r(?:[1-9]|10)_q(?:0[1-9]|1[0-2])")
 _VISUAL_TAXONOMY = frozenset(
     {
         "game ui",
@@ -55,7 +63,11 @@ class QueryPerformance:
 
     query_id: str | None = None
     collected_count: int = 0
-    selected_count: int = 0
+    technical_qualified_count: int = 0
+    scored_count: int = 0
+    quality_candidate_count: int = 0
+    best_visual_score: float = 0.0
+    final_selected_count: int = 0
     rejected_count: int = 0
 
     def __post_init__(self) -> None:
@@ -65,13 +77,27 @@ class QueryPerformance:
             "query_id",
             query_id if query_id and _QUERY_ID_PATTERN.fullmatch(query_id) else None,
         )
-        for field_name in ("collected_count", "selected_count", "rejected_count"):
+        for field_name in (
+            "collected_count",
+            "technical_qualified_count",
+            "scored_count",
+            "quality_candidate_count",
+            "final_selected_count",
+            "rejected_count",
+        ):
             object.__setattr__(self, field_name, _non_negative_int(getattr(self, field_name)))
+        object.__setattr__(
+            self, "best_visual_score", _safe_best_visual_score(self.best_visual_score)
+        )
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "collected_count": self.collected_count,
-            "selected_count": self.selected_count,
+            "technical_qualified_count": self.technical_qualified_count,
+            "scored_count": self.scored_count,
+            "quality_candidate_count": self.quality_candidate_count,
+            "best_visual_score": self.best_visual_score,
+            "final_selected_count": self.final_selected_count,
             "rejected_count": self.rejected_count,
         }
         if self.query_id:
@@ -132,11 +158,19 @@ class PlannedQuery:
     intent: QueryIntent
     rationale: str
     expected_visuals: tuple[str, ...] = ()
+    query_origin: QueryOrigin = "model_exploration"
+    parent_keyword: str | None = None
 
     def __post_init__(self) -> None:
         if not all(
             isinstance(value, str)
-            for value in (self.query_id, self.query, self.intent, self.rationale)
+            for value in (
+                self.query_id,
+                self.query,
+                self.intent,
+                self.rationale,
+                self.query_origin,
+            )
         ):
             raise TypeError("planned query fields must be strings")
         if not isinstance(self.expected_visuals, tuple):
@@ -145,13 +179,19 @@ class PlannedQuery:
         query = self.query.strip()
         intent = self.intent.strip()
         rationale = self.rationale.strip()
+        query_origin = self.query_origin.strip()
         expected_visuals = tuple(_controlled_text_list(self.expected_visuals, limit=8, width=80))
+        parent_keyword = _short_text(self.parent_keyword)
         if not _QUERY_ID_PATTERN.fullmatch(query_id):
-            raise ValueError("query_id must use r1_q01 through r6_q12")
+            raise ValueError("query_id must use r1_q01 through r10_q12")
         if not query or len(query) > 160:
             raise ValueError("query must be a non-empty string of at most 160 characters")
         if intent not in QUERY_INTENTS:
             raise ValueError("intent is not allowed")
+        if query_origin not in QUERY_ORIGINS:
+            raise ValueError("query_origin is not allowed")
+        if query_origin in {"user_exact", "user_expanded"} and not parent_keyword:
+            raise ValueError("user keyword query requires parent_keyword")
         if not rationale or len(rationale) > 500:
             raise ValueError("rationale must be a non-empty string of at most 500 characters")
         object.__setattr__(self, "query_id", query_id)
@@ -159,6 +199,12 @@ class PlannedQuery:
         object.__setattr__(self, "intent", intent)
         object.__setattr__(self, "rationale", rationale)
         object.__setattr__(self, "expected_visuals", expected_visuals)
+        object.__setattr__(self, "query_origin", query_origin)
+        object.__setattr__(
+            self,
+            "parent_keyword",
+            parent_keyword if query_origin in {"user_exact", "user_expanded"} else None,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -167,6 +213,8 @@ class PlannedQuery:
             "intent": self.intent,
             "rationale": self.rationale,
             "expected_visuals": list(self.expected_visuals),
+            "query_origin": self.query_origin,
+            "parent_keyword": self.parent_keyword,
         }
 
 
@@ -274,6 +322,7 @@ class AdResearchModel:
         )
         fallback = _fallback_query_plan(
             seed_keywords=seed_keywords,
+            country=country,
             category=category,
             round_number=round_number,
             round_review=review,
@@ -287,18 +336,26 @@ class AdResearchModel:
                     "only, with this exact schema: "
                     '{"queries":[{"query_id":"r1_q01","query":"short query",'
                     '"intent":"game_gambling","rationale":"why this query",'
-                    '"expected_visuals":["slot reels"]}],'
+                    '"expected_visuals":["slot reels"],"query_origin":"user_expanded",'
+                    '"parent_keyword":"original keyword"}],'
                     '"summary":"optional short round summary"}. '
                     "queries must be an array of at most 12 independent objects. Every object "
-                    "must include query_id, query, intent, rationale, and expected_visuals. "
-                    "query_id must be from r1_q01 through r6_q12. expected_visuals must be "
+                    "must include query_id, query, intent, rationale, expected_visuals, "
+                    "query_origin, and parent_keyword. query_id must be from r1_q01 through "
+                    "r10_q12. query_origin must be exactly one of: user_exact, user_expanded, "
+                    "model_exploration, model_recovery. User-origin queries must identify one "
+                    "original user keyword in parent_keyword; model-origin queries must use null. "
+                    "Treat multiple user keywords as independent queries and never force them into "
+                    "one AND-style combined query. Reserve about 80 percent of the query budget "
+                    "for exact or expanded user-keyword families and 20 percent for model "
+                    "exploration or recovery. expected_visuals must be "
                     "an array of at "
                     "most 8 trimmed, non-empty, case-insensitively unique strings of at most 80 "
                     "characters. intent must be exactly one of: game_gambling, sports_betting, "
                     "local_exploration, format_exploration. Create short public-library queries "
                     "for the requested country/category. Use only the controlled round review to "
                     "change retrieval direction. When round_review.quality_supplement_mode is true "
-                    "(only rounds 5 and 6), prioritize the controlled query_performance, "
+                    "(only rounds 5 through 10), prioritize the controlled query_performance, "
                     "priority_gaps, and missing_signals to fill P1-P3 visual modes "
                     "(game_gambling, sports_betting, gambling_adjacent); do not plan P4/unrelated "
                     "queries merely to fill count. Do not use or request ad text, URLs, OCR, or "
@@ -324,6 +381,10 @@ class AdResearchModel:
             data,
             fallback=fallback,
             round_review=review,
+            seed_keywords=seed_keywords,
+            country=country,
+            category=category,
+            round_number=round_number,
         )
 
     async def score_visual(
@@ -514,9 +575,13 @@ def _round_review_from_summary(
             query_performance.append(
                 QueryPerformance(
                     query_id=query_id,
-                    collected_count=_non_negative_int(item.get("collected_count")),
-                    selected_count=_non_negative_int(item.get("selected_count")),
-                    rejected_count=_non_negative_int(item.get("rejected_count")),
+                    collected_count=item.get("collected_count"),
+                    technical_qualified_count=item.get("technical_qualified_count"),
+                    scored_count=item.get("scored_count"),
+                    quality_candidate_count=item.get("quality_candidate_count"),
+                    best_visual_score=item.get("best_visual_score"),
+                    final_selected_count=item.get("final_selected_count"),
+                    rejected_count=item.get("rejected_count"),
                 )
             )
     technical = source.get("technical_rejection_summary")
@@ -551,6 +616,10 @@ def _query_plan_from_response(
     *,
     fallback: QueryPlan,
     round_review: RoundReview | None,
+    seed_keywords: list[str],
+    country: str,
+    category: str,
+    round_number: int,
 ) -> QueryPlan:
     if not isinstance(data, dict) or not isinstance(data.get("queries"), list):
         return fallback
@@ -569,6 +638,8 @@ def _query_plan_from_response(
                 expected_visuals=tuple(
                     _controlled_text_list(item.get("expected_visuals"), limit=8, width=80)
                 ),
+                query_origin=item.get("query_origin"),
+                parent_keyword=item.get("parent_keyword"),
             )
         except (TypeError, ValueError):
             continue
@@ -581,9 +652,16 @@ def _query_plan_from_response(
         seen_queries.add(normalized_query)
     if not planned:
         return fallback
+    normalized = _normalize_planned_queries(
+        tuple(planned),
+        seed_keywords=seed_keywords,
+        country=country,
+        category=category,
+        round_number=round_number,
+    )
     summary = _short_text(data.get("summary"), limit=500)
     return QueryPlan(
-        queries=tuple(planned),
+        queries=normalized,
         round_review=round_review,
         summary=summary,
     )
@@ -592,27 +670,185 @@ def _query_plan_from_response(
 def _fallback_query_plan(
     *,
     seed_keywords: list[str],
+    country: str,
     category: str,
     round_number: int,
     round_review: RoundReview | None,
 ) -> QueryPlan:
-    values = _unique_queries(seed_keywords or [category])[:12]
-    if not values:
-        values = ["public ads"]
-    safe_round = _safe_round_number(round_number)
-    return QueryPlan(
-        queries=tuple(
-            PlannedQuery(
-                query_id=f"r{safe_round}_q{index:02d}",
-                query=query,
-                intent="local_exploration",
-                rationale="Deterministic fallback from the supplied seed keyword.",
-                expected_visuals=(),
-            )
-            for index, query in enumerate(values, start=1)
-        ),
-        round_review=round_review,
+    queries = _normalize_planned_queries(
+        (),
+        seed_keywords=seed_keywords,
+        country=country,
+        category=category,
+        round_number=round_number,
     )
+    if not queries:
+        safe_round = _safe_round_number(round_number)
+        queries = (
+            PlannedQuery(
+                query_id=f"r{safe_round}_q01",
+                query="public ads",
+                intent="local_exploration",
+                rationale="Deterministic model recovery query.",
+                query_origin="model_recovery",
+            ),
+        )
+    return QueryPlan(queries=queries, round_review=round_review)
+
+
+def _normalize_planned_queries(
+    planned: tuple[PlannedQuery, ...],
+    *,
+    seed_keywords: list[str],
+    country: str,
+    category: str,
+    round_number: int,
+    max_queries: int = 10,
+) -> tuple[PlannedQuery, ...]:
+    keywords = _unique_queries(seed_keywords)
+    limit = min(max(_non_negative_int(max_queries), 1), 12)
+    safe_round = _safe_round_number(round_number)
+    output: list[PlannedQuery] = []
+    seen: set[str] = set()
+
+    def add(
+        query: Any,
+        intent: QueryIntent,
+        rationale: str,
+        origin: QueryOrigin,
+        parent: str | None = None,
+        visuals: tuple[str, ...] = (),
+    ) -> None:
+        normalized_query = " ".join(str(query).split())
+        query_key = normalized_query.casefold()
+        if (
+            not normalized_query
+            or len(normalized_query) > 160
+            or query_key in seen
+            or len(output) >= limit
+        ):
+            return
+        seen.add(query_key)
+        output.append(
+            PlannedQuery(
+                query_id=f"r{safe_round}_q{len(output) + 1:02d}",
+                query=normalized_query,
+                intent=intent,
+                rationale=rationale,
+                expected_visuals=tuple(visuals),
+                query_origin=origin,
+                parent_keyword=parent,
+            )
+        )
+
+    for keyword in keywords:
+        add(
+            keyword,
+            "game_gambling",
+            "Execute the original user keyword.",
+            "user_exact",
+            keyword,
+        )
+
+    if not keywords:
+        for item in planned:
+            origin: QueryOrigin = (
+                item.query_origin
+                if item.query_origin in {"model_exploration", "model_recovery"}
+                else "model_exploration"
+            )
+            add(
+                item.query,
+                item.intent,
+                item.rationale,
+                origin,
+                visuals=item.expected_visuals,
+            )
+        add(
+            f"{category} {country}",
+            "local_exploration",
+            "Deterministic model recovery query.",
+            "model_recovery",
+        )
+        return tuple(output)
+
+    user_target = min(limit, max(len(keywords), ceil(limit * 0.8)))
+    keyword_by_key = {keyword.casefold(): keyword for keyword in keywords}
+    for item in planned:
+        parent = _short_text(item.parent_keyword)
+        canonical_parent = keyword_by_key.get(parent.casefold()) if parent else None
+        if item.query_origin != "user_expanded" or not canonical_parent:
+            continue
+        add(
+            item.query,
+            item.intent,
+            item.rationale,
+            "user_expanded",
+            canonical_parent,
+            item.expected_visuals,
+        )
+        if sum(query.query_origin.startswith("user_") for query in output) >= user_target:
+            break
+
+    suffixes = _unique_queries(
+        [category, country, f"{category} {country}", "bonus", "app", "game", "promo", "short video"]
+    )
+    index = 0
+    max_expansion_attempts = limit * (len(suffixes) + limit)
+    while (
+        sum(query.query_origin.startswith("user_") for query in output) < user_target
+        and index < max_expansion_attempts
+    ):
+        parent = keywords[index % len(keywords)]
+        suffix_index = index // len(keywords)
+        suffix = (
+            suffixes[suffix_index]
+            if suffix_index < len(suffixes)
+            else f"{category or 'public ads'} variation {suffix_index - len(suffixes) + 1}"
+        )
+        add(
+            f"{parent} {suffix}",
+            "game_gambling",
+            "User-keyword recovery expansion.",
+            "user_expanded",
+            parent,
+        )
+        index += 1
+
+    for item in planned:
+        if item.query_origin not in {"model_exploration", "model_recovery"}:
+            continue
+        add(
+            item.query,
+            item.intent,
+            item.rationale,
+            item.query_origin,
+            visuals=item.expected_visuals,
+        )
+
+    recovery_queries = _unique_queries(
+        [
+            f"{category} {country}",
+            f"{category} short video {country}",
+            f"{category} creative {country}",
+            "public ads",
+        ]
+    )
+    recovery_index = 0
+    while len(output) < limit:
+        query = (
+            recovery_queries[recovery_index]
+            if recovery_index < len(recovery_queries)
+            else f"public ads recovery {recovery_index + 1}"
+        )
+        add(
+            query,
+            "local_exploration",
+            "Deterministic model recovery query.",
+            "model_recovery",
+        )
+        recovery_index += 1
+    return tuple(output[:limit])
 
 
 def _safe_round_number(round_number: Any) -> int:
@@ -620,7 +856,7 @@ def _safe_round_number(round_number: Any) -> int:
         parsed = int(round_number)
     except (TypeError, ValueError):
         parsed = 1
-    return min(max(parsed, 1), 6)
+    return min(max(parsed, 1), 10)
 
 
 def _controlled_text_list(value: Any, *, limit: int, width: int = 160) -> list[str]:
@@ -662,6 +898,16 @@ def _non_negative_int(value: Any) -> int:
     if not isinstance(value, int | float) or isinstance(value, bool):
         return 0
     return max(int(value), 0)
+
+
+def _safe_best_visual_score(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not isfinite(parsed):
+        return 0.0
+    return round(max(0.0, min(100.0, parsed)), 2)
 
 
 def _unique_queries(values: list[Any]) -> list[str]:
