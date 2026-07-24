@@ -402,7 +402,6 @@ class AdResearchModel:
                 "type": "text",
                 "text": json.dumps(
                     {
-                        "category": category,
                         "media": {
                             "duration_seconds": duration_seconds,
                             "frame_count": len(media.local_frame_paths),
@@ -486,30 +485,33 @@ class AdResearchModel:
 
 
 _VISUAL_SCORING_SYSTEM_PROMPT = """
-Score this public advertisement only from the supplied video-frame images. Return one JSON object
-only with: visual_priority, gameplay_gambling_points, multi_signal_style_points,
-betting_mechanism_points, gambling_visual_style_points, visual_clarity_points,
-media_quality_points, analysis_confidence, gambling_signals, game_visual_present,
-visual_evidence, retrieval_hints, uncertain. Do not return visual_total.
+Evaluate only the supplied video-frame images and supplied media facts. Return one JSON object only
+with exactly these required properties: visual_priority, game_context_present,
+betting_context_present, money_only_promo, negative_visual_type, component_scores,
+analysis_confidence, visual_evidence, retrieval_hints. Do not return visual_total or properties not
+listed here.
 
-Use these strict maximums: gameplay_gambling_points 40, multi_signal_style_points 20,
-betting_mechanism_points 15, gambling_visual_style_points 10, visual_clarity_points 10,
-media_quality_points 5. Score only visible content in the supplied images. Ignore all information
-outside those images.
+visual_priority must be exactly one of game_gambling, sports_betting, gambling_adjacent, or
+unrelated. Use game_gambling only when visible game context and a visible betting mechanism are
+both present. Use sports_betting only when visible sports and a visible betting mechanism are both
+present. Use gambling_adjacent only for visible related clues that do not meet those requirements.
+Use unrelated when visible evidence is insufficient.
 
-visual_priority must be exactly one of:
-- game_gambling: direct gambling gameplay, OR clear game visuals plus at least two visible
-  gambling, reward, or gamification signals. Evidence can include coins, crystals, WIN, VIP,
-  bonus, lottery, reels, card tables, or similar. Prefer this class when both game and gambling
-  are visible.
-- sports_betting: both a sports match and odds, betting, amounts, wallet, balance, or settlement
-  are visible. Ordinary sports, scores, or prediction channels are not sports_betting.
-- gambling_adjacent: only limited related visual clues are visible.
-- unrelated: insufficient visible evidence.
+game_context_present, betting_context_present, and money_only_promo must be booleans based only
+on visible evidence. negative_visual_type must be exactly one of none, recruitment_income,
+money_wallet_only, story_talking_head, ordinary_game, or weak_gambling_game.
 
-visual_evidence must be a list of objects with frame_index and detail. gambling_signals and
-retrieval_hints must be short lists of visible visual cues. Do not return a recommendation,
-category_match, category_confidence, or is_obviously_unrelated field.
+component_scores must be an object with exactly these numeric properties and inclusive maximums:
+- gameplay_ui <= 35
+- betting_mechanism <= 25
+- in_game_value_ui <= 15
+- gambling_style <= 10
+- visual_clarity <= 10
+- media_quality <= 5
+
+analysis_confidence must be a number from 0 to 1. visual_evidence must be a short list of objects
+with frame_index and detail describing visible pixels. retrieval_hints must be a short list of
+visible visual cues. Ground every property only in the supplied images and media facts.
 """.strip()
 
 

@@ -19,6 +19,7 @@ from backend.app.services.ad_research_model import (
     _validated_visual_score,
 )
 from backend.app.services.ad_research_orchestrator import _planner_query_performance
+from backend.app.services.ad_research_ranking import is_quality_candidate
 
 
 class Lease:
@@ -530,7 +531,7 @@ async def test_model_planner_invalid_model_response_uses_deterministic_fallback(
 
 
 @pytest.mark.asyncio
-async def test_visual_score_sends_exact_pure_visual_metadata_and_three_input_images(
+async def test_visual_score_sends_new_pure_visual_contract_and_quality_candidate(
     monkeypatch, tmp_path
 ) -> None:
     captured: dict[str, object] = {}
@@ -543,31 +544,74 @@ async def test_visual_score_sends_exact_pure_visual_metadata_and_three_input_ima
         media=media,
     )
 
+    system_prompt = captured["input"][0]["content"]
     user_content = captured["input"][1]["content"]
     text_blocks = [part["text"] for part in user_content if part["type"] == "input_text"]
     assert len(text_blocks) == 1
     assert json.loads(text_blocks[0]) == {
-        "category": "gambling",
         "media": {"duration_seconds": 15.0, "frame_count": 3},
     }
     assert len([part for part in user_content if part["type"] == "input_image"]) == 3
+
+    required_fields = (
+        "visual_priority",
+        "game_context_present",
+        "betting_context_present",
+        "money_only_promo",
+        "negative_visual_type",
+        "component_scores",
+        "analysis_confidence",
+        "visual_evidence",
+        "retrieval_hints",
+    )
+    component_limits = (
+        "gameplay_ui <= 35",
+        "betting_mechanism <= 25",
+        "in_game_value_ui <= 15",
+        "gambling_style <= 10",
+        "visual_clarity <= 10",
+        "media_quality <= 5",
+    )
+    assert all(field in system_prompt for field in required_fields)
+    assert all(limit in system_prompt for limit in component_limits)
+
     forbidden_terms = (
+        "gameplay_gambling_points",
+        "multi_signal_style_points",
+        "betting_mechanism_points",
+        "gambling_visual_style_points",
+        "visual_clarity_points",
+        "media_quality_points",
+        "game_visual_present",
+        "gambling_signals",
+        "uncertain",
+        "category_match",
+        "is_obviously_unrelated",
+        "gameplay_ui <= 40",
+        "multi_signal_style_points 20",
+        "betting_mechanism_points 15",
+        "gambling_visual_style_points 10",
+        "visual_clarity_points 10",
+        "media_quality_points 5",
         "active_days",
         "advertiser",
+        "category",
         "\u4e3b\u9875",
         "\u6b63\u6587",
         "\u6807\u9898",
         "CTA",
         "URL",
         "\u843d\u5730\u9875",
-        "query",
+        "keyword",
         "\u5173\u952e\u8bcd",
+        "query_origin",
         "public_continuity_points",
     )
-    request_text = "\n".join([str(captured["input"][0]["content"]), *text_blocks])
+    request_text = "\n".join([system_prompt, *text_blocks])
     assert all(term.casefold() not in request_text.casefold() for term in forbidden_terms)
     assert captured["reasoning"] == {"effort": "none"}
-    assert result["component_scores"]["gameplay_ui"] == 35.0
+    assert result["visual_total"] > 0
+    assert is_quality_candidate(result)
     await client.aclose()
 
 
