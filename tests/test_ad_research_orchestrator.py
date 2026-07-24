@@ -13,7 +13,7 @@ from backend.app.core.config import get_settings
 from backend.app.db.base import Base
 from backend.app.schemas.ad_research import AdResearchCreateRequest, CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia, TechnicalQualification
-from backend.app.services.ad_research_model import PlannedQuery, QueryPlan
+from backend.app.services.ad_research_model import AdResearchModel, PlannedQuery, QueryPlan
 from backend.app.services.ad_research_orchestrator import AdResearchOrchestrator
 from backend.app.services.ad_research_service import AdResearchService
 
@@ -204,7 +204,14 @@ class QueryCollector:
         return self.results_by_query.get(query.casefold().strip(), [])
 
 
-async def run_custom(*, collector: Any, media: Media, model: Model, target_count: int):
+async def run_custom(
+    *,
+    collector: Any,
+    media: Media,
+    model: Any,
+    target_count: int,
+    keywords: list[str] | None = None,
+):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -218,6 +225,7 @@ async def run_custom(*, collector: Any, media: Media, model: Model, target_count
                     external_user_id=f"custom-{target_count}-{id(collector)}",
                     country="IN",
                     category="gambling",
+                    keywords=keywords or [],
                     target_count=target_count,
                 ),
             )
@@ -254,6 +262,44 @@ async def test_orchestrator_completes_early_when_p1_reaches_target() -> None:
     assert len(result.ads) == 2
     assert len(model.plan_calls) == 1
     assert result.summary["priority_counts"]["game_gambling"] == 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_executes_all_user_exact_slices_before_early_completion(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    get_settings.cache_clear()
+    keywords = [f"keyword-{index:02d}" for index in range(1, 25)]
+    first = candidate(202)
+
+    class ContractPlanningModel(Model):
+        def __init__(self) -> None:
+            super().__init__(score_by_ad_id={first.ad_library_id: 90})
+            self.planner = AdResearchModel()
+
+        async def plan_queries(self, **kwargs: Any) -> QueryPlan:
+            self.plan_calls.append(kwargs)
+            return await self.planner.plan_queries(**kwargs)
+
+    model = ContractPlanningModel()
+    collector = QueryCollector({keywords[0]: [first]})
+    try:
+        result = await run_custom(
+            collector=collector,
+            media=Media(),
+            model=model,
+            target_count=1,
+            keywords=keywords,
+        )
+    finally:
+        get_settings.cache_clear()
+
+    executed_exact = set(collector.queries).intersection(keywords)
+    assert result.status == "completed"
+    assert len(model.plan_calls) == 3
+    assert executed_exact == set(keywords)
+    assert result.summary["rounds"][-1]["round"] == 3
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,8 @@ class _ResolvedQuery:
     query_id: str
     query: str
     intent: str
+    query_origin: str | None = None
+    parent_keyword: str | None = None
 
 
 class AdResearchOrchestrator:
@@ -83,6 +85,12 @@ class AdResearchOrchestrator:
         used_query_ids: set[str] = set()
         used_query_keys: set[str] = set()
         used_queries: list[str] = []
+        required_user_exact_keys = {
+            key
+            for keyword in (job.seed_keywords_json or [])
+            if (key := _normalized_query_key(keyword))
+        }
+        executed_user_exact_keys: set[str] = set()
         round_summaries: list[dict[str, Any]] = []
         all_query_metrics: list[dict[str, Any]] = []
         raw_collected = 0
@@ -136,6 +144,10 @@ class AdResearchOrchestrator:
                     country=job.country,
                     limit=min(PER_QUERY_LIMIT, remaining),
                 )
+                if query.query_origin == "user_exact":
+                    executed_key = _normalized_query_key(query.parent_keyword or query.query)
+                    if executed_key:
+                        executed_user_exact_keys.add(executed_key)
                 ads = collected_ads[:remaining]
                 collected_queries.append(query)
                 raw_count = len(ads)
@@ -276,7 +288,8 @@ class AdResearchOrchestrator:
 
             has_scored_target = len(scored) >= job.target_count
             has_p1_target = priority_counts["game_gambling"] >= job.target_count
-            if has_p1_target:
+            user_exact_covered = required_user_exact_keys <= executed_user_exact_keys
+            if has_p1_target and user_exact_covered:
                 return await self._complete(
                     session=session,
                     job=job,
@@ -466,6 +479,10 @@ class AdResearchOrchestrator:
             await session.commit()
 
 
+def _normalized_query_key(value: Any) -> str:
+    return " ".join(str(value).split()).casefold() if value is not None else ""
+
+
 def _new_queries(
     planned_queries: QueryPlan | list[str],
     used_query_ids: set[str],
@@ -481,6 +498,8 @@ def _new_queries(
                 query_id=planned_query.query_id,
                 query=planned_query.query,
                 intent=planned_query.intent,
+                query_origin=planned_query.query_origin,
+                parent_keyword=planned_query.parent_keyword,
             )
             for planned_query in planned_queries.queries
         )
@@ -531,6 +550,8 @@ def _new_queries(
                 query_id=planned_query.query_id,
                 query=normalized,
                 intent=planned_query.intent,
+                query_origin=planned_query.query_origin,
+                parent_keyword=planned_query.parent_keyword,
             )
         )
     return queries, skipped_diagnostics

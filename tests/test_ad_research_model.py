@@ -214,6 +214,60 @@ def test_user_exact_keywords_cover_twenty_four_across_deterministic_round_slices
     assert round_four_exact == keywords[:10]
 
 
+def test_max_length_keyword_keeps_eighty_twenty_budget_with_safe_expansions() -> None:
+    keyword = "x" * 160
+
+    result = _normalize_planned_queries(
+        (),
+        seed_keywords=[keyword],
+        country="IN",
+        category="gambling",
+        round_number=1,
+    )
+
+    user_family = [query for query in result if query.query_origin.startswith("user_")]
+    model_family = [query for query in result if query.query_origin.startswith("model_")]
+    expanded = [query for query in result if query.query_origin == "user_expanded"]
+    assert len(user_family) == 8
+    assert len(model_family) == 2
+    assert len(expanded) == 7
+    assert all(query.parent_keyword == keyword for query in expanded)
+    assert all(0 < len(query.query) <= 160 for query in result)
+    assert all(query.query != keyword for query in expanded)
+    assert len({query.query.casefold() for query in result}) == 10
+
+
+def test_max_length_keyword_slices_keep_reachable_per_round_budget() -> None:
+    keywords = [f"{index:02d}" + ("x" * 158) for index in range(1, 25)]
+
+    plans = [
+        _normalize_planned_queries(
+            (),
+            seed_keywords=keywords,
+            country="IN",
+            category="gambling",
+            round_number=round_number,
+        )
+        for round_number in range(1, 4)
+    ]
+
+    assert [
+        sum(query.query_origin == "user_exact" for query in plan) for plan in plans
+    ] == [10, 10, 4]
+    assert [
+        sum(query.query_origin.startswith("user_") for query in plan) for plan in plans
+    ] == [10, 10, 8]
+    assert [
+        sum(query.query_origin.startswith("model_") for query in plan) for plan in plans
+    ] == [0, 0, 2]
+    assert all(len(query.query) <= 160 for plan in plans for query in plan)
+    round_three_expanded = [
+        query for query in plans[2] if query.query_origin == "user_expanded"
+    ]
+    assert len(round_three_expanded) == 4
+    assert all(query.parent_keyword in keywords[20:24] for query in round_three_expanded)
+
+
 def test_query_performance_accepts_round_ten_and_safe_metrics() -> None:
     payload = QueryPerformance(
         query_id="r10_q12",

@@ -812,14 +812,14 @@ def _normalize_planned_queries(
         and index < max_expansion_attempts
     ):
         parent = exact_keywords[index % len(exact_keywords)]
-        suffix_index = index // len(keywords)
+        suffix_index = index // len(exact_keywords)
         suffix = (
             suffixes[suffix_index]
             if suffix_index < len(suffixes)
             else f"{category or 'public ads'} variation {suffix_index - len(suffixes) + 1}"
         )
         add(
-            f"{parent} {suffix}",
+            _safe_user_expansion(parent, suffix),
             "game_gambling",
             "User-keyword recovery expansion.",
             "user_expanded",
@@ -861,6 +861,16 @@ def _normalize_planned_queries(
         )
         recovery_index += 1
     return tuple(output[:limit])
+
+
+def _safe_user_expansion(parent_keyword: str, suffix: str, *, limit: int = 160) -> str:
+    normalized_parent = " ".join(parent_keyword.split())
+    normalized_suffix = " ".join(suffix.split())
+    suffix_budget = max(limit - 2, 1)
+    safe_suffix = normalized_suffix[:suffix_budget].rstrip() or "ad"
+    parent_budget = max(limit - len(safe_suffix) - 1, 1)
+    safe_parent = normalized_parent[:parent_budget].rstrip() or normalized_parent[:1]
+    return f"{safe_parent} {safe_suffix}"[:limit].rstrip()
 
 
 def _safe_round_number(round_number: Any) -> int:
