@@ -153,27 +153,28 @@ class Model:
         total = self.score_by_ad_id.get(marker, 80.0)
         confidence = self.confidence_by_ad_id.get(marker, 0.9)
         remaining = max(float(total), 0.0)
-        dimensions: dict[str, float] = {}
+        components: dict[str, float] = {}
         for key, maximum in (
-            ("gameplay_gambling_points", 40.0),
-            ("multi_signal_style_points", 20.0),
-            ("betting_mechanism_points", 15.0),
-            ("gambling_visual_style_points", 10.0),
-            ("visual_clarity_points", 10.0),
-            ("media_quality_points", 5.0),
+            ("gameplay_ui", 35.0),
+            ("betting_mechanism", 25.0),
+            ("in_game_value_ui", 15.0),
+            ("gambling_style", 10.0),
+            ("visual_clarity", 10.0),
+            ("media_quality", 5.0),
         ):
-            dimensions[key] = min(remaining, maximum)
-            remaining -= dimensions[key]
+            components[key] = min(remaining, maximum)
+            remaining -= components[key]
+        priority = self.visual_priority_by_ad_id.get(marker, "game_gambling")
         return {
-            "visual_priority": self.visual_priority_by_ad_id.get(marker, "game_gambling"),
-            **dimensions,
-            "visual_total": -9999,
+            "visual_priority": priority,
+            "game_context_present": priority != "unrelated",
+            "betting_context_present": priority in {"game_gambling", "sports_betting"},
+            "money_only_promo": False,
+            "negative_visual_type": "none",
+            "component_scores": components,
             "analysis_confidence": confidence,
-            "gambling_signals": [f"visible-{marker}", "slot ui"],
-            "game_visual_present": True,
             "visual_evidence": [{"frame_index": 0, "detail": "slot ui"}],
             "retrieval_hints": ["slot ui"],
-            "uncertain": False,
         }
 
 
@@ -321,7 +322,7 @@ async def test_orchestrator_uses_rounds_five_and_six_before_p4_fill() -> None:
     assert result.status == "completed"
     assert len(model.plan_calls) == 6
     assert result.summary["rounds"][-1]["round"] == 6
-    assert result.summary["quality_summary"]["fallback_used"] is True
+    assert result.summary["quality_summary"]["quality_grade"] == "fallback_used"
     for call in model.plan_calls[4:]:
         gap = call["gap_summary"]
         assert gap["quality_supplement_mode"] is True
@@ -952,11 +953,10 @@ async def test_orchestrator_marks_only_selected_unrelated_ads_as_transparent_fal
         "insufficient_high_relevance_candidates",
     ]
     assert result.summary["quality_summary"] == {
-        "game_gambling_count": 1,
-        "sports_betting_count": 1,
-        "gambling_adjacent_count": 1,
+        "qualified_visual_count": 3,
+        "quality_target_met": False,
         "fallback_count": 1,
-        "fallback_used": True,
+        "quality_grade": "fallback_used",
     }
 
 
@@ -973,29 +973,30 @@ async def test_orchestrator_final_score_is_exact_validated_visual_total_without_
     )
 
     ad = result.ads[0]
-    recomputed_visual_total = sum(
-        ad[key]
-        for key in (
-            "gameplay_gambling_points",
-            "multi_signal_style_points",
-            "betting_mechanism_points",
-            "gambling_visual_style_points",
-            "visual_clarity_points",
-            "media_quality_points",
-        )
-    )
+    recomputed_visual_total = sum(ad["component_scores"].values())
     assert ad["final_score"] == ad["visual_total"] == recomputed_visual_total == 80.0
     assert ad["active_days"] == 30
     assert {
         "visual_priority",
-        "gambling_signals",
-        "game_visual_present",
+        "game_context_present",
+        "betting_context_present",
+        "negative_visual_type",
+        "component_scores",
         "is_fallback",
         "fallback_reason",
     } <= ad.keys()
     assert ad["is_fallback"] is False
     assert ad["fallback_reason"] is None
-    assert "public_continuity_points" not in ad
+    assert not {
+        "category_match",
+        "is_obviously_unrelated",
+        "gameplay_gambling_points",
+        "multi_signal_style_points",
+        "betting_mechanism_points",
+        "gambling_visual_style_points",
+        "visual_clarity_points",
+        "media_quality_points",
+    }.intersection(ad)
 
 
 @pytest.mark.asyncio

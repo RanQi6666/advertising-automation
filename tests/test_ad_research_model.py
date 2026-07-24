@@ -54,18 +54,21 @@ def gateway_model_that_captures_request(
                 "output_text": json.dumps(
                     {
                         "visual_priority": "game_gambling",
-                        "gameplay_gambling_points": 40,
-                        "multi_signal_style_points": 8,
-                        "betting_mechanism_points": 4,
-                        "gambling_visual_style_points": 2,
-                        "visual_clarity_points": 10,
-                        "media_quality_points": 5,
+                        "game_context_present": True,
+                        "betting_context_present": True,
+                        "money_only_promo": False,
+                        "negative_visual_type": "none",
+                        "component_scores": {
+                            "gameplay_ui": 35,
+                            "betting_mechanism": 20,
+                            "in_game_value_ui": 12,
+                            "gambling_style": 8,
+                            "visual_clarity": 9,
+                            "media_quality": 5,
+                        },
                         "analysis_confidence": 0.8,
-                        "gambling_signals": ["slot reels", "coins"],
-                        "game_visual_present": True,
                         "visual_evidence": [{"frame_index": 0, "detail": "slot reels are visible"}],
                         "retrieval_hints": ["slot ui"],
-                        "uncertain": False,
                     }
                 )
             },
@@ -564,49 +567,64 @@ async def test_visual_score_sends_exact_pure_visual_metadata_and_three_input_ima
     request_text = "\n".join([str(captured["input"][0]["content"]), *text_blocks])
     assert all(term.casefold() not in request_text.casefold() for term in forbidden_terms)
     assert captured["reasoning"] == {"effort": "none"}
-    assert result["gameplay_gambling_points"] == 40.0
+    assert result["component_scores"]["gameplay_ui"] == 35.0
     await client.aclose()
 
 
-def test_visual_score_validation_clamps_dimensions_recomputes_total_and_sanitizes_output() -> None:
+def test_visual_score_validation_uses_component_contract_and_negative_caps() -> None:
     result = _validated_visual_score(
         {
-            "visual_priority": "not-allowed",
-            "gameplay_gambling_points": 99,
-            "multi_signal_style_points": -4,
-            "betting_mechanism_points": 99,
-            "gambling_visual_style_points": 99,
-            "visual_clarity_points": 99,
-            "media_quality_points": 99,
-            "visual_total": 99999,
+            "visual_priority": "game_gambling",
+            "game_context_present": True,
+            "betting_context_present": True,
+            "money_only_promo": False,
+            "negative_visual_type": "weak_gambling_game",
+            "component_scores": {
+                "gameplay_ui": 99,
+                "betting_mechanism": 99,
+                "in_game_value_ui": -4,
+                "gambling_style": 99,
+                "visual_clarity": 99,
+                "media_quality": 99,
+            },
             "analysis_confidence": 9,
-            "gambling_signals": ["  slot reels  ", "", 8, "x" * 121],
-            "game_visual_present": 1,
             "visual_evidence": [
-                {"frame_index": 0, "detail": " valid ", "ignored": "x"},
+                {"frame_index": 0, "detail": "valid"},
                 {"frame_index": 5, "detail": "out of range"},
-                {"frame_index": "x", "detail": "invalid"},
             ],
-            "retrieval_hints": ["  slot ui  ", "", 9, "x" * 121],
-            "uncertain": True,
+            "retrieval_hints": ["slot ui"],
+            "category_match": True,
+            "is_obviously_unrelated": False,
         },
         frame_count=3,
     )
 
-    assert result["visual_priority"] == "unrelated"
-    assert result["gameplay_gambling_points"] == 40.0
-    assert result["multi_signal_style_points"] == 0.0
-    assert result["betting_mechanism_points"] == 15.0
-    assert result["gambling_visual_style_points"] == 10.0
-    assert result["visual_clarity_points"] == 10.0
-    assert result["media_quality_points"] == 5.0
-    assert result["visual_total"] == 80.0
+    assert result["visual_priority"] == "game_gambling"
+    assert result["component_scores"] == {
+        "gameplay_ui": 35.0,
+        "betting_mechanism": 25.0,
+        "in_game_value_ui": 0.0,
+        "gambling_style": 10.0,
+        "visual_clarity": 10.0,
+        "media_quality": 5.0,
+    }
+    assert result["visual_total"] == 49.0
     assert result["analysis_confidence"] == 1.0
-    assert result["gambling_signals"] == ["slot reels", "8"]
-    assert result["game_visual_present"] is True
-    assert result["visual_evidence"] == [{"frame_index": 0, "detail": "valid"}]
-    assert result["retrieval_hints"] == ["slot ui", "9"]
-    assert result["uncertain"] is True
+    assert result["visual_evidence"] == [
+        {"frame_index": 0, "detail": "valid"},
+        {"frame_index": 5, "detail": "out of range"},
+    ]
+    assert result["retrieval_hints"] == ["slot ui"]
+    assert "category_match" not in result
+    assert "is_obviously_unrelated" not in result
+    assert not {
+        "gameplay_gambling_points",
+        "multi_signal_style_points",
+        "betting_mechanism_points",
+        "gambling_visual_style_points",
+        "visual_clarity_points",
+        "media_quality_points",
+    }.intersection(result)
 
 
 @pytest.mark.asyncio
@@ -621,7 +639,7 @@ async def test_mock_visual_score_uses_only_prepared_media(tmp_path, monkeypatch)
         media=prepared_media_with_three_frames(tmp_path),
     )
 
-    assert result["media_quality_points"] == 5.0
+    assert result["component_scores"]["media_quality"] == 5.0
     assert result["visual_total"] == 5.0
     assert result["visual_priority"] == "unrelated"
 

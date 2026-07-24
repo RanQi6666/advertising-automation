@@ -24,6 +24,13 @@ from backend.app.services.ad_research_model import (
     QueryPlan,
     _validated_visual_score,
 )
+from backend.app.services.ad_research_ranking import (
+    quality_summary as build_quality_summary,
+)
+from backend.app.services.ad_research_ranking import (
+    select_ranked,
+    visual_sort_key,
+)
 from backend.app.services.ad_research_service import AdResearchService
 
 STANDARD_ROUNDS = 4
@@ -598,21 +605,15 @@ def _public_result(
         "platforms": ad.platforms,
         "final_score": visual_total,
         "visual_total": visual_total,
-        "visual_priority": str(visual_score.get("visual_priority") or "unrelated"),
-        "gameplay_gambling_points": float(visual_score.get("gameplay_gambling_points") or 0),
-        "multi_signal_style_points": float(visual_score.get("multi_signal_style_points") or 0),
-        "betting_mechanism_points": float(visual_score.get("betting_mechanism_points") or 0),
-        "gambling_visual_style_points": float(
-            visual_score.get("gambling_visual_style_points") or 0
-        ),
-        "visual_clarity_points": float(visual_score.get("visual_clarity_points") or 0),
-        "media_quality_points": float(visual_score.get("media_quality_points") or 0),
-        "analysis_confidence": float(visual_score.get("analysis_confidence") or 0),
-        "gambling_signals": list(visual_score.get("gambling_signals") or []),
-        "game_visual_present": bool(visual_score.get("game_visual_present")),
-        "visual_evidence": list(visual_score.get("visual_evidence") or []),
-        "retrieval_hints": list(visual_score.get("retrieval_hints") or []),
-        "uncertain": bool(visual_score.get("uncertain")),
+        "visual_priority": visual_score["visual_priority"],
+        "game_context_present": visual_score["game_context_present"],
+        "betting_context_present": visual_score["betting_context_present"],
+        "money_only_promo": visual_score["money_only_promo"],
+        "negative_visual_type": visual_score["negative_visual_type"],
+        "component_scores": dict(visual_score["component_scores"]),
+        "analysis_confidence": float(visual_score["analysis_confidence"]),
+        "visual_evidence": list(visual_score["visual_evidence"]),
+        "retrieval_hints": list(visual_score["retrieval_hints"]),
         "is_fallback": False,
         "fallback_reason": None,
         "media": _public_media(media),
@@ -630,50 +631,24 @@ def _public_media(media: PreparedAdMedia) -> dict[str, Any]:
     }
 
 
-def _sort_key(ad: dict[str, Any]) -> tuple[int, float, float, int, int, str]:
-    priority_rank = {
-        "game_gambling": 0,
-        "sports_betting": 1,
-        "gambling_adjacent": 2,
-        "unrelated": 3,
-    }
-    priority = str(ad.get("visual_priority") or "unrelated")
-    return (
-        priority_rank.get(priority, priority_rank["unrelated"]),
-        -float(ad["visual_total"]),
-        -float(ad.get("analysis_confidence") or 0),
-        -int(ad.get("active_days") or 0),
-        -int(ad["media"]["frame_count"]),
-        str(ad["ad_library_id"]),
-    )
+def _sort_key(ad: dict[str, Any]) -> tuple[Any, ...]:
+    """Compatibility wrapper around the shared visual-only ordering contract."""
+    return visual_sort_key(ad)
 
 
 def _select_ranked(scored: list[dict[str, Any]], target_count: int) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    for candidate in scored[: max(target_count, 0)]:
-        is_fallback = str(candidate.get("visual_priority") or "unrelated") == "unrelated"
-        selected.append(
-            {
-                **candidate,
-                "is_fallback": is_fallback,
-                "fallback_reason": (
-                    "insufficient_high_relevance_candidates" if is_fallback else None
-                ),
-            }
-        )
-    return selected
+    """Compatibility wrapper around deterministic selection and P4 labeling."""
+    return select_ranked(scored, target_count)
 
 
-def _quality_summary(selected: list[dict[str, Any]]) -> dict[str, int | bool]:
-    priority_counts = _priority_counts(selected)
-    fallback_count = sum(bool(candidate.get("is_fallback")) for candidate in selected)
-    return {
-        "game_gambling_count": priority_counts["game_gambling"],
-        "sports_betting_count": priority_counts["sports_betting"],
-        "gambling_adjacent_count": priority_counts["gambling_adjacent"],
-        "fallback_count": fallback_count,
-        "fallback_used": fallback_count > 0,
-    }
+def _quality_summary(
+    selected: list[dict[str, Any]], *, target_count: int | None = None
+) -> dict[str, int | bool | str]:
+    """Compatibility wrapper around shared visual-quality summary fields."""
+    return build_quality_summary(
+        selected,
+        target_count=len(selected) if target_count is None else target_count,
+    )
 
 
 def _score_distribution(scored: list[dict[str, Any]]) -> dict[str, int]:
@@ -701,7 +676,7 @@ def _high_score_visible_elements(scored: list[dict[str, Any]]) -> list[str]:
     for candidate in scored:
         if float(candidate["visual_total"]) < 55:
             continue
-        for item in candidate.get("gambling_signals") or []:
+        for item in candidate.get("retrieval_hints") or []:
             element = str(item).strip()
             key = element.casefold()
             if not element or key in seen:
