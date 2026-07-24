@@ -26,17 +26,21 @@ from backend.app.services.ad_research_model import (
     _validated_visual_score,
 )
 from backend.app.services.ad_research_ranking import (
-    quality_summary as build_quality_summary,
-)
-from backend.app.services.ad_research_ranking import (
+    is_quality_candidate,
     select_ranked,
     visual_sort_key,
+)
+from backend.app.services.ad_research_ranking import (
+    quality_summary as build_quality_summary,
 )
 from backend.app.services.ad_research_service import AdResearchService
 
 STANDARD_ROUNDS = 4
-MAX_ROUNDS = 6
-MAX_RAW_CANDIDATES = 650
+NORMAL_MAX_ROUNDS = 6
+NORMAL_MAX_RAW_CANDIDATES = 650
+# Compatibility aliases retained for local test overrides and downstream imports.
+MAX_ROUNDS = NORMAL_MAX_ROUNDS
+MAX_RAW_CANDIDATES = NORMAL_MAX_RAW_CANDIDATES
 PER_QUERY_LIMIT = 50
 MODEL_SCORE_ATTEMPTS = 3
 LOW_CONFIDENCE_THRESHOLD = 0.60
@@ -109,6 +113,16 @@ class AdResearchOrchestrator:
         raw_collected = 0
         gap_summary: dict[str, Any] = {}
         termination_reason: str | None = None
+        max_rounds = max(int(self.settings.ad_research_guarantee_max_rounds), NORMAL_MAX_ROUNDS)
+        normal_raw_limit = MAX_RAW_CANDIDATES
+        guarantee_raw_limit = (
+            normal_raw_limit
+            if normal_raw_limit != NORMAL_MAX_RAW_CANDIDATES
+            else max(
+                int(self.settings.ad_research_guarantee_max_raw_candidates),
+                NORMAL_MAX_RAW_CANDIDATES,
+            )
+        )
 
         async def score_pairs(
             pairs: list[tuple[CollectorAd, TechnicalQualification]],
@@ -142,7 +156,7 @@ class AdResearchOrchestrator:
                 scoring_state_by_ad_library_id[ad_library_id] = "scored"
                 model_scoring_failed_ids.discard(ad_library_id)
 
-        for round_number in range(1, MAX_ROUNDS + 1):
+        for round_number in range(1, max_rounds + 1):
             if round_number > 1:
                 job.stage = "model_visual_scoring"
                 retryable_pairs = [
@@ -183,13 +197,40 @@ class AdResearchOrchestrator:
                         scoring_states=scoring_state_by_ad_library_id,
                         round_summaries=round_summaries,
                         query_metrics=all_query_metrics,
+                        termination_reason="quality_target_met",
+                        scoring_attempts=scoring_attempts_by_ad_library_id,
+                        max_rounds=max_rounds,
+                        raw_limit=(
+                            guarantee_raw_limit
+                            if round_number > NORMAL_MAX_ROUNDS
+                            else normal_raw_limit
+                        ),
                     )
 
             quality_supplement_mode = round_number > STANDARD_ROUNDS
-            round_budget = _round_budget(round_number, raw_collected)
+            guarantee_mode = round_number > NORMAL_MAX_ROUNDS
+            active_raw_limit = guarantee_raw_limit if guarantee_mode else normal_raw_limit
+            prior_scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+            prior_selected = _select_ranked(prior_scored, job.target_count)
+            prior_quality_summary = _quality_summary(prior_selected, target_count=job.target_count)
+            round_budget = _round_budget(
+                round_number,
+                raw_collected,
+                max_rounds=max_rounds,
+                raw_limit=active_raw_limit,
+                guarantee_mode=guarantee_mode,
+            )
             planner_gap_summary = {
                 **gap_summary,
                 "quality_supplement_mode": quality_supplement_mode,
+                "guarantee_mode": guarantee_mode,
+                "remaining_result_slots": max(job.target_count - len(prior_selected), 0),
+                "remaining_quality_slots": max(
+                    job.target_count - int(prior_quality_summary["qualified_visual_count"]), 0
+                ),
+                "failed_scoring_candidates": sum(
+                    state == "retryable_failed" for state in scoring_state_by_ad_library_id.values()
+                ),
                 "round_budget": round_budget,
             }
             job.current_round = round_number
@@ -202,6 +243,27 @@ class AdResearchOrchestrator:
                 gap_summary=planner_gap_summary,
             )
             if not planned_queries:
+                fallback_scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+                fallback_selected = _select_ranked(fallback_scored, job.target_count)
+                if len(fallback_selected) >= job.target_count:
+                    return await self._complete(
+                        session=session,
+                        job=job,
+                        status="completed",
+                        selected=fallback_selected,
+                        raw_collected=raw_collected,
+                        deduplicated=len(seen),
+                        technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                        scored=fallback_scored,
+                        model_scoring_failed_ids=model_scoring_failed_ids,
+                        scoring_states=scoring_state_by_ad_library_id,
+                        round_summaries=round_summaries,
+                        query_metrics=all_query_metrics,
+                        termination_reason="fallback_target_met",
+                        scoring_attempts=scoring_attempts_by_ad_library_id,
+                        max_rounds=max_rounds,
+                        raw_limit=active_raw_limit,
+                    )
                 termination_reason = "query_planning_empty"
                 break
 
@@ -213,6 +275,27 @@ class AdResearchOrchestrator:
                 round_number=round_number,
             )
             if not queries:
+                fallback_scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+                fallback_selected = _select_ranked(fallback_scored, job.target_count)
+                if len(fallback_selected) >= job.target_count:
+                    return await self._complete(
+                        session=session,
+                        job=job,
+                        status="completed",
+                        selected=fallback_selected,
+                        raw_collected=raw_collected,
+                        deduplicated=len(seen),
+                        technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                        scored=fallback_scored,
+                        model_scoring_failed_ids=model_scoring_failed_ids,
+                        scoring_states=scoring_state_by_ad_library_id,
+                        round_summaries=round_summaries,
+                        query_metrics=all_query_metrics,
+                        termination_reason="fallback_target_met",
+                        scoring_attempts=scoring_attempts_by_ad_library_id,
+                        max_rounds=max_rounds,
+                        raw_limit=active_raw_limit,
+                    )
                 termination_reason = "query_planning_empty"
                 break
 
@@ -242,7 +325,7 @@ class AdResearchOrchestrator:
                     executed_key = _normalized_query_key(query.parent_keyword or query.query)
                     if executed_key:
                         executed_user_exact_keys.add(executed_key)
-                remaining = max(MAX_RAW_CANDIDATES - raw_collected, 0)
+                remaining = max(active_raw_limit - raw_collected, 0)
                 ads = collected_ads[:remaining]
                 raw_count = len(ads)
                 new_unique_count = 0
@@ -318,7 +401,7 @@ class AdResearchOrchestrator:
             selected = _select_ranked(scored, job.target_count)
             score_distribution = _score_distribution(scored)
             round_budget = _round_budget(round_number, raw_collected)
-            quality_summary = _quality_summary(selected)
+            quality_summary = _quality_summary(selected, target_count=job.target_count)
             progress = {
                 "raw_collected": raw_collected,
                 "deduplicated": len(candidates),
@@ -331,8 +414,12 @@ class AdResearchOrchestrator:
                 "score_distribution": score_distribution,
                 "priority_counts": priority_counts,
                 "quality_summary": quality_summary,
+                "qualified_visual_count": quality_summary["qualified_visual_count"],
+                "quality_target_met": quality_summary["quality_target_met"],
                 "fallback_count": quality_summary["fallback_count"],
+                "quality_grade": quality_summary["quality_grade"],
                 "query_metrics": [],
+                "query_origin_counts": {},
                 "round_budget": round_budget,
             }
 
@@ -345,9 +432,11 @@ class AdResearchOrchestrator:
                 source_query_ids_by_ad_library_id=source_query_ids_by_ad_library_id,
                 technical_diagnostics=technical_diagnostics_by_ad_library_id,
                 scored_by_ad_library_id=scored_by_ad_library_id,
+                selected_ad_ids={ad["ad_library_id"] for ad in selected},
             )
             all_query_metrics.extend(query_metrics)
             progress["query_metrics"] = list(all_query_metrics)
+            progress["query_origin_counts"] = _query_origin_counts(all_query_metrics)
             job.progress_json = progress
             await session.commit()
             round_new_candidates = len(candidates) - candidates_before_round
@@ -393,9 +482,10 @@ class AdResearchOrchestrator:
             }
 
             has_scored_target = len(scored) >= job.target_count
-            has_p1_target = priority_counts["game_gambling"] >= job.target_count
+            has_quality_target = bool(quality_summary["quality_target_met"])
             user_exact_covered = required_user_exact_keys <= executed_user_exact_keys
-            if has_p1_target and user_exact_covered:
+            if has_quality_target and user_exact_covered:
+                termination_reason = "quality_target_met"
                 return await self._complete(
                     session=session,
                     job=job,
@@ -409,9 +499,22 @@ class AdResearchOrchestrator:
                     scoring_states=scoring_state_by_ad_library_id,
                     round_summaries=round_summaries,
                     query_metrics=all_query_metrics,
+                    termination_reason=termination_reason,
+                    scoring_attempts=scoring_attempts_by_ad_library_id,
+                    max_rounds=max_rounds,
+                    raw_limit=active_raw_limit,
                 )
 
-            if round_number == MAX_ROUNDS or raw_collected >= MAX_RAW_CANDIDATES:
+            needs_guarantee_mode = round_number >= NORMAL_MAX_ROUNDS and (
+                len(selected) < job.target_count or not has_quality_target
+            )
+            terminal_raw_limit = guarantee_raw_limit if needs_guarantee_mode else active_raw_limit
+            if round_number == max_rounds or raw_collected >= terminal_raw_limit:
+                failure_termination_reason = (
+                    "insufficient_source_inventory"
+                    if len(seen) < job.target_count
+                    else "insufficient_technically_qualified_inventory"
+                )
                 return await self._complete(
                     session=session,
                     job=job,
@@ -426,6 +529,10 @@ class AdResearchOrchestrator:
                     round_summaries=round_summaries,
                     query_metrics=all_query_metrics,
                     reason=None if has_scored_target else "insufficient_qualified_ads",
+                    termination_reason=None if has_scored_target else failure_termination_reason,
+                    scoring_attempts=scoring_attempts_by_ad_library_id,
+                    max_rounds=max_rounds,
+                    raw_limit=terminal_raw_limit,
                 )
 
         _refresh_scored_source_attribution(
@@ -449,7 +556,24 @@ class AdResearchOrchestrator:
             scoring_states=scoring_state_by_ad_library_id,
             round_summaries=round_summaries,
             query_metrics=all_query_metrics,
-            reason=termination_reason or "insufficient_qualified_ads",
+            reason=(
+                "query_planning_empty"
+                if termination_reason == "query_planning_empty" and not seen
+                else (
+                    "insufficient_qualified_ads"
+                    if termination_reason in {None, "query_planning_empty"}
+                    else termination_reason
+                )
+            ),
+            termination_reason=termination_reason
+            or (
+                "insufficient_source_inventory"
+                if len(seen) < job.target_count
+                else "insufficient_technically_qualified_inventory"
+            ),
+            scoring_attempts=scoring_attempts_by_ad_library_id,
+            max_rounds=max_rounds,
+            raw_limit=guarantee_raw_limit if raw_collected > normal_raw_limit else normal_raw_limit,
         )
 
     async def _score_candidates(
@@ -533,6 +657,10 @@ class AdResearchOrchestrator:
         round_summaries: list[dict[str, Any]],
         query_metrics: list[dict[str, Any]],
         reason: str | None = None,
+        termination_reason: str | None = None,
+        scoring_attempts: dict[str, int] | None = None,
+        max_rounds: int = NORMAL_MAX_ROUNDS,
+        raw_limit: int = NORMAL_MAX_RAW_CANDIDATES,
     ) -> AdResearchRunResult:
         completed_selected = selected if status == "completed" else []
         if status == "completed":
@@ -551,6 +679,12 @@ class AdResearchOrchestrator:
             scoring_states=scoring_states,
             round_summaries=round_summaries,
             query_metrics=query_metrics,
+            target_count=job.target_count,
+            seed_keywords=list(job.seed_keywords_json or []),
+            termination_reason=termination_reason,
+            scoring_attempts=scoring_attempts or {},
+            max_rounds=max_rounds,
+            raw_limit=raw_limit,
             reason=reason,
         )
         quality_summary = summary["quality_summary"]
@@ -562,6 +696,12 @@ class AdResearchOrchestrator:
             "fallback_count": quality_summary["fallback_count"],
             "round_budget": summary["round_budget"],
             "selected_count": len(completed_selected),
+            "qualified_visual_count": summary["qualified_visual_count"],
+            "quality_target_met": summary["quality_target_met"],
+            "quality_grade": summary["quality_grade"],
+            "query_origin_counts": summary["query_origin_counts"],
+            "model_scoring_states": summary["model_scoring_states"],
+            "rounds_used": summary["rounds_used"],
         }
         await self.service.complete_job(
             session,
@@ -845,6 +985,7 @@ def _query_metrics(
     source_query_ids_by_ad_library_id: dict[str, list[str]],
     technical_diagnostics: dict[str, TechnicalQualification],
     scored_by_ad_library_id: dict[str, dict[str, Any]],
+    selected_ad_ids: set[str],
 ) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for query in sorted(queries, key=lambda item: item.query_id):
@@ -871,6 +1012,8 @@ def _query_metrics(
                 "query_id": query.query_id,
                 "query": query.query,
                 "intent": query.intent,
+                "query_origin": query.query_origin,
+                "parent_keyword": query.parent_keyword,
                 **collection_counts,
                 "duration_le_30_count": sum(
                     qualification.duration_seconds is not None
@@ -881,6 +1024,12 @@ def _query_metrics(
                     qualification.qualified for qualification in qualifications
                 ),
                 "model_scored": len(scored),
+                "quality_candidate_count": sum(
+                    is_quality_candidate(candidate) for candidate in scored
+                ),
+                "final_selected_count": sum(
+                    ad_library_id in selected_ad_ids for ad_library_id in attributed_ad_ids
+                ),
                 "game_gambling_count": priority_counts["game_gambling"],
                 "sports_betting_count": priority_counts["sports_betting"],
                 "gambling_adjacent_count": priority_counts["gambling_adjacent"],
@@ -899,7 +1048,6 @@ def _planner_query_performance(query_metrics: list[dict[str, Any]]) -> list[dict
     return [
         {
             "query_id": metric["query_id"],
-            "query": metric["query"],
             "collected_count": metric["raw_collected"],
             "selected_count": metric["model_scored"],
             "rejected_count": metric["raw_collected"] - metric["model_scored"],
@@ -918,18 +1066,54 @@ def _technical_rejection_summary(
     return summary
 
 
-def _round_budget(round_number: int, raw_collected: int) -> dict[str, int | bool]:
+def _round_budget(
+    round_number: int,
+    raw_collected: int,
+    *,
+    max_rounds: int = NORMAL_MAX_ROUNDS,
+    raw_limit: int = NORMAL_MAX_RAW_CANDIDATES,
+    guarantee_mode: bool = False,
+) -> dict[str, int | bool]:
     current_round = max(round_number, 0)
     return {
         "standard_rounds": STANDARD_ROUNDS,
-        "max_rounds": MAX_ROUNDS,
+        "max_rounds": max_rounds,
         "current_round": current_round,
-        "remaining_rounds": max(MAX_ROUNDS - current_round, 0),
-        "max_raw_candidates": MAX_RAW_CANDIDATES,
-        "remaining_raw_candidates": max(MAX_RAW_CANDIDATES - raw_collected, 0),
+        "remaining_rounds": max(max_rounds - current_round, 0),
+        "max_raw_candidates": raw_limit,
+        "remaining_raw_candidates": max(raw_limit - raw_collected, 0),
         "quality_supplement_mode": current_round > STANDARD_ROUNDS,
+        "guarantee_mode": guarantee_mode,
     }
 
+
+def _query_origin_counts(query_metrics: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for metric in query_metrics:
+        origin = str(metric.get("query_origin") or "model_exploration")
+        counts[origin] = counts.get(origin, 0) + 1
+    return counts
+
+
+def _user_keyword_summary(
+    seed_keywords: list[Any], query_metrics: list[dict[str, Any]], selected: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "original_keywords": list(seed_keywords),
+        "exact_queries_executed": sum(
+            metric.get("query_origin") == "user_exact" for metric in query_metrics
+        ),
+        "expanded_queries_executed": sum(
+            metric.get("query_origin") == "user_expanded" for metric in query_metrics
+        ),
+        "selected_contribution": sum(
+            any(
+                origin in {"user_exact", "user_expanded"}
+                for origin in (ad.get("matched_query_origins") or [])
+            )
+            for ad in selected
+        ),
+    }
 
 def _priority_gap_counts(priority_counts: dict[str, int], target_count: int) -> dict[str, int]:
     return {
@@ -984,11 +1168,18 @@ def _summary(
     scoring_states: dict[str, str],
     round_summaries: list[dict[str, Any]],
     query_metrics: list[dict[str, Any]],
+    target_count: int,
+    seed_keywords: list[Any],
+    termination_reason: str | None,
+    scoring_attempts: dict[str, int],
+    max_rounds: int,
+    raw_limit: int,
     reason: str | None,
 ) -> dict[str, Any]:
     priority_counts = _priority_counts(scored)
-    quality_summary = _quality_summary(selected)
+    quality_summary = _quality_summary(selected, target_count=target_count)
     current_round = int(round_summaries[-1]["round"]) if round_summaries else 0
+    ordered_metrics = sorted(query_metrics, key=lambda item: str(item["query_id"]))
     summary = {
         "raw_collected": raw,
         "deduplicated": deduplicated,
@@ -998,6 +1189,7 @@ def _summary(
         "model_scored": len(scored),
         "model_scoring_failed": len(model_scoring_failed_ids),
         "model_scoring_states": _scoring_state_counts(scoring_states),
+        "gateway_retry_count": sum(max(attempts - 1, 0) for attempts in scoring_attempts.values()),
         "model_relevant": len(scored),
         "selected_count": len(selected),
         "minimum_active_days": MIN_ACTIVE_DAYS,
@@ -1006,11 +1198,23 @@ def _summary(
         "high_score_visible_elements": _high_score_visible_elements(scored),
         "priority_counts": priority_counts,
         "quality_summary": quality_summary,
+        "qualified_visual_count": quality_summary["qualified_visual_count"],
+        "quality_target_met": quality_summary["quality_target_met"],
         "fallback_count": quality_summary["fallback_count"],
-        "round_budget": _round_budget(current_round, raw),
+        "quality_grade": quality_summary["quality_grade"],
+        "rounds_used": current_round,
+        "round_budget": _round_budget(
+            current_round,
+            raw,
+            max_rounds=max_rounds,
+            raw_limit=raw_limit,
+            guarantee_mode=current_round > NORMAL_MAX_ROUNDS,
+        ),
         "technical_rejection_summary": _technical_rejection_summary(technical_diagnostics),
         "rounds": round_summaries,
-        "query_metrics": sorted(query_metrics, key=lambda item: str(item["query_id"])),
+        "query_metrics": ordered_metrics,
+        "query_origin_counts": _query_origin_counts(ordered_metrics),
+        "user_keyword_summary": _user_keyword_summary(seed_keywords, ordered_metrics, selected),
         "model_relevant_notice": (
             "Compatibility field only: model_relevant equals model_scored and no longer means "
             "a text or category hard match."
@@ -1018,4 +1222,6 @@ def _summary(
     }
     if reason is not None:
         summary["reason"] = reason
+    if termination_reason is not None:
+        summary["termination_reason"] = termination_reason
     return summary

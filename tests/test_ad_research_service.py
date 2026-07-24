@@ -473,3 +473,21 @@ def test_poll_response_status_contract_hides_results_for_non_completed_statuses(
 
     assert response.poll_after_seconds == poll_after_seconds
     assert response.ads is None
+
+
+def test_initial_progress_exposes_quality_and_scoring_state_contract() -> None:
+    from backend.app.services.ad_research_service import _initial_progress
+
+    progress = _initial_progress()
+
+    assert progress["qualified_visual_count"] == 0
+    assert progress["quality_target_met"] is False
+    assert progress["fallback_count"] == 0
+    assert progress["query_origin_counts"] == {}
+    assert progress["model_scoring_states"] == {
+        "pending": 0,
+        "scoring": 0,
+        "retryable_failed": 0,
+        "scored": 0,
+        "permanent_failed": 0,
+    }

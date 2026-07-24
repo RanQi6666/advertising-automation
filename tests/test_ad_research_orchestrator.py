@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
@@ -215,6 +215,7 @@ async def run_custom(
     model: Any,
     target_count: int,
     keywords: list[str] | None = None,
+    return_job: bool = False,
 ):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -233,9 +234,10 @@ async def run_custom(
                     target_count=target_count,
                 ),
             )
-            return await AdResearchOrchestrator(
+            result = await AdResearchOrchestrator(
                 collector=collector, media=media, model=model, service=service
             ).run(session, created.job)
+            return (result, created.job) if return_job else result
     finally:
         await engine.dispose()
 
@@ -323,9 +325,10 @@ async def test_orchestrator_uses_rounds_five_and_six_before_p4_fill() -> None:
     )
 
     assert result.status == "completed"
-    assert len(model.plan_calls) == 6
+    assert len(model.plan_calls) == 7
     assert result.summary["rounds"][-1]["round"] == 6
     assert result.summary["quality_summary"]["quality_grade"] == "fallback_used"
+    assert model.plan_calls[-1]["gap_summary"]["guarantee_mode"] is True
     for call in model.plan_calls[4:]:
         gap = call["gap_summary"]
         assert gap["quality_supplement_mode"] is True
@@ -723,12 +726,16 @@ async def test_orchestrator_attributes_multi_source_ads_and_query_metrics() -> N
         "query_id": "r1_q01",
         "query": "first",
         "intent": "game_gambling",
+        "query_origin": "model_exploration",
+        "parent_keyword": None,
         "raw_collected": 2,
         "new_unique_count": 2,
         "duplicate_count": 0,
         "duration_le_30_count": 1,
         "technical_qualified": 1,
         "model_scored": 1,
+        "quality_candidate_count": 1,
+        "final_selected_count": 1,
         "game_gambling_count": 1,
         "sports_betting_count": 0,
         "gambling_adjacent_count": 0,
@@ -803,6 +810,8 @@ async def test_orchestrator_passes_controlled_gap_summary_to_next_round() -> Non
         "unrelated",
     }
     assert second_gap["query_metrics"][0]["query_id"] == "r1_q01"
+    assert second_gap["query_performance"][0]["query_id"] == "r1_q01"
+    assert "query" not in second_gap["query_performance"][0]
     assert "high_score_visible_elements" not in second_gap
     serialized_gap = repr(second_gap)
     for forbidden in (
@@ -1255,3 +1264,131 @@ async def test_retryable_score_is_retried_before_more_collection() -> None:
     assert model.attempts == 3
     assert collector.queries == ["first"]
     assert result.summary["model_scoring_states"]["scored"] == 1
+
+@pytest.mark.asyncio
+async def test_p4_count_does_not_end_quality_collection() -> None:
+    unrelated = [candidate(400 + index) for index in range(25)]
+    quality = [candidate(500 + index) for index in range(25)]
+    model = Model(
+        visual_priority_by_ad_id={
+            **{item.ad_library_id: "unrelated" for item in unrelated},
+            **{item.ad_library_id: "game_gambling" for item in quality},
+        }
+    )
+    collector = QueryCollector({"query-1": unrelated, "query-2": quality})
+
+    result = await run_custom(
+        collector=collector, media=Media(), model=model, target_count=25
+    )
+
+    assert result.status == "completed"
+    assert collector.queries == ["query-1", "query-2"]
+    assert result.summary["qualified_visual_count"] == 25
+    assert result.summary["fallback_count"] == 0
+    assert result.summary["quality_grade"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_quality_target_ends_collection() -> None:
+    quality = [candidate(600 + index) for index in range(25)]
+    collector = QueryCollector({"query-1": quality})
+
+    result = await run_custom(
+        collector=collector, media=Media(), model=Model(), target_count=25
+    )
+
+    assert result.status == "completed"
+    assert collector.queries == ["query-1"]
+    assert result.summary["quality_target_met"] is True
+
+
+@pytest.mark.asyncio
+async def test_guarantee_mode_can_use_rounds_seven_to_ten(monkeypatch) -> None:
+    monkeypatch.setenv("AD_RESEARCH_GUARANTEE_MAX_ROUNDS", "10")
+    monkeypatch.setenv("AD_RESEARCH_GUARANTEE_MAX_RAW_CANDIDATES", "1200")
+    get_settings.cache_clear()
+    try:
+        rounds = {
+            f"query-{round_number}": [
+                candidate(round_number * 100 + index) for index in range(4)
+            ]
+            for round_number in range(1, 11)
+        }
+        result = await run_custom(
+            collector=QueryCollector(rounds), media=Media(), model=Model(), target_count=25
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert result.status == "completed"
+    assert result.summary["rounds_used"] >= 7
+    assert len(result.ads) == 25
+    assert result.summary["quality_target_met"] is True
+
+
+@pytest.mark.asyncio
+async def test_unique_source_shortage_never_duplicates_ads() -> None:
+    source_ads = [candidate(800 + index) for index in range(12)]
+    collector = QueryCollector(
+        {f"query-{round_number}": source_ads for round_number in range(1, 11)}
+    )
+
+    result = await run_custom(
+        collector=collector, media=Media(), model=Model(), target_count=25
+    )
+
+    assert result.status == "failed"
+    assert result.ads == []
+    assert result.summary["termination_reason"] == "insufficient_source_inventory"
+    assert result.summary["deduplicated"] == 12
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_writes_final_quality_contract_to_progress() -> None:
+    ads = [candidate(900 + index) for index in range(2)]
+    result, job = await run_custom(
+        collector=QueryCollector({"query-1": ads}),
+        media=Media(),
+        model=Model(),
+        target_count=2,
+        return_job=True,
+    )
+
+    assert result.status == "completed"
+    for key in (
+        "qualified_visual_count",
+        "quality_target_met",
+        "quality_grade",
+        "query_origin_counts",
+        "model_scoring_states",
+        "rounds_used",
+    ):
+        assert job.progress_json[key] == result.summary[key]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_writes_fallback_quality_contract_to_progress() -> None:
+    ads = [candidate(920 + index) for index in range(2)]
+    model = Model(
+        visual_priority_by_ad_id={item.ad_library_id: "unrelated" for item in ads}
+    )
+    result, job = await run_custom(
+        collector=QueryCollector({"query-1": ads}),
+        media=Media(),
+        model=model,
+        target_count=2,
+        return_job=True,
+    )
+
+    assert result.status == "completed"
+    assert result.summary["quality_grade"] == "fallback_used"
+    assert job.progress_json["fallback_count"] == 2
+    for key in (
+        "qualified_visual_count",
+        "quality_target_met",
+        "quality_grade",
+        "query_origin_counts",
+        "model_scoring_states",
+        "rounds_used",
+    ):
+        assert job.progress_json[key] == result.summary[key]
