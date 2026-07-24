@@ -8,11 +8,13 @@ import re
 import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
+from io import BytesIO
 from math import ceil, isfinite
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
+from PIL import Image, UnidentifiedImageError
 from redis import asyncio as redis_async
 
 from backend.app.core.config import get_settings
@@ -542,6 +544,11 @@ def _image_part(path: Path) -> dict[str, Any]:
         raise ProviderError("ad research visual frame cannot be read") from exc
     if not payload:
         raise ProviderError("ad research visual frame is empty")
+    try:
+        with Image.open(BytesIO(payload)) as image:
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ProviderError("ad research visual frame is invalid") from exc
     mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
     encoded = base64.b64encode(payload).decode("ascii")
     return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.services.ad_research_media import PreparedAdMedia
 from backend.app.services.ad_research_model import (
     AdResearchModel,
@@ -82,11 +85,21 @@ def gateway_model_that_captures_request(
     return AdResearchModel(http_client=client, limiter=Limiter()), client
 
 
+def jpeg_payload(color: tuple[int, int, int] = (0, 128, 255)) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), color).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def prepared_media_with_three_frames(tmp_path) -> PreparedAdMedia:
     frames = []
-    for name in ("frame_20.jpg", "frame_50.jpg", "frame_80.jpg"):
+    for color, name in zip(
+        ((255, 0, 0), (0, 255, 0), (0, 0, 255)),
+        ("frame_20.jpg", "frame_50.jpg", "frame_80.jpg"),
+        strict=True,
+    ):
         path = tmp_path / name
-        path.write_bytes(b"fake-jpeg-payload")
+        path.write_bytes(jpeg_payload(color))
         frames.append(path)
     return PreparedAdMedia(
         cover_url="https://ai.example/storage/ad-research/job/ad/cover.jpg",
@@ -538,7 +551,7 @@ async def test_visual_score_uses_contact_sheet_and_excludes_copy(tmp_path, monke
     captured: dict[str, object] = {}
     model, client = gateway_model_that_captures_request(monkeypatch, captured)
     sheet = tmp_path / "contact_sheet.jpg"
-    sheet.write_bytes(b"sheet")
+    sheet.write_bytes(jpeg_payload())
     source_media = prepared_media_with_three_frames(tmp_path)
     media = PreparedAdMedia(
         cover_url=source_media.cover_url,
@@ -577,7 +590,7 @@ async def test_visual_score_falls_back_when_contact_sheet_cannot_be_read(
     captured: dict[str, object] = {}
     model, client = gateway_model_that_captures_request(monkeypatch, captured)
     sheet = tmp_path / "contact_sheet.jpg"
-    sheet.write_bytes(b"sheet")
+    sheet.write_bytes(jpeg_payload())
     source_media = prepared_media_with_three_frames(tmp_path)
     media = PreparedAdMedia(
         cover_url=source_media.cover_url,
@@ -603,7 +616,7 @@ async def test_visual_score_falls_back_when_contact_sheet_cannot_be_read(
     content = captured["input"][1]["content"]
     images = [part for part in content if part["type"] == "input_image"]
     assert 1 <= len(images) <= 4
-    assert all("ZmFrZS1qcGVnLXBheWxvYWQ=" in part["image_url"] for part in images)
+    assert all(part["image_url"].startswith("data:image/jpeg;base64,") for part in images)
     text = next(part["text"] for part in content if part["type"] == "input_text")
     assert json.loads(text)["media"]["frame_layout"] == (
         "individual chronological frames: earliest to latest"
@@ -635,6 +648,86 @@ async def test_visual_score_skips_unreadable_fallback_frame(tmp_path, monkeypatc
     assert json.loads(text)["media"]["frame_layout"] == (
         "individual chronological frames: earliest to latest"
     )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_visual_score_falls_back_when_contact_sheet_is_invalid(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    sheet = tmp_path / "contact_sheet.jpg"
+    sheet.write_bytes(b"not-a-jpeg")
+    source_media = prepared_media_with_three_frames(tmp_path)
+    media = PreparedAdMedia(
+        cover_url=source_media.cover_url,
+        cover_source=source_media.cover_source,
+        frame_urls=source_media.frame_urls,
+        local_frame_paths=source_media.local_frame_paths,
+        contact_sheet_url="https://ai.example/storage/contact_sheet.jpg",
+        local_contact_sheet_path=sheet,
+        duration_source=source_media.duration_source,
+        duration_probe_attempts=source_media.duration_probe_attempts,
+    )
+
+    await model.score_visual(category="gambling", duration_seconds=18.0, media=media)
+
+    content = captured["input"][1]["content"]
+    images = [part for part in content if part["type"] == "input_image"]
+    assert len(images) == 3
+    assert all(part["image_url"].startswith("data:image/jpeg;base64,") for part in images)
+    text = next(part["text"] for part in content if part["type"] == "input_text")
+    assert json.loads(text)["media"]["frame_layout"] == (
+        "individual chronological frames: earliest to latest"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_visual_score_skips_invalid_fallback_frame(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    media = prepared_media_with_three_frames(tmp_path)
+    media.local_frame_paths[0].write_bytes(b"not-a-jpeg")
+
+    await model.score_visual(category="gambling", duration_seconds=18.0, media=media)
+
+    content = captured["input"][1]["content"]
+    images = [part for part in content if part["type"] == "input_image"]
+    assert len(images) == 2
+    assert all(part["image_url"].startswith("data:image/jpeg;base64,") for part in images)
+    text = next(part["text"] for part in content if part["type"] == "input_text")
+    assert json.loads(text)["media"]["frame_layout"] == (
+        "individual chronological frames: earliest to latest"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_visual_score_rejects_when_all_visual_images_are_invalid(
+    tmp_path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    sheet = tmp_path / "contact_sheet.jpg"
+    sheet.write_bytes(b"not-a-jpeg")
+    source_media = prepared_media_with_three_frames(tmp_path)
+    for frame in source_media.local_frame_paths:
+        frame.write_bytes(b"not-a-jpeg")
+    media = PreparedAdMedia(
+        cover_url=source_media.cover_url,
+        cover_source=source_media.cover_source,
+        frame_urls=source_media.frame_urls,
+        local_frame_paths=source_media.local_frame_paths,
+        contact_sheet_url="https://ai.example/storage/contact_sheet.jpg",
+        local_contact_sheet_path=sheet,
+        duration_source=source_media.duration_source,
+        duration_probe_attempts=source_media.duration_probe_attempts,
+    )
+
+    with pytest.raises(ProviderError, match="ad research visual evidence is unavailable"):
+        await model.score_visual(category="gambling", duration_seconds=18.0, media=media)
+
+    assert captured == {}
     await client.aclose()
 
 
