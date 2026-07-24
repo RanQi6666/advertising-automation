@@ -13,9 +13,12 @@ from backend.app.services.ad_research_model import (
     QueryPerformance,
     QueryPlan,
     RedisGlobalLimiter,
+    _non_negative_int,
     _normalize_planned_queries,
+    _round_review_from_summary,
     _validated_visual_score,
 )
+from backend.app.services.ad_research_orchestrator import _planner_query_performance
 
 
 class Lease:
@@ -163,6 +166,54 @@ def test_multiple_user_keywords_are_independent() -> None:
     assert "777 slot teen patti" not in {q.query for q in result}
 
 
+@pytest.mark.parametrize("keyword_count", [9, 10, 11, 12, 24])
+def test_round_one_exact_keyword_capacity_boundaries(keyword_count: int) -> None:
+    keywords = [f"keyword-{index:02d}" for index in range(1, keyword_count + 1)]
+
+    result = _normalize_planned_queries(
+        (),
+        seed_keywords=keywords,
+        country="IN",
+        category="gambling",
+        round_number=1,
+    )
+
+    exact = [query.query for query in result if query.query_origin == "user_exact"]
+    assert exact == keywords[:10]
+
+
+def test_user_exact_keywords_cover_twenty_four_across_deterministic_round_slices() -> None:
+    keywords = [f"keyword-{index:02d}" for index in range(1, 25)]
+
+    exact_by_round = []
+    for round_number in range(1, 4):
+        result = _normalize_planned_queries(
+            (),
+            seed_keywords=keywords,
+            country="IN",
+            category="gambling",
+            round_number=round_number,
+        )
+        exact_by_round.append(
+            [query.query for query in result if query.query_origin == "user_exact"]
+        )
+
+    assert exact_by_round == [keywords[:10], keywords[10:20], keywords[20:24]]
+    assert set().union(*(set(batch) for batch in exact_by_round)) == set(keywords)
+
+    round_four = _normalize_planned_queries(
+        (),
+        seed_keywords=keywords,
+        country="IN",
+        category="gambling",
+        round_number=4,
+    )
+    round_four_exact = [
+        query.query for query in round_four if query.query_origin == "user_exact"
+    ]
+    assert round_four_exact == keywords[:10]
+
+
 def test_query_performance_accepts_round_ten_and_safe_metrics() -> None:
     payload = QueryPerformance(
         query_id="r10_q12",
@@ -178,6 +229,52 @@ def test_query_performance_accepts_round_ten_and_safe_metrics() -> None:
     assert payload["query_id"] == "r10_q12"
     assert payload["quality_candidate_count"] == 8
     assert payload["best_visual_score"] == 81.5
+
+
+def test_round_review_maps_legacy_selected_count_to_scored_count_only() -> None:
+    legacy_performance = _planner_query_performance(
+        [
+            {
+                "query_id": "r2_q03",
+                "query": "legacy query text",
+                "raw_collected": 8,
+                "model_scored": 5,
+            }
+        ]
+    )
+    assert legacy_performance == [
+        {
+            "query_id": "r2_q03",
+            "query": "legacy query text",
+            "collected_count": 8,
+            "selected_count": 5,
+            "rejected_count": 3,
+        }
+    ]
+
+    review = _round_review_from_summary(
+        {"query_performance": legacy_performance},
+        quality_supplement_allowed=False,
+    )
+
+    assert review.query_performance[0].as_dict() == {
+        "query_id": "r2_q03",
+        "collected_count": 8,
+        "technical_qualified_count": 0,
+        "scored_count": 5,
+        "quality_candidate_count": 0,
+        "best_visual_score": 0.0,
+        "final_selected_count": 0,
+        "rejected_count": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf"), "not-a-number", object()],
+)
+def test_non_negative_int_safely_zeroes_non_finite_and_unconvertible_values(value: object) -> None:
+    assert _non_negative_int(value) == 0
 
 
 @pytest.mark.asyncio

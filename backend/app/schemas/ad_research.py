@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 
 class AdResearchCreateRequest(BaseModel):
@@ -12,7 +12,9 @@ class AdResearchCreateRequest(BaseModel):
     external_user_id: str = Field(min_length=1, max_length=128)
     country: str = Field(min_length=2, max_length=8)
     category: str = Field(min_length=1, max_length=128)
-    keywords: list[str] = Field(default_factory=list, max_length=24)
+    keywords: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=160)]
+    ] = Field(default_factory=list, max_length=24)
     target_count: int = Field(default=25, ge=1, le=25)
 
     @field_validator("external_user_id", "country", "category")

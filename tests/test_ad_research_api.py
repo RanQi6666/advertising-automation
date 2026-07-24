@@ -3,7 +3,9 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.api.v1.endpoints.ad_research as endpoint
@@ -12,6 +14,7 @@ from backend.app.db.base import Base, utcnow
 from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.session import get_session
 from backend.app.main import create_app
+from backend.app.schemas.ad_research import AdResearchCreateRequest
 
 
 def _payload() -> dict:
@@ -22,6 +25,38 @@ def _payload() -> dict:
         "keywords": ["rummy", "casino"],
         "target_count": 25,
     }
+
+
+def test_create_request_keeps_twenty_four_keywords_and_rejects_invalid_boundaries() -> None:
+    keywords = [f"keyword-{index:02d}" for index in range(1, 24)] + ["x" * 160]
+
+    request = AdResearchCreateRequest(
+        external_user_id="schema-boundary",
+        country="IN",
+        category="gambling",
+        keywords=keywords,
+    )
+
+    assert request.keywords == keywords
+    keyword_schema = AdResearchCreateRequest.model_json_schema()["properties"]["keywords"]
+    assert keyword_schema["maxItems"] == 24
+    assert keyword_schema["items"]["maxLength"] == 160
+
+    with pytest.raises(ValidationError):
+        AdResearchCreateRequest(
+            external_user_id="too-many-keywords",
+            country="IN",
+            category="gambling",
+            keywords=[f"keyword-{index:02d}" for index in range(1, 26)],
+        )
+
+    with pytest.raises(ValidationError):
+        AdResearchCreateRequest(
+            external_user_id="keyword-too-long",
+            country="IN",
+            category="gambling",
+            keywords=["x" * 161],
+        )
 
 
 def test_ad_research_api_document_preserves_external_task_state_contract() -> None:

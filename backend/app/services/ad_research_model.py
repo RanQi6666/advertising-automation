@@ -577,7 +577,11 @@ def _round_review_from_summary(
                     query_id=query_id,
                     collected_count=item.get("collected_count"),
                     technical_qualified_count=item.get("technical_qualified_count"),
-                    scored_count=item.get("scored_count"),
+                    scored_count=(
+                        item.get("scored_count")
+                        if "scored_count" in item
+                        else item.get("selected_count")
+                    ),
                     quality_candidate_count=item.get("quality_candidate_count"),
                     best_visual_score=item.get("best_visual_score"),
                     final_selected_count=item.get("final_selected_count"),
@@ -741,7 +745,15 @@ def _normalize_planned_queries(
             )
         )
 
-    for keyword in keywords:
+    if len(keywords) <= limit:
+        exact_keywords = keywords
+    else:
+        slice_count = ceil(len(keywords) / limit)
+        slice_index = (safe_round - 1) % slice_count
+        slice_start = slice_index * limit
+        exact_keywords = keywords[slice_start : slice_start + limit]
+
+    for keyword in exact_keywords:
         add(
             keyword,
             "game_gambling",
@@ -772,7 +784,7 @@ def _normalize_planned_queries(
         )
         return tuple(output)
 
-    user_target = min(limit, max(len(keywords), ceil(limit * 0.8)))
+    user_target = min(limit, max(len(exact_keywords), ceil(limit * 0.8)))
     keyword_by_key = {keyword.casefold(): keyword for keyword in keywords}
     for item in planned:
         parent = _short_text(item.parent_keyword)
@@ -799,7 +811,7 @@ def _normalize_planned_queries(
         sum(query.query_origin.startswith("user_") for query in output) < user_target
         and index < max_expansion_attempts
     ):
-        parent = keywords[index % len(keywords)]
+        parent = exact_keywords[index % len(exact_keywords)]
         suffix_index = index // len(keywords)
         suffix = (
             suffixes[suffix_index]
@@ -897,7 +909,12 @@ def _short_text(value: Any, *, limit: int = 160) -> str | None:
 def _non_negative_int(value: Any) -> int:
     if not isinstance(value, int | float) or isinstance(value, bool):
         return 0
-    return max(int(value), 0)
+    if isinstance(value, float) and not isfinite(value):
+        return 0
+    try:
+        return max(int(value), 0)
+    except (OverflowError, ValueError):
+        return 0
 
 
 def _safe_best_visual_score(value: Any) -> float:
