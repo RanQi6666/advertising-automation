@@ -824,6 +824,15 @@ async def test_gateway_frame_analysis_sends_first_then_last_image() -> None:
     assert content[3] == {"type": "input_image", "image_url": LAST_FRAME_URL}
     system_prompt = captured[0]["input"][0]["content"]
     _assert_no_legacy_content(system_prompt)
+    normalized_prompt = system_prompt.casefold()
+    for strong_node_analysis_rule in (
+        "importance=core for the strongest observed performance nodes",
+        "distinctive camera escalation or reframing",
+        "causal clarity",
+        "visible consequence",
+        "do not equate the latest timestamp with the strongest node",
+    ):
+        assert strong_node_analysis_rule in normalized_prompt
 
 
 @pytest.mark.asyncio
@@ -2913,6 +2922,16 @@ async def test_gateway_final_storyboard_text_uses_minimal_schema_without_safety_
     assert "reference" in system_prompt
     assert "camera" in system_prompt
     assert "vfx" in system_prompt
+    for strong_node_priority in (
+        "strongest compatible performance node",
+        "dominant dramatic spine",
+        "omit it only for a concrete conflict",
+        "do not flatten",
+        "generic slow pull-back",
+        "minimum_readable_duration_seconds",
+        "reference seconds establish order and relative rhythm, not target timestamps",
+    ):
+        assert strong_node_priority in system_prompt
     for forbidden_safety_rule in (
         "safety and ad compliance are mandatory",
         "creative safety hard rules",
