@@ -2881,7 +2881,7 @@ async def test_gateway_storyboard_draft_schema_excludes_private_claims() -> None
 
 
 @pytest.mark.asyncio
-async def test_gateway_final_storyboard_text_uses_minimal_strict_schema_and_director_prompt(
+async def test_gateway_final_storyboard_text_uses_minimal_schema_without_safety_rules(
 ) -> None:
     provider, captured = _gateway_provider_with_responses(
         {"storyboard_text": "A complete flexible director script without internal evidence IDs."}
@@ -2913,7 +2913,16 @@ async def test_gateway_final_storyboard_text_uses_minimal_strict_schema_and_dire
     assert "reference" in system_prompt
     assert "camera" in system_prompt
     assert "vfx" in system_prompt
-    assert "safety" in system_prompt or "compliance" in system_prompt
+    for forbidden_safety_rule in (
+        "safety and ad compliance are mandatory",
+        "creative safety hard rules",
+        "meta/facebook ad compliance guardrails",
+        "visible text hard ban",
+        "visual prop hard ban",
+        "game creative safety",
+        "low-text or no-text visual style",
+    ):
+        assert forbidden_safety_rule not in system_prompt
     for forbidden_contract in (
         "signature_moment_ids",
         "source_behavior_beat_ids",

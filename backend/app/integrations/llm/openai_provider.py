@@ -2052,7 +2052,7 @@ def _frame_anchored_director_system_prompt() -> str:
 
 
 def _frame_anchored_storyboard_text_system_prompt() -> str:
-    return with_meta_ad_compliance(
+    return (
         "You are a 3A game-cinematic and premium commercial director. Use the two supplied "
         "target images and frame_analysis to write one complete production-ready director "
         "script for a single generated video clip. Return valid JSON only with exactly one "
@@ -2078,9 +2078,7 @@ def _frame_anchored_storyboard_text_system_prompt() -> str:
         "for a video-generation model to execute. Realize the result as one continuous shot or "
         "one continuous generated clip using in-shot camera and staging changes; do not require "
         "editing, stitched shots, post-production assembly, or an external compositing pass. "
-        "Never expose internal identifiers or tokens beginning with __sbv2_. Safety and ad "
-        "compliance are mandatory. "
-        + creative_safety_prompt_block()
+        "Never expose internal identifiers or tokens beginning with __sbv2_."
     )
 
 
