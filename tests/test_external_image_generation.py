@@ -609,3 +609,112 @@ async def test_external_image_generation_passes_external_prompt_to_provider_unch
     assert await _count_rows(engine, CreativeAsset) == 0
     assert await _count_rows(engine, VideoAsset) == 0
     await engine.dispose()
+
+class _RoundRobinRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        value = self.values.get(key, 0) + 1
+        self.values[key] = value
+        return value
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_external_image_jobs_pin_round_robin_route_at_creation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.services import external_image_route_service
+
+    redis = _RoundRobinRedis()
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "round_robin")
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_PROVIDERS", "gateway,volcengine")
+    monkeypatch.setenv("MODEL_GATEWAY_IMAGE_MODEL", "gateway-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    get_settings.cache_clear()
+    external_image_route_service.set_redis_client_factory_for_tests(lambda _url: redis)
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            service = ExternalImageGenerationService()
+            first = await service.create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="round-robin-1")
+                ),
+            )
+            second = await service.create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="round-robin-2")
+                ),
+            )
+
+            assert first.metadata_json["image_route"] == {
+                "strategy": "round_robin",
+                "sequence": 1,
+                "provider": "gateway",
+                "model": "gateway-image-model",
+            }
+            assert second.metadata_json["image_route"] == {
+                "strategy": "round_robin",
+                "sequence": 2,
+                "provider": "volcengine",
+                "model": "volcengine-image-model",
+            }
+    finally:
+        external_image_route_service.set_redis_client_factory_for_tests(None)
+        get_settings.cache_clear()
+        await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_external_image_task_executes_with_its_pinned_route(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.services.external_image_generation_service as service_module
+    from backend.app.integrations.image.placeholder_provider import PlaceholderImageProvider
+    from backend.app.services import external_image_route_service
+
+    redis = _RoundRobinRedis()
+    selected: dict[str, str] = {}
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "round_robin")
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_PROVIDERS", "gateway,volcengine")
+    monkeypatch.setenv("MODEL_GATEWAY_IMAGE_MODEL", "gateway-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    get_settings.cache_clear()
+    external_image_route_service.set_redis_client_factory_for_tests(lambda _url: redis)
+
+    def fake_get_image_provider(settings):
+        selected["provider"] = settings.image_provider
+        selected["model"] = (
+            settings.model_gateway_image_model
+            if settings.image_provider == "gateway"
+            else settings.volcengine_image_model
+        )
+        return PlaceholderImageProvider()
+
+    monkeypatch.setattr(service_module, "get_image_provider", fake_get_image_provider)
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            service = ExternalImageGenerationService()
+            task = await service.create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="round-robin-execute")
+                ),
+            )
+
+            result = await service.execute_task(session, task)
+    finally:
+        external_image_route_service.set_redis_client_factory_for_tests(None)
+        get_settings.cache_clear()
+        await engine.dispose()
+
+    assert selected == {"provider": "gateway", "model": "gateway-image-model"}
+    assert result["model_id"] == "gateway-image-model"

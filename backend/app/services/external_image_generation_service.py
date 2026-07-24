@@ -16,6 +16,11 @@ from backend.app.schemas.external_image_generation import (
     ExternalImageGenerationJobRead,
     ExternalImageRevisionCreate,
 )
+from backend.app.services.external_image_route_service import (
+    route_from_metadata,
+    select_external_image_route,
+    settings_for_external_image_route,
+)
 from backend.app.services.generation_task_service import (
     IMAGE_QUEUE_NAME,
     GenerationTaskService,
@@ -48,6 +53,8 @@ class ExternalImageGenerationService:
             existing.reused_existing = True
             return existing
 
+        settings = get_settings()
+        route_metadata = await _round_robin_route_metadata(settings)
         business_id = external_request_id or str(uuid4())
         task = await self.task_service.create_task(
             session,
@@ -63,13 +70,14 @@ class ExternalImageGenerationService:
                 "size": payload.size,
                 "model_id": payload.model_id,
             },
-            max_attempts=get_settings().external_image_generation_max_attempts,
+            max_attempts=settings.external_image_generation_max_attempts,
             metadata={
                 "source": EXTERNAL_IMAGE_GENERATION_SOURCE,
                 "external_request_id": external_request_id,
                 "count": payload.count,
                 "size": payload.size,
                 "model_id": payload.model_id,
+                **route_metadata,
             },
         )
         return task
@@ -325,7 +333,11 @@ class ExternalImageGenerationService:
             reference_image_data_url = None
             revision_instruction = None
 
-        settings = settings_for_image_model(get_settings(), model_id)
+        route = route_from_metadata(task.metadata_json)
+        if route is None:
+            settings = settings_for_image_model(get_settings(), model_id)
+        else:
+            settings = settings_for_external_image_route(get_settings(), route)
         provider = get_image_provider(settings)
         image_model = effective_image_model(settings)
         briefs = [
@@ -430,7 +442,7 @@ class ExternalImageGenerationService:
             "generated_count": len(images),
             "count": count,
             "size": size,
-            "model_id": model_id,
+            "model_id": image_model if route is not None else model_id,
             "image_model": image_model,
         }
         if is_revision:
@@ -489,6 +501,13 @@ class ExternalImageGenerationService:
                 or (task.metadata_json or {}).get("mode")
             ),
         )
+
+
+async def _round_robin_route_metadata(settings) -> dict[str, dict[str, str | int]]:
+    if settings.external_image_route_mode != "round_robin":
+        return {}
+    route = await select_external_image_route(settings)
+    return {"image_route": route.as_metadata()}
 
 
 def _external_status(task: GenerationTask) -> str:
