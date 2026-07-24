@@ -8,6 +8,7 @@ import httpx
 import pytest
 from PIL import Image
 
+import backend.app.services.ad_research_model as ad_research_model_module
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.services.ad_research_media import PreparedAdMedia
@@ -121,6 +122,152 @@ def test_research_model_limiter_falls_back_to_celery_broker(monkeypatch) -> None
     get_settings.cache_clear()
 
     assert RedisGlobalLimiter().redis_url == "redis://redis:6379/0"
+
+
+@pytest.mark.asyncio
+async def test_complete_json_retries_two_500s_then_succeeds(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://g/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test")
+    monkeypatch.setenv("AD_RESEARCH_MODEL_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(500, json={})
+        return httpx.Response(200, json={"output_text": '{"ok":true}'})
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        "backend.app.services.ad_research_model.asyncio.sleep",
+        fake_sleep,
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://g/v1/",
+    )
+    try:
+        result = await AdResearchModel(http_client=client, limiter=Limiter())._complete_json(
+            system="s", user={}
+        )
+    finally:
+        await client.aclose()
+
+    assert result == {"ok": True}
+    assert calls == 3
+    assert sleeps == [2.0, 6.0]
+
+
+@pytest.mark.asyncio
+async def test_complete_json_retries_release_the_lease_before_the_next_attempt(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://g/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test")
+    monkeypatch.setenv("AD_RESEARCH_MODEL_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+
+    class TrackingLease:
+        def __init__(self, limiter: TrackingLimiter) -> None:
+            self.limiter = limiter
+            self.released = False
+
+        async def release(self) -> None:
+            assert not self.released
+            self.released = True
+            self.limiter.active -= 1
+            self.limiter.release_count += 1
+
+    class TrackingLimiter:
+        def __init__(self) -> None:
+            self.active = 0
+            self.acquire_count = 0
+            self.release_count = 0
+
+        async def acquire(self, *args, **kwargs) -> TrackingLease:
+            assert self.active == 0
+            self.active += 1
+            self.acquire_count += 1
+            return TrackingLease(self)
+
+    calls = 0
+    limiter = TrackingLimiter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(500, json={})
+        return httpx.Response(200, json={"output_text": '{"ok":true}'})
+
+    async def fake_sleep(seconds: float) -> None:
+        assert limiter.active == 0
+
+    monkeypatch.setattr(
+        "backend.app.services.ad_research_model.asyncio.sleep",
+        fake_sleep,
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://g/v1/",
+    )
+    try:
+        result = await AdResearchModel(http_client=client, limiter=limiter)._complete_json(
+            system="s", user={}
+        )
+    finally:
+        await client.aclose()
+
+    assert result == {"ok": True}
+    assert limiter.acquire_count == 3
+    assert limiter.release_count == 3
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_json_does_not_retry_400(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "gateway")
+    monkeypatch.setenv("MODEL_GATEWAY_BASE_URL", "https://g/v1")
+    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "test")
+    get_settings.cache_clear()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://g/v1/",
+    )
+    try:
+        model = AdResearchModel(http_client=client, limiter=Limiter())
+        with pytest.raises(ProviderError, match="permanent"):
+            await model._complete_json(system="s", user={})
+    finally:
+        await client.aclose()
+
+    assert calls == 1
+
+
+def test_gateway_health_drops_six_to_two_and_recovers() -> None:
+    tracker = ad_research_model_module.GatewayHealthTracker(
+        window_size=12,
+        error_threshold=0.5,
+        recovery_successes=6,
+    )
+    for success in [True] * 6 + [False] * 6:
+        tracker.record(success=success)
+    assert tracker.current_limit(6) == 2
+    for _ in range(6):
+        tracker.record(success=True)
+    assert tracker.current_limit(6) == 6
 
 
 def test_user_keywords_keep_exact_queries_and_eighty_percent_budget() -> None:

@@ -6,6 +6,7 @@ import json
 import mimetypes
 import re
 import secrets
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
@@ -45,6 +46,8 @@ QUERY_INTENTS = frozenset(
 )
 QUERY_ORIGINS = frozenset({"user_exact", "user_expanded", "model_exploration", "model_recovery"})
 _QUERY_ID_PATTERN = re.compile(r"r(?:[1-9]|10)_q(?:0[1-9]|1[0-2])")
+MODEL_RETRY_DELAYS_SECONDS: tuple[float, ...] = (2.0, 6.0)
+_RETRYABLE_MODEL_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _VISUAL_TAXONOMY = frozenset(
     {
         "game ui",
@@ -253,6 +256,39 @@ class QueryPlan:
         return payload
 
 
+class GatewayHealthTracker:
+    """Reduces new model leases after a concentrated gateway failure burst."""
+
+    def __init__(
+        self,
+        *,
+        window_size: int,
+        error_threshold: float,
+        recovery_successes: int,
+    ) -> None:
+        self.events: deque[bool] = deque(maxlen=max(int(window_size), 1))
+        self.threshold = float(error_threshold)
+        self.recovery_successes = max(int(recovery_successes), 1)
+        self.degraded = False
+        self.streak = 0
+
+    def record(self, *, success: bool) -> None:
+        self.events.append(success)
+        self.streak = self.streak + 1 if success else 0
+        if self.degraded and self.streak >= self.recovery_successes:
+            self.degraded = False
+            self.events.clear()
+            return
+        if len(self.events) == self.events.maxlen:
+            error_rate = sum(not event for event in self.events) / len(self.events)
+            if error_rate >= self.threshold:
+                self.degraded = True
+
+    def current_limit(self, base_limit: int) -> int:
+        normalized = max(int(base_limit), 1)
+        return min(normalized, 2) if self.degraded else normalized
+
+
 @dataclass
 class RedisLease:
     client: Any
@@ -305,6 +341,11 @@ class AdResearchModel:
         self.settings = get_settings()
         self._http_client = http_client
         self.limiter = limiter or RedisGlobalLimiter()
+        self.gateway_health = GatewayHealthTracker(
+            window_size=self.settings.ad_research_gateway_error_window,
+            error_threshold=self.settings.ad_research_gateway_error_threshold,
+            recovery_successes=self.settings.ad_research_gateway_recovery_successes,
+        )
 
     async def plan_queries(
         self,
@@ -438,19 +479,64 @@ class AdResearchModel:
     async def _complete_json(
         self, *, system: str, user: Any, effort: str = "none"
     ) -> dict[str, Any]:
+        max_attempts = max(int(self.settings.ad_research_model_max_attempts), 1)
+        json_decode_retry_used = False
+        for attempt in range(max_attempts):
+            try:
+                result = await self._complete_json_once(system=system, user=user, effort=effort)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in _RETRYABLE_MODEL_STATUS_CODES:
+                    retryable_error: BaseException = exc
+                elif 400 <= status_code < 500:
+                    raise ProviderError(
+                        f"ad research model permanent failure: HTTP {status_code}"
+                    ) from exc
+                else:
+                    raise ProviderError(
+                        f"ad research model request failed: HTTP {status_code}"
+                    ) from exc
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as exc:
+                retryable_error = exc
+            except json.JSONDecodeError as exc:
+                if json_decode_retry_used:
+                    self.gateway_health.record(success=False)
+                    raise ProviderError(
+                        "ad research model retryable failure exhausted: JSONDecodeError"
+                    ) from exc
+                json_decode_retry_used = True
+                retryable_error = exc
+            else:
+                self.gateway_health.record(success=True)
+                return result
+
+            self.gateway_health.record(success=False)
+            if attempt + 1 >= max_attempts:
+                raise ProviderError(
+                    "ad research model retryable failure exhausted: "
+                    f"{retryable_error.__class__.__name__}"
+                ) from retryable_error
+            delay_index = min(attempt, len(MODEL_RETRY_DELAYS_SECONDS) - 1)
+            await asyncio.sleep(MODEL_RETRY_DELAYS_SECONDS[delay_index])
+        raise AssertionError("model retry loop exited without a result")
+
+    async def _complete_json_once(
+        self, *, system: str, user: Any, effort: str
+    ) -> dict[str, Any]:
         lease = await self._wait_for_lease()
         client = self._http_client
         owns_client = client is None
-        if client is None:
-            base_url = (
-                self.settings.model_gateway_base_url or self.settings.openai_base_url or ""
-            ).rstrip("/")
-            api_key = self.settings.model_gateway_api_key or self.settings.openai_api_key
-            if not base_url or not api_key:
-                await lease.release()
-                raise ProviderError("model gateway URL and API key are required for ad research.")
-            client = httpx.AsyncClient(base_url=f"{base_url}/", timeout=None)
         try:
+            if client is None:
+                base_url = (
+                    self.settings.model_gateway_base_url or self.settings.openai_base_url or ""
+                ).rstrip("/")
+                api_key = self.settings.model_gateway_api_key or self.settings.openai_api_key
+                if not base_url or not api_key:
+                    raise ProviderError(
+                        "model gateway URL and API key are required for ad research."
+                    )
+                client = httpx.AsyncClient(base_url=f"{base_url}/", timeout=None)
             response = await client.post(
                 "responses",
                 headers={
@@ -472,13 +558,9 @@ class AdResearchModel:
             )
             response.raise_for_status()
             return json.loads(_strip_json_markdown(_extract_response_text(response.json())))
-        except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise ProviderError(
-                f"ad research model request failed: {exc.__class__.__name__}"
-            ) from exc
         finally:
             await lease.release()
-            if owns_client:
+            if owns_client and client is not None:
                 await client.aclose()
 
     async def _wait_for_lease(self) -> RedisLease:
@@ -491,7 +573,9 @@ class AdResearchModel:
         for _ in range(attempts):
             lease = await self.limiter.acquire(
                 "ad-research:model",
-                limit=self.settings.ad_research_model_concurrency,
+                limit=self.gateway_health.current_limit(
+                    self.settings.ad_research_model_concurrency
+                ),
                 ttl_seconds=lease_seconds,
             )
             if lease is not None:

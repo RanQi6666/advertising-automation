@@ -53,7 +53,12 @@ class Settings(BaseSettings):
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
     ad_research_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    ad_research_collector_concurrency: int = Field(default=2, ge=1, le=8)
     ad_research_model_concurrency: int = Field(default=6, ge=1, le=64)
+    ad_research_model_max_attempts: int = Field(default=3, ge=1, le=5)
+    ad_research_gateway_error_window: int = Field(default=12, ge=4, le=100)
+    ad_research_gateway_error_threshold: float = Field(default=0.5, ge=0.1, le=1)
+    ad_research_gateway_recovery_successes: int = Field(default=6, ge=1, le=50)
     ad_research_media_concurrency: int = Field(default=6, ge=1, le=32)
     ad_research_frame_concurrency: int = Field(default=4, ge=1, le=16)
     ad_research_media_root: str = "ad-research"
@@ -67,6 +72,8 @@ class Settings(BaseSettings):
     ad_research_model_lease_seconds: int = Field(default=90, ge=10, le=600)
     ad_research_collector_base_url: str = "http://meta_ads_collector:8090"
     ad_research_collector_timeout_seconds: float = Field(default=120.0, ge=5, le=600)
+    ad_research_guarantee_max_rounds: int = Field(default=10, ge=6, le=10)
+    ad_research_guarantee_max_raw_candidates: int = Field(default=1200, ge=650, le=5000)
     generation_task_target_concurrent_users: int = Field(default=30, ge=1, le=1000)
     generation_runtime_monitor_timeout_seconds: float = Field(default=1.0, ge=0.1, le=10)
     generation_runtime_monitor_cache_seconds: float = Field(default=2.0, ge=0, le=30)
