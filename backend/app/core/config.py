@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     text_queue_concurrency: int = Field(default=6, ge=1, le=64)
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
+    external_image_route_mode: Literal["fixed", "round_robin"] = "fixed"
+    external_image_route_providers: Annotated[
+        list[Literal["gateway", "volcengine"]], NoDecode
+    ] = Field(default_factory=lambda: ["gateway", "volcengine"])
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
@@ -185,6 +189,13 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("external_image_route_providers", mode="before")
+    @classmethod
+    def parse_external_image_route_providers(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [provider.strip() for provider in value.split(",") if provider.strip()]
         return value
 
     @field_validator("model_gateway_text_models", "model_gateway_image_models", mode="before")
