@@ -740,7 +740,8 @@ def _query_metrics(
                 "intent": query.intent,
                 **collection_counts,
                 "duration_le_30_count": sum(
-                    qualification.duration_seconds <= MAX_VIDEO_SECONDS
+                    qualification.duration_seconds is not None
+                    and qualification.duration_seconds <= MAX_VIDEO_SECONDS
                     for qualification in qualifications
                 ),
                 "technical_qualified": sum(

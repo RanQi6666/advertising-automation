@@ -613,6 +613,8 @@ async def test_orchestrator_fails_when_query_planning_is_empty() -> None:
 async def test_orchestrator_attributes_multi_source_ads_and_query_metrics() -> None:
     shared = candidate(7)
     second_only = candidate(8)
+    duration_unavailable = candidate(9)
+    duration_unavailable.duration_seconds = None
     plan = QueryPlan(
         queries=(
             PlannedQuery(
@@ -629,8 +631,12 @@ async def test_orchestrator_attributes_multi_source_ads_and_query_metrics() -> N
             ),
         )
     )
-    collector = QueryCollector({"first": [shared], "second": [shared, second_only]})
-    media = Media()
+    collector = QueryCollector(
+        {"first": [shared, duration_unavailable], "second": [shared, second_only]}
+    )
+    media = Media(
+        rejected={duration_unavailable.ad_library_id: ("duration_unavailable",)}
+    )
     model = Model(plans=[plan])
 
     result = await run_custom(collector=collector, media=media, model=model, target_count=2)
@@ -666,8 +672,8 @@ async def test_orchestrator_attributes_multi_source_ads_and_query_metrics() -> N
         "query_id": "r1_q01",
         "query": "first",
         "intent": "game_gambling",
-        "raw_collected": 1,
-        "new_unique_count": 1,
+        "raw_collected": 2,
+        "new_unique_count": 2,
         "duplicate_count": 0,
         "duration_le_30_count": 1,
         "technical_qualified": 1,
