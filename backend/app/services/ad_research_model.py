@@ -397,12 +397,18 @@ class AdResearchModel:
     ) -> dict[str, Any]:
         if self.settings.llm_provider == "mock":
             return _mock_visual_score(media)
-        visual_paths = (
-            (media.local_contact_sheet_path,)
-            if media.local_contact_sheet_path and media.local_contact_sheet_path.is_file()
-            else media.local_frame_paths[:4]
-        )
-        if not visual_paths:
+        contact_sheet_part = _readable_image_part(media.local_contact_sheet_path)
+        if contact_sheet_part is not None:
+            image_parts = (contact_sheet_part,)
+            frame_layout = "2x2 contact sheet: cover, early, middle, late"
+        else:
+            image_parts = tuple(
+                image_part
+                for path in media.local_frame_paths[:4]
+                if (image_part := _readable_image_part(path)) is not None
+            )
+            frame_layout = "individual chronological frames: earliest to latest"
+        if not image_parts:
             raise ProviderError("ad research visual evidence is unavailable")
         user: list[dict[str, Any]] = [
             {
@@ -412,13 +418,13 @@ class AdResearchModel:
                         "media": {
                             "duration_seconds": round(duration_seconds, 2),
                             "frame_count": len(media.local_frame_paths),
-                            "frame_layout": "2x2 contact sheet: cover, early, middle, late",
+                            "frame_layout": frame_layout,
                         },
                     },
                     ensure_ascii=False,
                 ),
             },
-            *[_image_part(path) for path in visual_paths],
+            *image_parts,
         ]
         data = await self._complete_json(
             system=_VISUAL_SCORING_SYSTEM_PROMPT,
@@ -539,6 +545,15 @@ def _image_part(path: Path) -> dict[str, Any]:
     mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
     encoded = base64.b64encode(payload).decode("ascii")
     return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}
+
+
+def _readable_image_part(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        return _image_part(path)
+    except ProviderError:
+        return None
 
 
 def _responses_content(user: Any) -> str | list[dict[str, Any]]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -570,6 +571,74 @@ async def test_visual_score_uses_contact_sheet_and_excludes_copy(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_visual_score_falls_back_when_contact_sheet_cannot_be_read(
+    tmp_path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    sheet = tmp_path / "contact_sheet.jpg"
+    sheet.write_bytes(b"sheet")
+    source_media = prepared_media_with_three_frames(tmp_path)
+    media = PreparedAdMedia(
+        cover_url=source_media.cover_url,
+        cover_source=source_media.cover_source,
+        frame_urls=source_media.frame_urls,
+        local_frame_paths=source_media.local_frame_paths,
+        contact_sheet_url="https://ai.example/storage/contact_sheet.jpg",
+        local_contact_sheet_path=sheet,
+        duration_source=source_media.duration_source,
+        duration_probe_attempts=source_media.duration_probe_attempts,
+    )
+    original_read_bytes = Path.read_bytes
+
+    def fail_contact_sheet_read(path: Path) -> bytes:
+        if path == sheet:
+            raise OSError("contact sheet became unavailable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_contact_sheet_read)
+
+    await model.score_visual(category="gambling", duration_seconds=18.0, media=media)
+
+    content = captured["input"][1]["content"]
+    images = [part for part in content if part["type"] == "input_image"]
+    assert 1 <= len(images) <= 4
+    assert all("ZmFrZS1qcGVnLXBheWxvYWQ=" in part["image_url"] for part in images)
+    text = next(part["text"] for part in content if part["type"] == "input_text")
+    assert json.loads(text)["media"]["frame_layout"] == (
+        "individual chronological frames: earliest to latest"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_visual_score_skips_unreadable_fallback_frame(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    media = prepared_media_with_three_frames(tmp_path)
+    unreadable_frame = media.local_frame_paths[0]
+    original_read_bytes = Path.read_bytes
+
+    def skip_first_frame(path: Path) -> bytes:
+        if path == unreadable_frame:
+            raise OSError("first frame became unavailable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", skip_first_frame)
+
+    await model.score_visual(category="gambling", duration_seconds=18.0, media=media)
+
+    content = captured["input"][1]["content"]
+    images = [part for part in content if part["type"] == "input_image"]
+    assert len(images) == 2
+    text = next(part["text"] for part in content if part["type"] == "input_text")
+    assert json.loads(text)["media"]["frame_layout"] == (
+        "individual chronological frames: earliest to latest"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_visual_score_sends_new_pure_visual_contract_and_quality_candidate(
     monkeypatch, tmp_path
 ) -> None:
@@ -591,7 +660,7 @@ async def test_visual_score_sends_new_pure_visual_contract_and_quality_candidate
         "media": {
             "duration_seconds": 15.0,
             "frame_count": 3,
-            "frame_layout": "2x2 contact sheet: cover, early, middle, late",
+            "frame_layout": "individual chronological frames: earliest to latest",
         },
     }
     assert len([part for part in user_content if part["type"] == "input_image"]) == 3
