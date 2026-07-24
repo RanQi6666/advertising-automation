@@ -163,7 +163,10 @@ class AdResearchMediaInspector:
 
         contact_sheet_path = await asyncio.to_thread(
             _build_contact_sheet,
-            tuple(local_frame_paths),
+            _low_confidence_contact_sheet_paths(
+                tuple(local_frame_paths),
+                new_paths,
+            ),
             artifact_dir / "contact_sheet.jpg",
         )
         return TechnicalQualification(
@@ -459,6 +462,26 @@ class AdResearchMediaInspector:
         _ensure_within(resolved_path, storage_root)
         relative = resolved_path.relative_to(storage_root).as_posix()
         return f"{self.settings.public_base_url.rstrip('/')}/storage/{quote(relative, safe='/')}"
+
+
+def _low_confidence_contact_sheet_paths(
+    existing_paths: tuple[Path, ...],
+    supplemental_paths: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    """Keep the cover first, then prioritize supplemental mid-video frames.
+
+    The initial contact sheet intentionally uses the media preparation order. During a
+    low-confidence retry, the generated 35%/65% frames need to be present in the
+    four-cell sheet consumed by the visual model. Reversing the remaining existing
+    frames uses the latest original evidence as deterministic fallback cells.
+    """
+    existing = tuple(dict.fromkeys(existing_paths))
+    supplemental = tuple(dict.fromkeys(supplemental_paths))
+    cover = existing[:1]
+    selected = set(cover).union(supplemental)
+    remaining = tuple(path for path in existing[1:] if path not in selected)
+    return (*cover, *supplemental, *reversed(remaining))
+
 
 
 def _build_contact_sheet(paths: tuple[Path, ...], destination: Path) -> Path | None:

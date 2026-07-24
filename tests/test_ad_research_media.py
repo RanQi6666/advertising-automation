@@ -278,6 +278,38 @@ async def test_low_confidence_frames_rebuild_same_contact_sheet(
 
 
 @pytest.mark.asyncio
+async def test_low_confidence_contact_sheet_prioritizes_supplemental_frames(
+    inspector_with_storage, allow_public_media, monkeypatch
+) -> None:
+    inspector = inspector_with_storage
+    monkeypatch.setattr(inspector, "_download_video", lambda *_: _write_downloaded_video(_[1]))
+
+    async def frame(source: Path, destination: Path, second: float) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (320, 568), color=(int(second * 10), 30, 60)).save(destination)
+        return destination
+
+    monkeypatch.setattr(inspector, "_extract_frame", frame)
+    ad = eligible_ad(thumbnail_url=None)
+    first = await inspector.inspect(ad, job_id="job-1")
+
+    assert first.media is not None
+    assert first.media.local_contact_sheet_path is not None
+    with Image.open(first.media.local_contact_sheet_path) as image:
+        assert image.getpixel((768, 256))[0] != pytest.approx(70, abs=3)
+        assert image.getpixel((256, 768))[0] != pytest.approx(130, abs=3)
+
+    enriched = await inspector.add_low_confidence_frames(ad, first, job_id="job-1")
+
+    assert enriched.media is not None
+    assert enriched.media.local_contact_sheet_path is not None
+    with Image.open(enriched.media.local_contact_sheet_path) as image:
+        assert image.getpixel((768, 256))[0] == pytest.approx(70, abs=3)
+        assert image.getpixel((256, 768))[0] == pytest.approx(130, abs=3)
+
+
+
+@pytest.mark.asyncio
 async def test_retain_only_removes_unselected_ad_artifacts(inspector_with_storage) -> None:
     root = inspector_with_storage._artifact_dir("job-1", "keep").parent
     for name in ("keep", "drop"):
