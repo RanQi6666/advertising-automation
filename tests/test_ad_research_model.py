@@ -256,6 +256,25 @@ async def test_complete_json_does_not_retry_400(monkeypatch) -> None:
     assert calls == 1
 
 
+@pytest.mark.asyncio
+async def test_complete_json_wraps_unclassified_http_error_without_retry(monkeypatch) -> None:
+    model = AdResearchModel(limiter=Limiter())
+    calls = 0
+
+    async def raise_read_error(**kwargs) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadError("gateway connection closed")
+
+    monkeypatch.setattr(model, "_complete_json_once", raise_read_error)
+
+    with pytest.raises(ProviderError, match="request failed: ReadError"):
+        await model._complete_json(system="s", user={})
+
+    assert calls == 1
+    assert tuple(model.gateway_health.events) == ()
+
+
 def test_gateway_health_drops_six_to_two_and_recovers() -> None:
     tracker = ad_research_model_module.GatewayHealthTracker(
         window_size=12,

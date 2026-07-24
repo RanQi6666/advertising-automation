@@ -506,6 +506,10 @@ class AdResearchModel:
                     ) from exc
                 json_decode_retry_used = True
                 retryable_error = exc
+            except httpx.HTTPError as exc:
+                raise ProviderError(
+                    f"ad research model request failed: {exc.__class__.__name__}"
+                ) from exc
             else:
                 self.gateway_health.record(success=True)
                 return result
