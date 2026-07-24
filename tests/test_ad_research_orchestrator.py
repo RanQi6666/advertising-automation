@@ -1324,6 +1324,16 @@ async def test_guarantee_mode_can_use_rounds_seven_to_ten(monkeypatch) -> None:
     assert result.summary["rounds_used"] >= 7
     assert len(result.ads) == 25
     assert result.summary["quality_target_met"] is True
+    assert result.summary["rounds"][-1]["round_budget"] == {
+        "standard_rounds": 4,
+        "max_rounds": 10,
+        "current_round": result.summary["rounds_used"],
+        "remaining_rounds": 10 - result.summary["rounds_used"],
+        "max_raw_candidates": 1200,
+        "remaining_raw_candidates": 1200 - result.summary["raw_collected"],
+        "quality_supplement_mode": True,
+        "guarantee_mode": True,
+    }
 
 
 @pytest.mark.asyncio

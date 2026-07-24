@@ -400,7 +400,14 @@ class AdResearchOrchestrator:
             priority_counts = _priority_counts(scored)
             selected = _select_ranked(scored, job.target_count)
             score_distribution = _score_distribution(scored)
-            round_budget = _round_budget(round_number, raw_collected)
+            # Keep the current round plan budget, including guarantee-mode limits.
+            round_budget = _round_budget(
+                round_number,
+                raw_collected,
+                max_rounds=max_rounds,
+                raw_limit=active_raw_limit,
+                guarantee_mode=guarantee_mode,
+            )
             quality_summary = _quality_summary(selected, target_count=job.target_count)
             progress = {
                 "raw_collected": raw_collected,

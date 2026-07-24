@@ -485,12 +485,12 @@ def test_round_review_maps_legacy_selected_count_to_scored_count_only() -> None:
     assert legacy_performance == [
         {
             "query_id": "r2_q03",
-            "query": "legacy query text",
             "collected_count": 8,
             "selected_count": 5,
             "rejected_count": 3,
         }
     ]
+    assert "query" not in legacy_performance[0]
 
     review = _round_review_from_summary(
         {"query_performance": legacy_performance},
