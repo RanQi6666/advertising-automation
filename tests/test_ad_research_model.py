@@ -533,6 +533,43 @@ async def test_model_planner_invalid_model_response_uses_deterministic_fallback(
 
 
 @pytest.mark.asyncio
+async def test_visual_score_uses_contact_sheet_and_excludes_copy(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    model, client = gateway_model_that_captures_request(monkeypatch, captured)
+    sheet = tmp_path / "contact_sheet.jpg"
+    sheet.write_bytes(b"sheet")
+    source_media = prepared_media_with_three_frames(tmp_path)
+    media = PreparedAdMedia(
+        cover_url=source_media.cover_url,
+        cover_source=source_media.cover_source,
+        frame_urls=source_media.frame_urls,
+        local_frame_paths=source_media.local_frame_paths,
+        contact_sheet_url="https://ai.example/storage/contact_sheet.jpg",
+        local_contact_sheet_path=sheet,
+        duration_source=source_media.duration_source,
+        duration_probe_attempts=source_media.duration_probe_attempts,
+    )
+
+    result = await model.score_visual(
+        category="gambling", duration_seconds=18.0, media=media
+    )
+
+    assert captured["model"] == "gpt-5.4-mini"
+    assert captured["reasoning"] == {"effort": "none"}
+    content = captured["input"][1]["content"]
+    assert len([part for part in content if part["type"] == "input_image"]) == 1
+    text = " ".join(part["text"] for part in content if part["type"] == "input_text").casefold()
+    assert all(
+        word not in text
+        for word in ("headline", "advertiser", "landing_url", "source_query")
+    )
+    assert "component_scores" in captured["input"][0]["content"]
+    assert "negative_visual_type" in captured["input"][0]["content"]
+    assert result["visual_total"] > 0
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_visual_score_sends_new_pure_visual_contract_and_quality_candidate(
     monkeypatch, tmp_path
 ) -> None:
@@ -551,7 +588,11 @@ async def test_visual_score_sends_new_pure_visual_contract_and_quality_candidate
     text_blocks = [part["text"] for part in user_content if part["type"] == "input_text"]
     assert len(text_blocks) == 1
     assert json.loads(text_blocks[0]) == {
-        "media": {"duration_seconds": 15.0, "frame_count": 3},
+        "media": {
+            "duration_seconds": 15.0,
+            "frame_count": 3,
+            "frame_layout": "2x2 contact sheet: cover, early, middle, late",
+        },
     }
     assert len([part for part in user_content if part["type"] == "input_image"]) == 3
 
@@ -671,6 +712,40 @@ def test_visual_score_validation_uses_component_contract_and_negative_caps() -> 
         "visual_clarity_points",
         "media_quality_points",
     }.intersection(result)
+
+
+@pytest.mark.parametrize(
+    ("negative", "priority", "game", "betting", "maximum"),
+    [
+        ("money_wallet_only", "unrelated", False, False, 10),
+        ("recruitment_income", "unrelated", False, False, 8),
+        ("ordinary_game", "gambling_adjacent", True, False, 24),
+        ("none", "game_gambling", True, True, 100),
+        ("none", "sports_betting", False, True, 100),
+    ],
+)
+def test_visual_contract_business_examples(
+    negative: str, priority: str, game: bool, betting: bool, maximum: int
+) -> None:
+    result = _validated_visual_score(
+        {
+            "negative_visual_type": negative,
+            "visual_priority": priority,
+            "game_context_present": game,
+            "betting_context_present": betting,
+            "component_scores": {
+                "gameplay_ui": 35,
+                "betting_mechanism": 25,
+                "in_game_value_ui": 15,
+                "gambling_style": 10,
+                "visual_clarity": 10,
+                "media_quality": 5,
+            },
+        },
+        frame_count=4,
+    )
+
+    assert result["visual_total"] <= maximum
 
 
 @pytest.mark.asyncio

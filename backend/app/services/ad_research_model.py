@@ -397,20 +397,28 @@ class AdResearchModel:
     ) -> dict[str, Any]:
         if self.settings.llm_provider == "mock":
             return _mock_visual_score(media)
+        visual_paths = (
+            (media.local_contact_sheet_path,)
+            if media.local_contact_sheet_path and media.local_contact_sheet_path.is_file()
+            else media.local_frame_paths[:4]
+        )
+        if not visual_paths:
+            raise ProviderError("ad research visual evidence is unavailable")
         user: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": json.dumps(
                     {
                         "media": {
-                            "duration_seconds": duration_seconds,
+                            "duration_seconds": round(duration_seconds, 2),
                             "frame_count": len(media.local_frame_paths),
+                            "frame_layout": "2x2 contact sheet: cover, early, middle, late",
                         },
                     },
                     ensure_ascii=False,
                 ),
             },
-            *[_image_part(path) for path in media.local_frame_paths],
+            *[_image_part(path) for path in visual_paths],
         ]
         data = await self._complete_json(
             system=_VISUAL_SCORING_SYSTEM_PROMPT,
@@ -485,11 +493,17 @@ class AdResearchModel:
 
 
 _VISUAL_SCORING_SYSTEM_PROMPT = """
-Evaluate only the supplied video-frame images and supplied media facts. Return one JSON object only
-with exactly these required properties: visual_priority, game_context_present,
-betting_context_present, money_only_promo, negative_visual_type, component_scores,
-analysis_confidence, visual_evidence, retrieval_hints. Do not return visual_total or properties not
-listed here.
+Score only visible evidence from a short public ad video contact sheet and supplied media facts.
+Use only visible pixels and supplied media facts; do not infer from nonvisual metadata.
+High scores require visible game context plus gambling or betting mechanics. Coins, crystals, cash,
+wallet, VIP, WIN, and BONUS count only inside visible gameplay, wagering, odds, reels, cards,
+cashout, stake, or multiplier UI. Recruitment, WhatsApp work, daily income, cash bundles,
+payment-wallet, novel, drama, and talking-head videos without gameplay need a negative type.
+
+Return one JSON object only with exactly these required properties: visual_priority,
+game_context_present, betting_context_present, money_only_promo, negative_visual_type,
+component_scores, analysis_confidence, visual_evidence, retrieval_hints. Do not return
+visual_total or properties not listed here.
 
 visual_priority must be exactly one of game_gambling, sports_betting, gambling_adjacent, or
 unrelated. Use game_gambling only when visible game context and a visible betting mechanism are
