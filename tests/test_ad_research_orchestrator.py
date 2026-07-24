@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.services.ad_research_orchestrator as orchestrator_module
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import Base
 from backend.app.schemas.ad_research import AdResearchCreateRequest, CollectorAd
 from backend.app.services.ad_research_media import PreparedAdMedia, TechnicalQualification
@@ -622,7 +623,7 @@ async def test_orchestrator_caps_oversized_collector_result_at_remaining_raw_bud
 
     assert result.status == "failed"
     assert result.ads == []
-    assert collector.limits == [3]
+    assert collector.limits == [50]
     assert result.summary["raw_collected"] == 3
     assert result.summary["deduplicated"] == 3
 
@@ -639,8 +640,9 @@ async def test_orchestrator_records_model_scoring_failure_without_zero_score() -
 
     assert result.status == "failed"
     assert result.ads == []
-    assert model.score_calls_by_ad_id[failed.ad_library_id] == 2
+    assert model.score_calls_by_ad_id[failed.ad_library_id] == 4
     assert result.summary["model_scoring_failed"] == 1
+    assert result.summary["model_scoring_states"]["retryable_failed"] == 1
     assert result.summary["model_scored"] == 1
 
 
@@ -1161,3 +1163,95 @@ async def test_orchestrator_accepts_valid_second_round_structured_query_plan() -
     assert collector.queries == ["first", "second"]
     assert [item["query_id"] for item in result.summary["query_metrics"]] == ["r1_q01", "r2_q01"]
     assert result.summary["rounds"][1]["skipped_query_diagnostics"] == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_bounds_collector_concurrency_and_keeps_origin(monkeypatch) -> None:
+    monkeypatch.setenv("AD_RESEARCH_COLLECTOR_CONCURRENCY", "2")
+    get_settings.cache_clear()
+
+    class DelayedCollector(QueryCollector):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.active = 0
+            self.max_active = 0
+
+        async def collect(self, **kwargs: Any) -> list[CollectorAd]:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                query = kwargs["query"]
+                return [candidate({"777": 301, "777 bonus": 302, "casino ui": 303}[query])]
+            finally:
+                self.active -= 1
+
+    plan = QueryPlan(
+        queries=(
+            PlannedQuery(
+                query_id="r1_q01",
+                query="777",
+                intent="game_gambling",
+                rationale="test",
+                query_origin="user_exact",
+                parent_keyword="777",
+            ),
+            PlannedQuery(
+                query_id="r1_q02",
+                query="777 bonus",
+                intent="game_gambling",
+                rationale="test",
+                query_origin="user_expanded",
+                parent_keyword="777",
+            ),
+            PlannedQuery(
+                query_id="r1_q03",
+                query="casino ui",
+                intent="game_gambling",
+                rationale="test",
+                query_origin="model_exploration",
+            ),
+        )
+    )
+    collector = DelayedCollector()
+    try:
+        result = await run_custom(
+            collector=collector, media=Media(), model=Model(plans=[plan]), target_count=3
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert result.status == "completed"
+    assert collector.max_active <= 2
+    ad = next(item for item in result.ads if item["source_query"] == "777")
+    assert ad["matched_user_keywords"] == ["777"]
+    assert "user_exact" in ad["matched_query_origins"]
+
+
+@pytest.mark.asyncio
+async def test_retryable_score_is_retried_before_more_collection() -> None:
+    item = candidate(304)
+
+    class RecoveringModel(Model):
+        def __init__(self) -> None:
+            super().__init__(plans=[["first"], ["second"]])
+            self.attempts = 0
+
+        async def score_visual(self, **kwargs: Any) -> dict[str, Any]:
+            self.attempts += 1
+            if self.attempts < 3:
+                raise ProviderError(
+                    "ad research model retryable failure exhausted: HTTPStatusError"
+                )
+            return await super().score_visual(**kwargs)
+
+    collector = QueryCollector({"first": [item], "second": []})
+    model = RecoveringModel()
+    result = await run_custom(
+        collector=collector, media=Media(), model=model, target_count=1
+    )
+
+    assert result.status == "completed"
+    assert model.attempts == 3
+    assert collector.queries == ["first"]
+    assert result.summary["model_scoring_states"]["scored"] == 1

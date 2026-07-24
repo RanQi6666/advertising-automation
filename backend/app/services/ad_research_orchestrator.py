@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import utcnow
 from backend.app.db.models.ad_research_job import AdResearchJob
 from backend.app.db.models.generation_task import GenerationTask
@@ -37,7 +38,7 @@ STANDARD_ROUNDS = 4
 MAX_ROUNDS = 6
 MAX_RAW_CANDIDATES = 650
 PER_QUERY_LIMIT = 50
-MODEL_SCORE_ATTEMPTS = 2
+MODEL_SCORE_ATTEMPTS = 3
 LOW_CONFIDENCE_THRESHOLD = 0.60
 
 _QUALITY_SUPPLEMENT_SIGNALS = {
@@ -59,7 +60,7 @@ class _ResolvedQuery:
     query_id: str
     query: str
     intent: str
-    query_origin: str | None = None
+    query_origin: str = "model_exploration"
     parent_keyword: str | None = None
 
 
@@ -86,8 +87,13 @@ class AdResearchOrchestrator:
 
         seen: dict[str, CollectorAd] = {}
         source_query_ids_by_ad_library_id: dict[str, list[str]] = {}
+        source_queries_by_ad_library_id: dict[str, list[str]] = {}
+        source_origins_by_ad_library_id: dict[str, list[str]] = {}
+        matched_user_keywords_by_ad_library_id: dict[str, list[str]] = {}
         technical_diagnostics_by_ad_library_id: dict[str, TechnicalQualification] = {}
         scored_by_ad_library_id: dict[str, dict[str, Any]] = {}
+        scoring_state_by_ad_library_id: dict[str, str] = {}
+        scoring_attempts_by_ad_library_id: dict[str, int] = {}
         model_scoring_failed_ids: set[str] = set()
         used_query_ids: set[str] = set()
         used_query_keys: set[str] = set()
@@ -104,7 +110,81 @@ class AdResearchOrchestrator:
         gap_summary: dict[str, Any] = {}
         termination_reason: str | None = None
 
+        async def score_pairs(
+            pairs: list[tuple[CollectorAd, TechnicalQualification]],
+        ) -> None:
+            if not pairs:
+                return
+            for ad, _ in pairs:
+                scoring_state_by_ad_library_id[ad.ad_library_id] = "scoring"
+                scoring_attempts_by_ad_library_id[ad.ad_library_id] = (
+                    scoring_attempts_by_ad_library_id.get(ad.ad_library_id, 0) + 1
+                )
+            scored_pairs = await self._score_candidates(job.category, pairs, job.id)
+            for ad, qualification, visual_score, state in scored_pairs:
+                ad_library_id = ad.ad_library_id
+                if state != "scored" or visual_score is None or qualification.media is None:
+                    scoring_state_by_ad_library_id[ad_library_id] = state
+                    model_scoring_failed_ids.add(ad_library_id)
+                    continue
+                technical_diagnostics_by_ad_library_id[ad_library_id] = qualification
+                scored_by_ad_library_id[ad_library_id] = _public_result(
+                    ad,
+                    qualification,
+                    visual_score,
+                    source_query_ids=source_query_ids_by_ad_library_id[ad_library_id],
+                    source_queries=source_queries_by_ad_library_id[ad_library_id],
+                    source_query_origins=source_origins_by_ad_library_id[ad_library_id],
+                    matched_user_keywords=matched_user_keywords_by_ad_library_id.get(
+                        ad_library_id, []
+                    ),
+                )
+                scoring_state_by_ad_library_id[ad_library_id] = "scored"
+                model_scoring_failed_ids.discard(ad_library_id)
+
         for round_number in range(1, MAX_ROUNDS + 1):
+            if round_number > 1:
+                job.stage = "model_visual_scoring"
+                retryable_pairs = [
+                    (seen[ad_library_id], technical_diagnostics_by_ad_library_id[ad_library_id])
+                    for ad_library_id, state in scoring_state_by_ad_library_id.items()
+                    if state == "retryable_failed"
+                    and ad_library_id in seen
+                    and technical_diagnostics_by_ad_library_id[ad_library_id].qualified
+                    and scoring_attempts_by_ad_library_id.get(ad_library_id, 0)
+                    < MODEL_SCORE_ATTEMPTS
+                ]
+                await score_pairs(retryable_pairs)
+                _refresh_scored_source_attribution(
+                    scored_by_ad_library_id,
+                    source_query_ids_by_ad_library_id,
+                    source_queries_by_ad_library_id,
+                    source_origins_by_ad_library_id,
+                    matched_user_keywords_by_ad_library_id,
+                )
+                retry_scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
+                retry_priority_counts = _priority_counts(retry_scored)
+                retry_selected = _select_ranked(retry_scored, job.target_count)
+                user_exact_covered = required_user_exact_keys <= executed_user_exact_keys
+                if (
+                    retry_priority_counts["game_gambling"] >= job.target_count
+                    and user_exact_covered
+                ):
+                    return await self._complete(
+                        session=session,
+                        job=job,
+                        status="completed",
+                        selected=retry_selected,
+                        raw_collected=raw_collected,
+                        deduplicated=len(seen),
+                        technical_diagnostics=technical_diagnostics_by_ad_library_id,
+                        scored=retry_scored,
+                        model_scoring_failed_ids=model_scoring_failed_ids,
+                        scoring_states=scoring_state_by_ad_library_id,
+                        round_summaries=round_summaries,
+                        query_metrics=all_query_metrics,
+                    )
+
             quality_supplement_mode = round_number > STANDARD_ROUNDS
             round_budget = _round_budget(round_number, raw_collected)
             planner_gap_summary = {
@@ -139,35 +219,52 @@ class AdResearchOrchestrator:
             job.stage = "collecting"
             round_raw_collected = 0
             candidates_before_round = len(seen)
-            collected_queries: list[_ResolvedQuery] = []
+            collected_queries = list(queries)
             query_collection_counts: dict[str, dict[str, int]] = {}
-            for query in queries:
-                remaining = MAX_RAW_CANDIDATES - raw_collected
-                if remaining <= 0:
-                    break
-                collected_ads = await self.collector.collect(
-                    request_id=job.id,
-                    query=query.query,
-                    country=job.country,
-                    limit=min(PER_QUERY_LIMIT, remaining),
-                )
+            collector_concurrency = max(int(self.settings.ad_research_collector_concurrency), 1)
+            semaphore = asyncio.Semaphore(collector_concurrency)
+
+            async def collect_query(
+                query: _ResolvedQuery, *, collector_semaphore: asyncio.Semaphore = semaphore
+            ) -> tuple[_ResolvedQuery, list[CollectorAd]]:
+                async with collector_semaphore:
+                    ads = await self.collector.collect(
+                        request_id=job.id,
+                        query=query.query,
+                        country=job.country,
+                        limit=PER_QUERY_LIMIT,
+                    )
+                return query, ads
+
+            collected_batches = await asyncio.gather(*(collect_query(query) for query in queries))
+            for query, collected_ads in collected_batches:
                 if query.query_origin == "user_exact":
                     executed_key = _normalized_query_key(query.parent_keyword or query.query)
                     if executed_key:
                         executed_user_exact_keys.add(executed_key)
+                remaining = max(MAX_RAW_CANDIDATES - raw_collected, 0)
                 ads = collected_ads[:remaining]
-                collected_queries.append(query)
                 raw_count = len(ads)
                 new_unique_count = 0
                 for ad in ads:
                     if ad.ad_library_id not in seen:
                         seen[ad.ad_library_id] = ad
                         new_unique_count += 1
-                    source_query_ids = source_query_ids_by_ad_library_id.setdefault(
-                        ad.ad_library_id, []
+                    _append_unique(
+                        source_query_ids_by_ad_library_id, ad.ad_library_id, query.query_id
                     )
-                    if query.query_id not in source_query_ids:
-                        source_query_ids.append(query.query_id)
+                    _append_unique(
+                        source_queries_by_ad_library_id, ad.ad_library_id, query.query
+                    )
+                    _append_unique(
+                        source_origins_by_ad_library_id, ad.ad_library_id, query.query_origin
+                    )
+                    if query.parent_keyword:
+                        _append_unique(
+                            matched_user_keywords_by_ad_library_id,
+                            ad.ad_library_id,
+                            query.parent_keyword,
+                        )
                 query_collection_counts[query.query_id] = {
                     "raw_collected": raw_count,
                     "new_unique_count": new_unique_count,
@@ -194,27 +291,27 @@ class AdResearchOrchestrator:
             ]
 
             job.stage = "model_visual_scoring"
-            unscored_pairs = [
-                (ad, technical_diagnostics_by_ad_library_id[ad.ad_library_id])
-                for ad in qualified
-                if ad.ad_library_id not in scored_by_ad_library_id
-                and ad.ad_library_id not in model_scoring_failed_ids
-            ]
-            scored_pairs = await self._score_candidates(job.category, unscored_pairs, job.id)
-            for ad, qualification, visual_score, model_failed in scored_pairs:
-                if model_failed or visual_score is None or qualification.media is None:
-                    model_scoring_failed_ids.add(ad.ad_library_id)
-                    continue
-                technical_diagnostics_by_ad_library_id[ad.ad_library_id] = qualification
-                scored_by_ad_library_id[ad.ad_library_id] = _public_result(
-                    ad,
-                    qualification,
-                    visual_score,
-                    source_query_ids=source_query_ids_by_ad_library_id[ad.ad_library_id],
-                )
+            unscored_pairs = []
+            for ad in qualified:
+                ad_library_id = ad.ad_library_id
+                scoring_state_by_ad_library_id.setdefault(ad_library_id, "pending")
+                if (
+                    ad_library_id not in scored_by_ad_library_id
+                    and scoring_state_by_ad_library_id[ad_library_id] == "pending"
+                    and scoring_attempts_by_ad_library_id.get(ad_library_id, 0)
+                    < MODEL_SCORE_ATTEMPTS
+                ):
+                    unscored_pairs.append(
+                        (ad, technical_diagnostics_by_ad_library_id[ad_library_id])
+                    )
+            await score_pairs(unscored_pairs)
 
             _refresh_scored_source_attribution(
-                scored_by_ad_library_id, source_query_ids_by_ad_library_id
+                scored_by_ad_library_id,
+                source_query_ids_by_ad_library_id,
+                source_queries_by_ad_library_id,
+                source_origins_by_ad_library_id,
+                matched_user_keywords_by_ad_library_id,
             )
             scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
             priority_counts = _priority_counts(scored)
@@ -228,6 +325,7 @@ class AdResearchOrchestrator:
                 "technical_qualified": len(qualified),
                 "model_scored": len(scored),
                 "model_scoring_failed": len(model_scoring_failed_ids),
+                "model_scoring_states": _scoring_state_counts(scoring_state_by_ad_library_id),
                 "model_relevant": len(scored),
                 "selected_count": len(selected),
                 "score_distribution": score_distribution,
@@ -288,6 +386,7 @@ class AdResearchOrchestrator:
                 "previous_queries": list(used_queries),
                 "technical_rejection_summary": technical_rejection_summary,
                 "model_scoring_failed": len(model_scoring_failed_ids),
+                "model_scoring_states": _scoring_state_counts(scoring_state_by_ad_library_id),
                 "duplicate_count": raw_collected - len(candidates),
                 "skipped_query_count": len(planned_queries) - len(queries),
                 "skipped_query_diagnostics": skipped_query_diagnostics,
@@ -307,6 +406,7 @@ class AdResearchOrchestrator:
                     technical_diagnostics=technical_diagnostics_by_ad_library_id,
                     scored=scored,
                     model_scoring_failed_ids=model_scoring_failed_ids,
+                    scoring_states=scoring_state_by_ad_library_id,
                     round_summaries=round_summaries,
                     query_metrics=all_query_metrics,
                 )
@@ -322,13 +422,18 @@ class AdResearchOrchestrator:
                     technical_diagnostics=technical_diagnostics_by_ad_library_id,
                     scored=scored,
                     model_scoring_failed_ids=model_scoring_failed_ids,
+                    scoring_states=scoring_state_by_ad_library_id,
                     round_summaries=round_summaries,
                     query_metrics=all_query_metrics,
                     reason=None if has_scored_target else "insufficient_qualified_ads",
                 )
 
         _refresh_scored_source_attribution(
-            scored_by_ad_library_id, source_query_ids_by_ad_library_id
+            scored_by_ad_library_id,
+            source_query_ids_by_ad_library_id,
+            source_queries_by_ad_library_id,
+            source_origins_by_ad_library_id,
+            matched_user_keywords_by_ad_library_id,
         )
         scored = sorted(scored_by_ad_library_id.values(), key=_sort_key)
         return await self._complete(
@@ -341,6 +446,7 @@ class AdResearchOrchestrator:
             technical_diagnostics=technical_diagnostics_by_ad_library_id,
             scored=scored,
             model_scoring_failed_ids=model_scoring_failed_ids,
+            scoring_states=scoring_state_by_ad_library_id,
             round_summaries=round_summaries,
             query_metrics=all_query_metrics,
             reason=termination_reason or "insufficient_qualified_ads",
@@ -351,7 +457,7 @@ class AdResearchOrchestrator:
         category: str,
         candidates: list[tuple[CollectorAd, TechnicalQualification]],
         job_id: str,
-    ) -> list[tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, bool]]:
+    ) -> list[tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, str]]:
         semaphore = asyncio.Semaphore(max(int(self.settings.ad_research_model_concurrency), 1))
 
         async def call_model(
@@ -366,41 +472,46 @@ class AdResearchOrchestrator:
 
         async def score_one(
             candidate: CollectorAd, qualification: TechnicalQualification
-        ) -> tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, bool]:
+        ) -> tuple[CollectorAd, TechnicalQualification, dict[str, Any] | None, str]:
             media = qualification.media
             if media is None:
-                return candidate, qualification, None, True
+                return candidate, qualification, None, "permanent_failed"
 
             try:
                 score = await call_model(qualification.duration_seconds, media)
-            except Exception:
-                if MODEL_SCORE_ATTEMPTS < 2:
-                    return candidate, qualification, None, True
+            except Exception as first_error:
+                if _is_permanent_scoring_error(first_error):
+                    return candidate, qualification, None, "permanent_failed"
                 try:
                     retry_score = await call_model(qualification.duration_seconds, media)
-                except Exception:
-                    return candidate, qualification, None, True
-                return candidate, qualification, retry_score, False
+                except Exception as retry_error:
+                    state = (
+                        "permanent_failed"
+                        if _is_permanent_scoring_error(retry_error)
+                        else "retryable_failed"
+                    )
+                    return candidate, qualification, None, state
+                return candidate, qualification, retry_score, "scored"
 
             confidence = float(score.get("analysis_confidence") or 0)
             if confidence >= LOW_CONFIDENCE_THRESHOLD:
-                return candidate, qualification, score, False
+                return candidate, qualification, score, "scored"
 
             try:
                 enriched = await self.media.add_low_confidence_frames(
                     candidate, qualification, job_id=job_id
                 )
             except Exception:
-                return candidate, qualification, score, False
+                return candidate, qualification, score, "scored"
             if enriched.media is None:
-                return candidate, qualification, score, False
+                return candidate, qualification, score, "scored"
             try:
                 rescored = await call_model(enriched.duration_seconds, enriched.media)
             except Exception:
                 # A low-confidence follow-up preserves the successful first score. It is not
-                # an independent retry budget beyond the two allowed model calls.
-                return candidate, qualification, score, False
-            return candidate, enriched, rescored, False
+                # an independent retry budget beyond the original successful score.
+                return candidate, qualification, score, "scored"
+            return candidate, enriched, rescored, "scored"
 
         return await asyncio.gather(
             *(score_one(candidate, qualification) for candidate, qualification in candidates)
@@ -418,6 +529,7 @@ class AdResearchOrchestrator:
         technical_diagnostics: dict[str, TechnicalQualification],
         scored: list[dict[str, Any]],
         model_scoring_failed_ids: set[str],
+        scoring_states: dict[str, str],
         round_summaries: list[dict[str, Any]],
         query_metrics: list[dict[str, Any]],
         reason: str | None = None,
@@ -436,6 +548,7 @@ class AdResearchOrchestrator:
             scored=scored,
             selected=completed_selected,
             model_scoring_failed_ids=model_scoring_failed_ids,
+            scoring_states=scoring_states,
             round_summaries=round_summaries,
             query_metrics=query_metrics,
             reason=reason,
@@ -564,14 +677,32 @@ def _new_queries(
     return queries, skipped_diagnostics
 
 
+def _append_unique(mapping: dict[str, list[str]], key: str, value: str) -> None:
+    values = mapping.setdefault(key, [])
+    if value not in values:
+        values.append(value)
+
+
 def _refresh_scored_source_attribution(
     scored_by_ad_library_id: dict[str, dict[str, Any]],
     source_query_ids_by_ad_library_id: dict[str, list[str]],
+    source_queries_by_ad_library_id: dict[str, list[str]],
+    source_origins_by_ad_library_id: dict[str, list[str]],
+    matched_user_keywords_by_ad_library_id: dict[str, list[str]],
 ) -> None:
     for ad_library_id, scored in scored_by_ad_library_id.items():
-        source_query_ids = source_query_ids_by_ad_library_id[ad_library_id]
-        scored["first_source_query_id"] = source_query_ids[0]
+        source_query_ids = source_query_ids_by_ad_library_id.get(ad_library_id, [])
+        source_queries = source_queries_by_ad_library_id.get(ad_library_id, [])
+        scored["first_source_query_id"] = source_query_ids[0] if source_query_ids else None
         scored["source_query_ids"] = list(source_query_ids)
+        scored["source_query"] = source_queries[0] if source_queries else None
+        scored["matched_queries"] = list(source_queries)
+        scored["matched_user_keywords"] = list(
+            matched_user_keywords_by_ad_library_id.get(ad_library_id, [])
+        )
+        scored["matched_query_origins"] = list(
+            source_origins_by_ad_library_id.get(ad_library_id, [])
+        )
 
 
 def _public_result(
@@ -580,6 +711,9 @@ def _public_result(
     visual_score: dict[str, Any],
     *,
     source_query_ids: list[str],
+    source_queries: list[str],
+    source_query_origins: list[str],
+    matched_user_keywords: list[str],
 ) -> dict[str, Any]:
     media = qualification.media
     if media is None:
@@ -593,6 +727,10 @@ def _public_result(
         "ad_library_id": ad.ad_library_id,
         "first_source_query_id": source_query_ids[0],
         "source_query_ids": list(source_query_ids),
+        "source_query": source_queries[0],
+        "matched_queries": list(source_queries),
+        "matched_user_keywords": list(matched_user_keywords),
+        "matched_query_origins": list(source_query_origins),
         "advertiser_name": ad.advertiser_name,
         "ad_snapshot_url": ad.ad_snapshot_url,
         "text": "\n".join(ad.text_variants[:3]),
@@ -618,7 +756,6 @@ def _public_result(
         "fallback_reason": None,
         "media": _public_media(media),
     }
-
 
 def _public_media(media: PreparedAdMedia) -> dict[str, Any]:
     return {
@@ -815,6 +952,27 @@ def _quality_supplement_signals(
     return signals
 
 
+
+def _is_permanent_scoring_error(error: Exception) -> bool:
+    return (
+        isinstance(error, ProviderError)
+        and "permanent failure" in str(error).casefold()
+    )
+
+
+def _scoring_state_counts(states: dict[str, str]) -> dict[str, int]:
+    return {
+        state: sum(value == state for value in states.values())
+        for state in (
+            "pending",
+            "scoring",
+            "retryable_failed",
+            "scored",
+            "permanent_failed",
+        )
+    }
+
+
 def _summary(
     *,
     raw: int,
@@ -823,6 +981,7 @@ def _summary(
     scored: list[dict[str, Any]],
     selected: list[dict[str, Any]],
     model_scoring_failed_ids: set[str],
+    scoring_states: dict[str, str],
     round_summaries: list[dict[str, Any]],
     query_metrics: list[dict[str, Any]],
     reason: str | None,
@@ -838,6 +997,7 @@ def _summary(
         ),
         "model_scored": len(scored),
         "model_scoring_failed": len(model_scoring_failed_ids),
+        "model_scoring_states": _scoring_state_counts(scoring_states),
         "model_relevant": len(scored),
         "selected_count": len(selected),
         "minimum_active_days": MIN_ACTIVE_DAYS,
