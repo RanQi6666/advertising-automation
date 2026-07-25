@@ -40,6 +40,9 @@ from backend.app.services.collaboration import (
     require_write_access,
 )
 from backend.app.services.copywriting_service import CopywritingService
+from backend.app.services.external_image_route_service import (
+    advance_priority_fallback_route_metadata,
+)
 from backend.app.services.generation_attempt_service import classify_generation_error
 from backend.app.services.generation_runtime_monitor import GenerationRuntimeMonitor
 from backend.app.services.topic_service import TopicService
@@ -1228,6 +1231,15 @@ class GenerationTaskService:
         if _should_auto_retry_task(task, error_code):
             delay_seconds = _auto_retry_delay_seconds(task)
             now = utcnow()
+            next_metadata = advance_priority_fallback_route_metadata(
+                task.metadata_json,
+                payload=task.payload_json,
+                task_type=task.task_type,
+                attempt_count=task.attempt_count,
+                error_code=error_code,
+            )
+            if next_metadata is not None:
+                task.metadata_json = next_metadata
             task.status = "queued"
             task.retryable = False
             task.queued_at = now + timedelta(seconds=delay_seconds)

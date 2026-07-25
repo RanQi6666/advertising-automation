@@ -1640,6 +1640,257 @@ async def test_generation_task_auto_retries_gateway_provider_error(
     get_settings.cache_clear()
 
 
+@pytest.fixture
+def priority_fallback_retry_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_ENABLED", "true")
+    monkeypatch.setenv("GENERATION_TASK_AUTO_RETRY_DELAYS_SECONDS", "0")
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS",
+        "jbb_gpt_image,dm_fox_gpt_image",
+    )
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS",
+        "cpa_gemini,volcengine",
+    )
+    monkeypatch.setenv("JBB_GPT_IMAGE_MODEL", "jbb-gpt-image-model")
+    monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-gpt-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    monkeypatch.setenv("EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "error", "error_code", "next_provider", "next_model"),
+    [
+        (
+            "jbb_gpt_image",
+            "jbb-gpt-image-model",
+            TimeoutError("JBB image request timed out"),
+            "provider_timeout",
+            "cpa_gemini",
+            "cpa-gemini-image-model",
+        ),
+        (
+            "cpa_gemini",
+            "cpa-gemini-image-model",
+            ProviderError("CPA Gemini image API returned HTTP 502"),
+            "unknown_provider_error",
+            "volcengine",
+            "volcengine-image-model",
+        ),
+    ],
+)
+async def test_priority_fallback_auto_retry_advances_technical_failure_route(
+    priority_fallback_retry_settings: None,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model: str,
+    error: Exception,
+    error_code: str,
+    next_provider: str,
+    next_model: str,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / f'priority-{provider}.sqlite'}"
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        task_module,
+        "_schedule_auto_retry_task",
+        lambda task, _countdown: scheduled.append(task.id),
+    )
+
+    async with session_factory() as session:
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id=f"priority-{provider}",
+            campaign_id=None,
+            payload={"prompt": "priority image", "count": 1, "size": "9:16"},
+            metadata={
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": provider,
+                    "model": model,
+                }
+            },
+            max_attempts=3,
+        )
+        task.status = "running"
+        task.attempt_count = 1
+        await session.commit()
+
+        await GenerationTaskService()._mark_failed(session, task, error)
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "queued"
+    assert stored.attempt_count == 1
+    assert stored.error_code == error_code
+    assert stored.metadata_json["image_route"]["provider"] == next_provider
+    assert stored.metadata_json["image_route"]["model"] == next_model
+    assert stored.metadata_json["image_route_history"][0]["provider"] == provider
+    assert stored.metadata_json["auto_retry"]["next_attempt"] == 2
+    assert scheduled == [stored.id]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_priority_fallback_does_not_advance_multi_image_or_final_route(
+    priority_fallback_retry_settings: None,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'priority-stop.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        task_module,
+        "_schedule_auto_retry_task",
+        lambda task, _countdown: scheduled.append(task.id),
+    )
+
+    async with session_factory() as session:
+        service = GenerationTaskService()
+        multi_image_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id="priority-multi",
+            campaign_id=None,
+            payload={"prompt": "priority image", "count": 2, "size": "9:16"},
+            metadata={
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "jbb_gpt_image",
+                    "model": "jbb-gpt-image-model",
+                }
+            },
+            max_attempts=3,
+        )
+        multi_image_task.status = "running"
+        multi_image_task.attempt_count = 1
+
+        final_route_task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id="priority-final",
+            campaign_id=None,
+            payload={"prompt": "priority image", "count": 1, "size": "9:16"},
+            metadata={
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "volcengine",
+                    "model": "volcengine-image-model",
+                }
+            },
+            max_attempts=3,
+        )
+        final_route_task.status = "running"
+        final_route_task.attempt_count = 3
+        await session.commit()
+
+        await service._mark_failed(
+            session,
+            multi_image_task,
+            TimeoutError("JBB image request timed out"),
+        )
+        await service._mark_failed(
+            session,
+            final_route_task,
+            TimeoutError("Volcengine image request timed out"),
+        )
+        stored_multi = await session.get(GenerationTask, multi_image_task.id)
+        stored_final = await session.get(GenerationTask, final_route_task.id)
+
+    assert stored_multi is not None
+    assert stored_multi.status == "queued"
+    assert stored_multi.metadata_json["image_route"]["provider"] == "jbb_gpt_image"
+    assert "image_route_history" not in stored_multi.metadata_json
+    assert stored_final is not None
+    assert stored_final.status == "failed"
+    assert "image_route_history" not in stored_final.metadata_json
+    assert scheduled == [stored_multi.id]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_priority_fallback_does_not_advance_provider_400(
+    priority_fallback_retry_settings: None,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'priority-400.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        task_module,
+        "_schedule_auto_retry_task",
+        lambda task, _countdown: scheduled.append(task.id),
+    )
+
+    async with session_factory() as session:
+        task = await GenerationTaskService().create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id="priority-400",
+            campaign_id=None,
+            payload={"prompt": "priority image", "count": 1, "size": "9:16"},
+            metadata={
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "jbb_gpt_image",
+                    "model": "jbb-gpt-image-model",
+                }
+            },
+            max_attempts=3,
+        )
+        task.status = "running"
+        task.attempt_count = 1
+        await session.commit()
+
+        await GenerationTaskService()._mark_failed(
+            session,
+            task,
+            ProviderError("JBB image API returned HTTP 400"),
+        )
+        stored = await session.get(GenerationTask, task.id)
+
+    assert stored is not None
+    assert stored.status == "failed"
+    assert stored.metadata_json["image_route"]["provider"] == "jbb_gpt_image"
+    assert "image_route_history" not in stored.metadata_json
+    assert scheduled == []
+
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_model_provider_capacity_limits_image_work(
     monkeypatch,
