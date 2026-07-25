@@ -44,6 +44,7 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             api_key=api_key,
             base_url=base_url,
             model=settings.model_gateway_gemini_image_model,
+            aspect_ratio=settings.model_gateway_gemini_image_aspect_ratio,
             storage_root=settings.local_storage_root,
             timeout_seconds=settings.model_gateway_image_timeout_seconds,
         )

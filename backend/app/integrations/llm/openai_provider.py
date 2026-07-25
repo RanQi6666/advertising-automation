@@ -1854,7 +1854,7 @@ def _image_brief_from_data(data: dict[str, Any]) -> ImageBrief:
         "visual_direction": sanitize_creative_safety_text(
             _coerce_text(data.get("visual_direction"))
         ),
-        "size": _coerce_text(data.get("size") or "1:1"),
+        "size": _coerce_text(data.get("size") or "9:16"),
     }
     return ImageBrief.model_validate(normalized)
 

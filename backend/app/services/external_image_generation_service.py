@@ -136,7 +136,7 @@ class ExternalImageGenerationService:
             or _clean_text(source_image.get("size"))
             or _clean_text(source_result.get("size"))
             or _clean_text(source_payload.get("size"))
-            or "1:1"
+            or "9:16"
         )
         model_id = (
             _clean_text(payload.model_id)
@@ -215,7 +215,7 @@ class ExternalImageGenerationService:
             raise AppError("source image is unavailable")
 
         resolved_count = _revision_count(count, {}, {})
-        resolved_size = _clean_text(size) or "1:1"
+        resolved_size = _clean_text(size) or "9:16"
         cleaned_model_id = _clean_text(model_id)
         business_id = cleaned_external_request_id or str(uuid4())
         task = await self.task_service.create_task(
@@ -270,7 +270,7 @@ class ExternalImageGenerationService:
         if is_revision:
             prompt = _required_text(payload_json.get("revised_prompt"), "prompt")
             count = _revision_count(payload_json.get("count"), {}, {})
-            size = _clean_text(payload_json.get("size")) or "1:1"
+            size = _clean_text(payload_json.get("size")) or "9:16"
             model_id = _clean_text(payload_json.get("model_id"))
             external_request_id = _clean_text(payload_json.get("external_request_id"))
             source_job_id = _clean_text(payload_json.get("source_job_id"))
@@ -296,7 +296,7 @@ class ExternalImageGenerationService:
         elif is_from_image:
             prompt = _required_text(payload_json.get("prompt"), "prompt")
             count = _revision_count(payload_json.get("count"), {}, {})
-            size = _clean_text(payload_json.get("size")) or "1:1"
+            size = _clean_text(payload_json.get("size")) or "9:16"
             model_id = _clean_text(payload_json.get("model_id"))
             external_request_id = _clean_text(payload_json.get("external_request_id"))
             source_job_id = None
@@ -490,7 +490,7 @@ class ExternalImageGenerationService:
             images=images if task.status == "succeeded" else [],
             error_message=task.error_message,
             count=int(result.get("count") or payload.get("count") or 1),
-            size=str(result.get("size") or payload.get("size") or "1:1"),
+            size=str(result.get("size") or payload.get("size") or "9:16"),
             model_id=_clean_text(result.get("model_id") or payload.get("model_id")),
             source_job_id=_clean_text(
                 result.get("source_job_id") or payload.get("source_job_id")

@@ -28,7 +28,7 @@ def test_dm_fox_gpt_image_uses_its_own_openai_compatible_settings(
     assert provider.api_key == "test-dm-fox-key"
     assert provider.base_url == "https://dm-fox.example.test/codex/v1"
     assert provider.model == "gpt-image-2"
-    assert provider.provider_size == "1024x1024"
+    assert provider.provider_size == "1024x1536"
     assert provider.extra_body == {"quality": "high"}
     assert provider.provider_name == "dm_fox_gpt_image"
     assert provider.edit_enabled is False

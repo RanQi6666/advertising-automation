@@ -49,6 +49,7 @@ class CpaGeminiImageProvider:
         api_key: str,
         base_url: str,
         model: str,
+        aspect_ratio: str = "9:16",
         storage_root: str = "storage",
         timeout_seconds: float = 300.0,
         http_client: httpx.AsyncClient | None = None,
@@ -56,6 +57,7 @@ class CpaGeminiImageProvider:
         self.api_key = api_key
         self.base_url = _normalize_cpa_gemini_base_url(base_url)
         self.model = model
+        self.aspect_ratio = aspect_ratio
         self.storage_root = Path(storage_root)
         self.timeout_seconds = timeout_seconds
         self._http_client = http_client or _shared_cpa_gemini_image_client(self.base_url)
@@ -70,12 +72,13 @@ class CpaGeminiImageProvider:
             )
 
         prompt = brief.raw_prompt or _prompt_from_brief(brief)
+        request_prompt = _with_aspect_ratio_instruction(prompt, self.aspect_ratio)
         response = await self._post_chat_completion(
             {
                 "model": self.model,
                 "stream": False,
                 "modalities": ["image", "text"],
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": request_prompt}],
             }
         )
         storage_key = self._store_data_url(_image_data_url_from_response(response))
@@ -88,6 +91,7 @@ class CpaGeminiImageProvider:
             metadata={
                 "provider": "cpa_gemini",
                 "model": self.model,
+                "aspect_ratio": self.aspect_ratio,
                 "image_index": brief.image_index,
                 "brief_title": brief.title,
                 "mode": "generate",
@@ -177,3 +181,10 @@ def _extension_from_mime_type(mime_type: str) -> str:
     if mime_type == "image/gif":
         return ".gif"
     return ".png"
+
+def _with_aspect_ratio_instruction(prompt: str, aspect_ratio: str) -> str:
+    return (
+        f"{prompt}\n\n"
+        f"Output requirement: generate a vertical {aspect_ratio} portrait image. "
+        "Keep all important subjects, logos, and text inside the safe area."
+    )

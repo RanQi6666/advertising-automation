@@ -40,6 +40,7 @@ async def test_cpa_gemini_provider_posts_chat_request_and_stores_data_url(tmp_pa
             api_key="gateway-key",
             base_url="http://cpa.test/v1",
             model="gemini-3.1-flash-image",
+            aspect_ratio="9:16",
             storage_root=str(tmp_path),
             http_client=client,
         )
@@ -56,7 +57,16 @@ async def test_cpa_gemini_provider_posts_chat_request_and_stores_data_url(tmp_pa
         "model": "gemini-3.1-flash-image",
         "stream": False,
         "modalities": ["image", "text"],
-        "messages": [{"role": "user", "content": "Produce a product image."}],
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Produce a product image.\n\n"
+                    "Output requirement: generate a vertical 9:16 portrait image. "
+                    "Keep all important subjects, logos, and text inside the safe area."
+                ),
+            }
+        ],
     }
 
 
@@ -72,6 +82,7 @@ async def test_cpa_gemini_provider_rejects_response_without_image_data_url(tmp_p
             api_key="gateway-key",
             base_url="http://cpa.test/v1",
             model="gemini-3.1-flash-image",
+            aspect_ratio="9:16",
             storage_root=str(tmp_path),
             http_client=client,
         )

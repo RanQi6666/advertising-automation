@@ -32,7 +32,7 @@ class MaterialCopyGenerateRequest(MaterialGenerationBaseRequest):
 
 class MaterialImageGenerateRequest(MaterialGenerationBaseRequest):
     count: int = Field(default=1, ge=1, le=5)
-    size: str = "1:1"
+    size: str = "9:16"
 
 
 class MaterialVideoGenerateRequest(MaterialGenerationBaseRequest):

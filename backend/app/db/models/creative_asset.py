@@ -15,7 +15,7 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     prompt: Mapped[str] = mapped_column(Text)
     alt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    size: Mapped[str] = mapped_column(String(32), default="1:1")
+    size: Mapped[str] = mapped_column(String(32), default="9:16")
     status: Mapped[str] = mapped_column(
         String(32), default=CreativeStatus.GENERATED.value, index=True
     )

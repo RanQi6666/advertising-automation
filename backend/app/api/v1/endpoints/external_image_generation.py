@@ -146,7 +146,7 @@ async def create_uploaded_image_edit_job(
             content=_creation_envelope(
                 job_id=task.id,
                 count=int(task_payload.get("count") or count),
-                size=str(task_payload.get("size") or size or "1:1"),
+                size=str(task_payload.get("size") or size or "9:16"),
                 mode=_clean_mode(task_payload.get("mode")),
             ).model_dump(),
         )
@@ -184,7 +184,7 @@ async def create_image_revision_job(
             content=_creation_envelope(
                 job_id=task.id,
                 count=int(task_payload.get("count") or 1),
-                size=str(task_payload.get("size") or "1:1"),
+                size=str(task_payload.get("size") or "9:16"),
                 source_job_id=str(task_payload.get("source_job_id") or source_job_id),
                 mode=_clean_mode((task.metadata_json or {}).get("mode")),
             ).model_dump(),

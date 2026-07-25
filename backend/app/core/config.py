@@ -109,7 +109,8 @@ class Settings(BaseSettings):
     job_status_cache_ttl_seconds: int = Field(default=600, ge=10, le=86400)
     model_gateway_image_model: str | None = None
     model_gateway_gemini_image_model: str | None = None
-    model_gateway_image_size: str = "1024x1024"
+    model_gateway_gemini_image_aspect_ratio: str = "9:16"
+    model_gateway_image_size: str = "1024x1536"
     model_gateway_image_response_format: str | None = None
     model_gateway_image_edit_enabled: bool = True
     model_gateway_image_edit_path: str = "/images/edits"
@@ -118,20 +119,20 @@ class Settings(BaseSettings):
     jbb_grok_image_api_key: str | None = None
     jbb_grok_image_base_url: str | None = None
     jbb_grok_image_model: str | None = None
-    jbb_grok_image_size: str = "1024x1024"
+    jbb_grok_image_size: str = "1024x1536"
     jbb_gpt_image_api_key: str | None = None
     jbb_gpt_image_base_url: str | None = None
     jbb_gpt_image_model: str | None = None
-    jbb_gpt_image_size: str = "1024x1024"
+    jbb_gpt_image_size: str = "1024x1536"
     dm_fox_gpt_image_api_key: str | None = None
     dm_fox_gpt_image_base_url: str | None = None
     dm_fox_gpt_image_model: str | None = None
-    dm_fox_gpt_image_size: str = "1024x1024"
+    dm_fox_gpt_image_size: str = "1024x1536"
     dm_fox_gpt_image_quality: str = "high"
     newcli_gemini_image_api_key: str | None = None
     newcli_gemini_image_base_url: str | None = None
     newcli_gemini_image_model: str | None = None
-    newcli_gemini_image_aspect_ratio: str = "1:1"
+    newcli_gemini_image_aspect_ratio: str = "9:16"
     model_gateway_text_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
@@ -141,7 +142,7 @@ class Settings(BaseSettings):
     volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     volcengine_model: str = "doubao-seed-1-8-251228"
     volcengine_image_model: str = "doubao-seedream-4-5-251128"
-    volcengine_image_size: str = "2K"
+    volcengine_image_size: str = "1152x2048"
     volcengine_image_watermark: bool = False
     volcengine_video_api_key: str | None = None
     volcengine_video_model: str = "doubao-seedance-1-5-pro"

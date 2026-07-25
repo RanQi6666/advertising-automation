@@ -27,7 +27,7 @@ class ImageBrief(BaseModel):
     title: str
     short_text: str
     visual_direction: str
-    size: str = "1:1"
+    size: str = "9:16"
     raw_prompt: str | None = None
     reference_image_data_url: str | None = None
     reference_image_url: str | None = None
@@ -909,5 +909,5 @@ class GeneratedImage(BaseModel):
     url: str | None = None
     storage_key: str | None = None
     alt_text: str | None = None
-    size: str = "1:1"
+    size: str = "9:16"
     metadata: dict = Field(default_factory=dict)
