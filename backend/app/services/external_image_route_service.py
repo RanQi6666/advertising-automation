@@ -1,4 +1,5 @@
 ﻿from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,6 +19,16 @@ ImageRouteProvider = Literal[
     "newcli_gemini",
 ]
 ImageRouteStrategy = Literal["round_robin", "priority_fallback"]
+PRIORITY_FALLBACK_ERROR_CODES = {
+    "provider_timeout",
+    "provider_429",
+    "unknown_provider_error",
+}
+PRIORITY_FALLBACK_NEXT_PROVIDER: dict[ImageRouteProvider, ImageRouteProvider] = {
+    "jbb_gpt_image": "cpa_gemini",
+    "dm_fox_gpt_image": "cpa_gemini",
+    "cpa_gemini": "volcengine",
+}
 
 _redis_client_factory_for_tests: Callable[[str], object] | None = None
 
@@ -148,6 +159,67 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
         model=model,
         strategy=strategy,
     )
+
+
+def advance_priority_fallback_route_metadata(
+    metadata: dict | None,
+    *,
+    payload: dict | None,
+    task_type: str,
+    attempt_count: int,
+    error_code: str,
+    settings: Settings | None = None,
+) -> dict | None:
+    if task_type != "external_image_generate":
+        return None
+    if int((payload or {}).get("count") or 1) != 1:
+        return None
+    if error_code not in PRIORITY_FALLBACK_ERROR_CODES:
+        return None
+
+    route = route_from_metadata(metadata)
+    if route is None or route.strategy != "priority_fallback":
+        return None
+
+    next_provider = PRIORITY_FALLBACK_NEXT_PROVIDER.get(route.provider)
+    if next_provider is None:
+        return None
+
+    settings = settings or get_settings()
+    next_route = ExternalImageRoute(
+        sequence=route.sequence,
+        provider=next_provider,
+        model="",
+        strategy="priority_fallback",
+    )
+    next_model = effective_image_model(
+        settings_for_external_image_route(settings, next_route)
+    )
+    if not next_model:
+        raise AppError(f"No image model configured for route provider: {next_provider}.")
+
+    updated_metadata = deepcopy(metadata or {})
+    updated_metadata["image_route"] = ExternalImageRoute(
+        sequence=route.sequence,
+        provider=next_provider,
+        model=next_model,
+        strategy="priority_fallback",
+    ).as_metadata()
+    history = updated_metadata.setdefault("image_route_history", [])
+    if not isinstance(history, list):
+        history = []
+        updated_metadata["image_route_history"] = history
+    history.append(
+        {
+            "attempt": attempt_count,
+            "provider": route.provider,
+            "model": route.model,
+            "error_code": error_code,
+            "next_provider": next_provider,
+            "next_model": next_model,
+        }
+    )
+    return updated_metadata
 
 
 def _make_redis_client(settings: Settings) -> object:

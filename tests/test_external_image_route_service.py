@@ -247,3 +247,127 @@ def test_jbb_route_restores_its_pinned_model() -> None:
     assert external_image_route_service.route_from_metadata(
         {"image_route": route.as_metadata()}
     ) == route
+
+
+@pytest.mark.parametrize(
+    ("provider", "error_code", "next_provider", "next_model"),
+    [
+        ("jbb_gpt_image", "provider_timeout", "cpa_gemini", "cpa-gemini-image-model"),
+        ("dm_fox_gpt_image", "provider_429", "cpa_gemini", "cpa-gemini-image-model"),
+        ("cpa_gemini", "unknown_provider_error", "volcengine", "volcengine-image-model"),
+    ],
+)
+def test_priority_fallback_route_metadata_advances_technical_failures(
+    priority_fallback_settings: FakeRedis,
+    provider: str,
+    error_code: str,
+    next_provider: str,
+    next_model: str,
+) -> None:
+    metadata = {
+        "image_route": {
+            "strategy": "priority_fallback",
+            "sequence": 1,
+            "provider": provider,
+            "model": f"{provider}-model",
+        }
+    }
+
+    updated = external_image_route_service.advance_priority_fallback_route_metadata(
+        metadata,
+        payload={"prompt": "test", "count": 1, "size": "9:16"},
+        task_type="external_image_generate",
+        attempt_count=1,
+        error_code=error_code,
+    )
+
+    assert updated is not None
+    assert updated["image_route"]["provider"] == next_provider
+    assert updated["image_route"]["model"] == next_model
+    assert updated["image_route_history"] == [
+        {
+            "attempt": 1,
+            "provider": provider,
+            "model": f"{provider}-model",
+            "error_code": error_code,
+            "next_provider": next_provider,
+            "next_model": next_model,
+        }
+    ]
+    assert metadata["image_route"]["provider"] == provider
+
+
+@pytest.mark.parametrize(
+    ("metadata", "payload", "task_type", "error_code"),
+    [
+        (
+            {
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "volcengine",
+                    "model": "volcengine-image-model",
+                }
+            },
+            {"prompt": "test", "count": 1},
+            "external_image_generate",
+            "provider_timeout",
+        ),
+        (
+            {
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "jbb_gpt_image",
+                    "model": "jbb-gpt-image-model",
+                }
+            },
+            {"prompt": "test", "count": 2},
+            "external_image_generate",
+            "provider_timeout",
+        ),
+        (
+            {
+                "image_route": {
+                    "strategy": "priority_fallback",
+                    "sequence": 1,
+                    "provider": "jbb_gpt_image",
+                    "model": "jbb-gpt-image-model",
+                }
+            },
+            {"prompt": "test", "count": 1},
+            "external_image_generate",
+            "provider_400",
+        ),
+        (
+            {
+                "image_route": {
+                    "strategy": "round_robin",
+                    "sequence": 1,
+                    "provider": "jbb_gpt_image",
+                    "model": "jbb-gpt-image-model",
+                }
+            },
+            {"prompt": "test", "count": 1},
+            "external_image_generate",
+            "provider_timeout",
+        ),
+    ],
+)
+def test_priority_fallback_route_metadata_does_not_advance_ineligible_tasks(
+    priority_fallback_settings: FakeRedis,
+    metadata: dict,
+    payload: dict,
+    task_type: str,
+    error_code: str,
+) -> None:
+    assert (
+        external_image_route_service.advance_priority_fallback_route_metadata(
+            metadata,
+            payload=payload,
+            task_type=task_type,
+            attempt_count=1,
+            error_code=error_code,
+        )
+        is None
+    )
