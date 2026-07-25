@@ -74,3 +74,50 @@ def test_selected_route_overrides_global_image_provider(
 
     assert routed.image_provider == "volcengine"
     assert routed.volcengine_image_model == "volcengine-image-model"
+
+@pytest.mark.asyncio
+async def test_round_robin_route_includes_cpa_gemini_with_its_own_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis()
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "round_robin")
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_PROVIDERS", "gateway,volcengine,cpa_gemini")
+    monkeypatch.setenv("MODEL_GATEWAY_IMAGE_MODEL", "gateway-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+    get_settings.cache_clear()
+    external_image_route_service.set_redis_client_factory_for_tests(
+        lambda _url: fake_redis
+    )
+    try:
+        routes = [
+            await external_image_route_service.select_external_image_route()
+            for _ in range(4)
+        ]
+    finally:
+        external_image_route_service.set_redis_client_factory_for_tests(None)
+        get_settings.cache_clear()
+
+    assert [(route.sequence, route.provider, route.model) for route in routes] == [
+        (1, "gateway", "gateway-image-model"),
+        (2, "volcengine", "volcengine-image-model"),
+        (3, "cpa_gemini", "gemini-3.1-flash-image"),
+        (4, "gateway", "gateway-image-model"),
+    ]
+
+
+def test_cpa_gemini_route_restores_its_pinned_model() -> None:
+    settings = get_settings().model_copy(update={"image_provider": "gateway"})
+    route = external_image_route_service.ExternalImageRoute(
+        sequence=3,
+        provider="cpa_gemini",
+        model="gemini-3.1-flash-image",
+    )
+
+    routed = external_image_route_service.settings_for_external_image_route(settings, route)
+
+    assert routed.image_provider == "cpa_gemini"
+    assert routed.model_gateway_gemini_image_model == "gemini-3.1-flash-image"
+    assert external_image_route_service.route_from_metadata(
+        {"image_route": route.as_metadata()}
+    ) == route
