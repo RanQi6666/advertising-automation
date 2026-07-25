@@ -36,6 +36,10 @@ def settings_for_image_model(settings: Settings, model_id: str | None) -> Settin
         updates["model_gateway_image_model"] = selected_model
     elif settings.image_provider == "volcengine":
         updates["volcengine_image_model"] = selected_model
+    elif settings.image_provider == "jbb_grok":
+        updates["jbb_grok_image_model"] = selected_model
+    elif settings.image_provider == "jbb_gpt_image":
+        updates["jbb_gpt_image_model"] = selected_model
     return settings.model_copy(update=updates)
 
 
@@ -60,6 +64,10 @@ def effective_image_model(settings: Settings, model_id: str | None = None) -> st
         return settings.volcengine_image_model
     if settings.image_provider == "cpa_gemini":
         return settings.model_gateway_gemini_image_model or ""
+    if settings.image_provider == "jbb_grok":
+        return settings.jbb_grok_image_model or ""
+    if settings.image_provider == "jbb_gpt_image":
+        return settings.jbb_gpt_image_model or ""
     return settings.image_provider
 
 

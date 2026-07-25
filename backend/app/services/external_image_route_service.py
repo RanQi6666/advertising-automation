@@ -7,7 +7,9 @@ from backend.app.core.errors import AppError, ProviderError
 from backend.app.services.model_selection import effective_image_model
 
 EXTERNAL_IMAGE_ROUTE_REDIS_KEY = "external_image_generation:round_robin"
-ImageRouteProvider = Literal["gateway", "volcengine", "cpa_gemini"]
+ImageRouteProvider = Literal[
+    "gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+]
 
 _redis_client_factory_for_tests: Callable[[str], object] | None = None
 
@@ -73,6 +75,10 @@ def settings_for_external_image_route(
         updates["volcengine_image_model"] = route.model
     if route.provider == "cpa_gemini" and route.model:
         updates["model_gateway_gemini_image_model"] = route.model
+    if route.provider == "jbb_grok" and route.model:
+        updates["jbb_grok_image_model"] = route.model
+    if route.provider == "jbb_gpt_image" and route.model:
+        updates["jbb_gpt_image_model"] = route.model
     return settings.model_copy(update=updates)
 
 
@@ -83,7 +89,9 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
     provider = route_data.get("provider")
     model = route_data.get("model")
     sequence = route_data.get("sequence")
-    supported_providers = {"gateway", "volcengine", "cpa_gemini"}
+    supported_providers = {
+        "gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+    }
     if provider not in supported_providers or not isinstance(model, str) or not model:
         return None
     try:

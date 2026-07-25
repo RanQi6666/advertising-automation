@@ -46,6 +46,42 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             storage_root=settings.local_storage_root,
             timeout_seconds=settings.model_gateway_image_timeout_seconds,
         )
+    if settings.image_provider in {"jbb_grok", "jbb_gpt_image"}:
+        if settings.image_provider == "jbb_grok":
+            api_key = settings.jbb_grok_image_api_key
+            base_url = settings.jbb_grok_image_base_url
+            model = settings.jbb_grok_image_model
+            provider_size = settings.jbb_grok_image_size
+            provider_label = "JBB_GROK_IMAGE"
+        else:
+            api_key = settings.jbb_gpt_image_api_key
+            base_url = settings.jbb_gpt_image_base_url
+            model = settings.jbb_gpt_image_model
+            provider_size = settings.jbb_gpt_image_size
+            provider_label = "JBB_GPT_IMAGE"
+        if not api_key:
+            raise ProviderError(
+                f"{provider_label}_API_KEY is required when "
+                f"IMAGE_PROVIDER={settings.image_provider}."
+            )
+        if not base_url:
+            raise ProviderError(
+                f"{provider_label}_BASE_URL is required when "
+                f"IMAGE_PROVIDER={settings.image_provider}."
+            )
+        if not model:
+            raise ProviderError(
+                f"{provider_label}_MODEL is required when IMAGE_PROVIDER={settings.image_provider}."
+            )
+        return GatewayImageProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            provider_size=provider_size,
+            storage_root=settings.local_storage_root,
+            timeout_seconds=settings.model_gateway_image_timeout_seconds,
+            edit_enabled=False,
+        )
     if settings.image_provider == "gateway":
         api_key = settings.model_gateway_api_key or settings.openai_api_key
         base_url = settings.model_gateway_base_url or settings.openai_base_url

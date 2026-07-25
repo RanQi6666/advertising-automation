@@ -121,3 +121,57 @@ def test_cpa_gemini_route_restores_its_pinned_model() -> None:
     assert external_image_route_service.route_from_metadata(
         {"image_route": route.as_metadata()}
     ) == route
+
+
+@pytest.mark.asyncio
+async def test_round_robin_route_includes_two_jbb_image_nodes_with_separate_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis()
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "round_robin")
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_ROUTE_PROVIDERS",
+        "gateway,volcengine,cpa_gemini,jbb_grok,jbb_gpt_image",
+    )
+    monkeypatch.setenv("MODEL_GATEWAY_IMAGE_MODEL", "gateway-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+    monkeypatch.setenv("JBB_GROK_IMAGE_MODEL", "grok-imagine-image-quality")
+    monkeypatch.setenv("JBB_GPT_IMAGE_MODEL", "gpt-image-2")
+    get_settings.cache_clear()
+    external_image_route_service.set_redis_client_factory_for_tests(
+        lambda _url: fake_redis
+    )
+    try:
+        routes = [
+            await external_image_route_service.select_external_image_route()
+            for _ in range(5)
+        ]
+    finally:
+        external_image_route_service.set_redis_client_factory_for_tests(None)
+        get_settings.cache_clear()
+
+    assert [(route.sequence, route.provider, route.model) for route in routes] == [
+        (1, "gateway", "gateway-image-model"),
+        (2, "volcengine", "volcengine-image-model"),
+        (3, "cpa_gemini", "gemini-3.1-flash-image"),
+        (4, "jbb_grok", "grok-imagine-image-quality"),
+        (5, "jbb_gpt_image", "gpt-image-2"),
+    ]
+
+
+def test_jbb_route_restores_its_pinned_model() -> None:
+    settings = get_settings().model_copy(update={"image_provider": "gateway"})
+    route = external_image_route_service.ExternalImageRoute(
+        sequence=4,
+        provider="jbb_grok",
+        model="grok-imagine-image-quality",
+    )
+
+    routed = external_image_route_service.settings_for_external_image_route(settings, route)
+
+    assert routed.image_provider == "jbb_grok"
+    assert routed.jbb_grok_image_model == "grok-imagine-image-quality"
+    assert external_image_route_service.route_from_metadata(
+        {"image_route": route.as_metadata()}
+    ) == route

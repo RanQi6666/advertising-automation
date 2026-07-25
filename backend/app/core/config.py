@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
     external_image_route_mode: Literal["fixed", "round_robin"] = "fixed"
     external_image_route_providers: Annotated[
-        list[Literal["gateway", "volcengine", "cpa_gemini"]], NoDecode
+        list[Literal["gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"]],
+        NoDecode,
     ] = Field(default_factory=lambda: ["gateway", "volcengine"])
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
@@ -104,6 +105,14 @@ class Settings(BaseSettings):
     model_gateway_image_edit_path: str = "/images/edits"
     model_gateway_image_edit_model: str | None = None
     model_gateway_image_extra_body: dict[str, Any] = Field(default_factory=dict)
+    jbb_grok_image_api_key: str | None = None
+    jbb_grok_image_base_url: str | None = None
+    jbb_grok_image_model: str | None = None
+    jbb_grok_image_size: str = "1024x1024"
+    jbb_gpt_image_api_key: str | None = None
+    jbb_gpt_image_base_url: str | None = None
+    jbb_gpt_image_model: str | None = None
+    jbb_gpt_image_size: str = "1024x1024"
     model_gateway_text_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
@@ -132,7 +141,9 @@ class Settings(BaseSettings):
     volcengine_video_priority: int = Field(default=0, ge=0, le=9)
     volcengine_video_safety_identifier: str | None = None
 
-    image_provider: Literal["placeholder", "volcengine", "gateway", "cpa_gemini"] = "placeholder"
+    image_provider: Literal[
+        "placeholder", "volcengine", "gateway", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+    ] = "placeholder"
     video_provider: Literal["placeholder", "volcengine"] = "placeholder"
     object_storage_provider: Literal["local", "s3", "r2", "minio"] = "local"
     public_base_url: str = "http://127.0.0.1:8001"
