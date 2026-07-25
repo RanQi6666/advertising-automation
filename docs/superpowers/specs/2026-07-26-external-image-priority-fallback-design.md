@@ -11,13 +11,11 @@ Route new external text-to-image jobs with this ordered policy:
 
 ## Scope
 
-This policy applies only to external text-to-image jobs with `count=1`. It does not change the current behavior of:
+This policy applies to external text-to-image jobs at every supported `count`. It does not change the current behavior of:
 
 - internal image-generation tasks;
 - external edits, reference-image jobs, or revisions;
-- external jobs where `count > 1`.
-
-Multi-image jobs currently submit their images concurrently to one upstream provider. Retrying such a job on a different provider could regenerate images that already succeeded, so they retain the existing fixed-route behavior.
+Multi-image jobs receive an initial JBB or DM Fox primary route like one-image jobs. They never advance to CPA Gemini or Volcengine after failure because their images are submitted concurrently to one upstream provider; a partial success followed by a different-provider retry could duplicate images and billing.
 
 ## Route Selection
 
@@ -40,7 +38,7 @@ The task continues to expose the same public create and poll API. The caller see
 
 ## Failure Handling
 
-On a failed eligible task, the existing task retry path classifies the error before deciding whether to replace the stored route.
+On a failed eligible one-image task, the existing task retry path classifies the error before deciding whether to replace the stored route.
 
 The route advances only for these technical errors:
 
@@ -64,6 +62,8 @@ These errors do not advance to another provider:
 - unsupported model, edit, or reference-image capability errors;
 - post-generation storage or external-image-download errors;
 - task interruption or stale-task recovery errors.
+
+Multi-image jobs do not advance providers for any error. They retain the selected JBB or DM Fox route so their existing retry behavior remains isolated to one upstream provider.
 
 Post-generation download failures are specifically excluded because the upstream may already have generated an image. Re-submitting to another provider would duplicate output and billing.
 
@@ -112,14 +112,15 @@ Do not include API keys, prompts, response bodies, or signed image URLs in the r
 
 Add focused tests for:
 
-1. strict JBB and DM Fox alternation for initial eligible jobs;
+1. strict JBB and DM Fox alternation for initial one-image and multi-image jobs;
 2. JBB or DM Fox technical failure switching to CPA Gemini;
 3. CPA Gemini technical failure switching to Volcengine;
 4. Volcengine technical failure reaching a terminal failure;
 5. timeout, 429, and unknown-provider errors advancing the plan;
 6. validation, moderation, capability, and storage failures retaining the route;
-7. `count > 1`, edit, reference-image, and revision jobs retaining their existing route behavior;
-8. existing `round_robin` selection remaining unchanged.
+7. `count > 1` jobs retaining their selected JBB or DM Fox route after failure;
+8. edit, reference-image, and revision jobs retaining their existing route behavior;
+9. existing `round_robin` selection remaining unchanged.
 
 ## Deployment and Validation
 
