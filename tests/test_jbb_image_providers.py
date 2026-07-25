@@ -10,6 +10,7 @@ from backend.app.integrations.image.gateway_provider import GatewayImageProvider
     [
         ("jbb_grok", "JBB_GROK_IMAGE", "grok-imagine-image-quality"),
         ("jbb_gpt_image", "JBB_GPT_IMAGE", "gpt-image-2"),
+        ("alita_gpt_image", "ALITA_GPT_IMAGE", "gpt-image-2"),
     ],
 )
 def test_jbb_image_provider_uses_its_own_openai_compatible_configuration(
@@ -43,6 +44,8 @@ def test_jbb_image_provider_uses_its_own_openai_compatible_configuration(
     [
         ("jbb_grok", "jbb_grok_image_model", "grok-imagine-image-quality"),
         ("jbb_gpt_image", "jbb_gpt_image_model", "gpt-image-2"),
+        ("dm_fox_gpt_image", "dm_fox_gpt_image_model", "gpt-image-2"),
+        ("alita_gpt_image", "alita_gpt_image_model", "gpt-image-2"),
     ],
 )
 def test_selected_jbb_image_model_stays_with_its_dedicated_provider_configuration(

@@ -683,7 +683,7 @@ async def test_external_image_jobs_pin_priority_primary_routes_at_creation(
     monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
     monkeypatch.setenv(
         "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS",
-        "jbb_gpt_image,dm_fox_gpt_image",
+        "jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image",
     )
     monkeypatch.setenv(
         "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS",
@@ -691,6 +691,7 @@ async def test_external_image_jobs_pin_priority_primary_routes_at_creation(
     )
     monkeypatch.setenv("JBB_GPT_IMAGE_MODEL", "jbb-gpt-image-model")
     monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-gpt-image-model")
+    monkeypatch.setenv("ALITA_GPT_IMAGE_MODEL", "alita-gpt-image-model")
     monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
     monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
     monkeypatch.setenv("EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS", "3")

@@ -11,6 +11,7 @@ ExternalImageRouteProvider = Literal[
     "jbb_grok",
     "jbb_gpt_image",
     "dm_fox_gpt_image",
+    "alita_gpt_image",
     "newcli_gemini",
 ]
 
@@ -67,7 +68,13 @@ class Settings(BaseSettings):
     external_image_priority_primary_providers: Annotated[
         list[ExternalImageRouteProvider],
         NoDecode,
-    ] = Field(default_factory=lambda: ["jbb_gpt_image", "dm_fox_gpt_image"])
+    ] = Field(
+        default_factory=lambda: [
+            "jbb_gpt_image",
+            "dm_fox_gpt_image",
+            "alita_gpt_image",
+        ]
+    )
     external_image_priority_fallback_providers: Annotated[
         list[ExternalImageRouteProvider],
         NoDecode,
@@ -137,6 +144,10 @@ class Settings(BaseSettings):
     dm_fox_gpt_image_model: str | None = None
     dm_fox_gpt_image_size: str = "1024x1536"
     dm_fox_gpt_image_quality: str = "high"
+    alita_gpt_image_api_key: str | None = None
+    alita_gpt_image_base_url: str | None = None
+    alita_gpt_image_model: str | None = None
+    alita_gpt_image_size: str = "1024x1536"
     newcli_gemini_image_api_key: str | None = None
     newcli_gemini_image_base_url: str | None = None
     newcli_gemini_image_model: str | None = None
@@ -177,6 +188,7 @@ class Settings(BaseSettings):
         "jbb_grok",
         "jbb_gpt_image",
         "dm_fox_gpt_image",
+        "alita_gpt_image",
         "newcli_gemini",
     ] = "placeholder"
     video_provider: Literal["placeholder", "volcengine"] = "placeholder"
@@ -276,10 +288,11 @@ class Settings(BaseSettings):
             if self.external_image_priority_primary_providers != [
                 "jbb_gpt_image",
                 "dm_fox_gpt_image",
+                "alita_gpt_image",
             ]:
                 raise ValueError(
                     "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS must be "
-                    "jbb_gpt_image,dm_fox_gpt_image."
+                    "jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image."
                 )
             if self.external_image_priority_fallback_providers != [
                 "cpa_gemini",

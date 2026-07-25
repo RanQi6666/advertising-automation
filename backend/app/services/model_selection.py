@@ -40,6 +40,10 @@ def settings_for_image_model(settings: Settings, model_id: str | None) -> Settin
         updates["jbb_grok_image_model"] = selected_model
     elif settings.image_provider == "jbb_gpt_image":
         updates["jbb_gpt_image_model"] = selected_model
+    elif settings.image_provider == "dm_fox_gpt_image":
+        updates["dm_fox_gpt_image_model"] = selected_model
+    elif settings.image_provider == "alita_gpt_image":
+        updates["alita_gpt_image_model"] = selected_model
     return settings.model_copy(update=updates)
 
 
@@ -70,6 +74,8 @@ def effective_image_model(settings: Settings, model_id: str | None = None) -> st
         return settings.jbb_gpt_image_model or ""
     if settings.image_provider == "dm_fox_gpt_image":
         return settings.dm_fox_gpt_image_model or ""
+    if settings.image_provider == "alita_gpt_image":
+        return settings.alita_gpt_image_model or ""
     if settings.image_provider == "newcli_gemini":
         return settings.newcli_gemini_image_model or ""
     return settings.image_provider

@@ -16,6 +16,7 @@ ImageRouteProvider = Literal[
     "jbb_grok",
     "jbb_gpt_image",
     "dm_fox_gpt_image",
+    "alita_gpt_image",
     "newcli_gemini",
 ]
 ImageRouteStrategy = Literal["round_robin", "priority_fallback"]
@@ -27,6 +28,7 @@ PRIORITY_FALLBACK_ERROR_CODES = {
 PRIORITY_FALLBACK_NEXT_PROVIDER: dict[ImageRouteProvider, ImageRouteProvider] = {
     "jbb_gpt_image": "cpa_gemini",
     "dm_fox_gpt_image": "cpa_gemini",
+    "alita_gpt_image": "cpa_gemini",
     "cpa_gemini": "volcengine",
 }
 
@@ -118,6 +120,8 @@ def settings_for_external_image_route(
         updates["jbb_gpt_image_model"] = route.model
     if route.provider == "dm_fox_gpt_image" and route.model:
         updates["dm_fox_gpt_image_model"] = route.model
+    if route.provider == "alita_gpt_image" and route.model:
+        updates["alita_gpt_image_model"] = route.model
     if route.provider == "newcli_gemini" and route.model:
         updates["newcli_gemini_image_model"] = route.model
     return settings.model_copy(update=updates)
@@ -138,6 +142,7 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
         "jbb_grok",
         "jbb_gpt_image",
         "dm_fox_gpt_image",
+        "alita_gpt_image",
         "newcli_gemini",
     }
     if (

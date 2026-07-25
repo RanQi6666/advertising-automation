@@ -41,7 +41,7 @@ def priority_fallback_settings(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
     monkeypatch.setenv(
         "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS",
-        "jbb_gpt_image,dm_fox_gpt_image",
+        "jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image",
     )
     monkeypatch.setenv(
         "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS",
@@ -49,6 +49,7 @@ def priority_fallback_settings(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     )
     monkeypatch.setenv("JBB_GPT_IMAGE_MODEL", "jbb-gpt-image-model")
     monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-gpt-image-model")
+    monkeypatch.setenv("ALITA_GPT_IMAGE_MODEL", "alita-gpt-image-model")
     monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
     monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
     monkeypatch.setenv("EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS", "3")
@@ -62,19 +63,21 @@ def priority_fallback_settings(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
 
 
 @pytest.mark.asyncio
-async def test_priority_fallback_initial_routes_strictly_alternate_primary_pair(
+async def test_priority_fallback_initial_routes_strictly_alternate_primary_nodes(
     priority_fallback_settings: FakeRedis,
 ) -> None:
     routes = [
         await external_image_route_service.select_external_image_route()
-        for _ in range(4)
+        for _ in range(6)
     ]
 
     assert [(route.strategy, route.sequence, route.provider, route.model) for route in routes] == [
         ("priority_fallback", 1, "jbb_gpt_image", "jbb-gpt-image-model"),
         ("priority_fallback", 2, "dm_fox_gpt_image", "dm-fox-gpt-image-model"),
-        ("priority_fallback", 3, "jbb_gpt_image", "jbb-gpt-image-model"),
-        ("priority_fallback", 4, "dm_fox_gpt_image", "dm-fox-gpt-image-model"),
+        ("priority_fallback", 3, "alita_gpt_image", "alita-gpt-image-model"),
+        ("priority_fallback", 4, "jbb_gpt_image", "jbb-gpt-image-model"),
+        ("priority_fallback", 5, "dm_fox_gpt_image", "dm-fox-gpt-image-model"),
+        ("priority_fallback", 6, "alita_gpt_image", "alita-gpt-image-model"),
     ]
     assert priority_fallback_settings.closed is True
 
@@ -82,10 +85,10 @@ async def test_priority_fallback_initial_routes_strictly_alternate_primary_pair(
 @pytest.mark.parametrize(
     ("primary_providers", "fallback_providers", "max_attempts"),
     [
-        ("dm_fox_gpt_image,jbb_gpt_image", "cpa_gemini,volcengine", "3"),
-        ("jbb_gpt_image,volcengine", "cpa_gemini,dm_fox_gpt_image", "3"),
-        ("jbb_gpt_image,dm_fox_gpt_image", "volcengine,cpa_gemini", "3"),
-        ("jbb_gpt_image,dm_fox_gpt_image", "cpa_gemini,volcengine", "2"),
+        ("dm_fox_gpt_image,jbb_gpt_image,alita_gpt_image", "cpa_gemini,volcengine", "3"),
+        ("jbb_gpt_image,volcengine,alita_gpt_image", "cpa_gemini,dm_fox_gpt_image", "3"),
+        ("jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image", "volcengine,cpa_gemini", "3"),
+        ("jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image", "cpa_gemini,volcengine", "2"),
     ],
 )
 def test_priority_fallback_settings_reject_invalid_provider_order(
@@ -249,11 +252,29 @@ def test_jbb_route_restores_its_pinned_model() -> None:
     ) == route
 
 
+def test_alita_route_restores_its_pinned_model() -> None:
+    settings = get_settings().model_copy(update={"image_provider": "gateway"})
+    route = external_image_route_service.ExternalImageRoute(
+        sequence=3,
+        provider="alita_gpt_image",
+        model="gpt-image-2",
+    )
+
+    routed = external_image_route_service.settings_for_external_image_route(settings, route)
+
+    assert routed.image_provider == "alita_gpt_image"
+    assert routed.alita_gpt_image_model == "gpt-image-2"
+    assert external_image_route_service.route_from_metadata(
+        {"image_route": route.as_metadata()}
+    ) == route
+
+
 @pytest.mark.parametrize(
     ("provider", "error_code", "next_provider", "next_model"),
     [
         ("jbb_gpt_image", "provider_timeout", "cpa_gemini", "cpa-gemini-image-model"),
         ("dm_fox_gpt_image", "provider_429", "cpa_gemini", "cpa-gemini-image-model"),
+        ("alita_gpt_image", "provider_timeout", "cpa_gemini", "cpa-gemini-image-model"),
         ("cpa_gemini", "unknown_provider_error", "volcengine", "volcengine-image-model"),
     ],
 )

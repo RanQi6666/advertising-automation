@@ -48,7 +48,12 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             storage_root=settings.local_storage_root,
             timeout_seconds=settings.model_gateway_image_timeout_seconds,
         )
-    if settings.image_provider in {"jbb_grok", "jbb_gpt_image", "dm_fox_gpt_image"}:
+    if settings.image_provider in {
+        "jbb_grok",
+        "jbb_gpt_image",
+        "dm_fox_gpt_image",
+        "alita_gpt_image",
+    }:
         if settings.image_provider == "jbb_grok":
             api_key = settings.jbb_grok_image_api_key
             base_url = settings.jbb_grok_image_base_url
@@ -63,13 +68,20 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             provider_size = settings.jbb_gpt_image_size
             provider_label = "JBB_GPT_IMAGE"
             extra_body = None
-        else:
+        elif settings.image_provider == "dm_fox_gpt_image":
             api_key = settings.dm_fox_gpt_image_api_key
             base_url = settings.dm_fox_gpt_image_base_url
             model = settings.dm_fox_gpt_image_model
             provider_size = settings.dm_fox_gpt_image_size
             provider_label = "DM_FOX_GPT_IMAGE"
             extra_body = {"quality": settings.dm_fox_gpt_image_quality}
+        else:
+            api_key = settings.alita_gpt_image_api_key
+            base_url = settings.alita_gpt_image_base_url
+            model = settings.alita_gpt_image_model
+            provider_size = settings.alita_gpt_image_size
+            provider_label = "ALITA_GPT_IMAGE"
+            extra_body = None
         if not api_key:
             raise ProviderError(
                 f"{provider_label}_API_KEY is required when "
