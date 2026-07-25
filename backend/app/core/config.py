@@ -4,6 +4,16 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+ExternalImageRouteProvider = Literal[
+    "gateway",
+    "volcengine",
+    "cpa_gemini",
+    "jbb_grok",
+    "jbb_gpt_image",
+    "dm_fox_gpt_image",
+    "newcli_gemini",
+]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -49,21 +59,19 @@ class Settings(BaseSettings):
     text_queue_concurrency: int = Field(default=6, ge=1, le=64)
     image_queue_concurrency: int = Field(default=4, ge=1, le=32)
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
-    external_image_route_mode: Literal["fixed", "round_robin"] = "fixed"
+    external_image_route_mode: Literal["fixed", "round_robin", "priority_fallback"] = "fixed"
     external_image_route_providers: Annotated[
-        list[
-            Literal[
-                "gateway",
-                "volcengine",
-                "cpa_gemini",
-                "jbb_grok",
-                "jbb_gpt_image",
-                "dm_fox_gpt_image",
-                "newcli_gemini",
-            ]
-        ],
+        list[ExternalImageRouteProvider],
         NoDecode,
     ] = Field(default_factory=lambda: ["gateway", "volcengine"])
+    external_image_priority_primary_providers: Annotated[
+        list[ExternalImageRouteProvider],
+        NoDecode,
+    ] = Field(default_factory=lambda: ["jbb_gpt_image", "dm_fox_gpt_image"])
+    external_image_priority_fallback_providers: Annotated[
+        list[ExternalImageRouteProvider],
+        NoDecode,
+    ] = Field(default_factory=lambda: ["cpa_gemini", "volcengine"])
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
     callback_queue_concurrency: int = Field(default=3, ge=1, le=16)
     ad_analysis_queue_concurrency: int = Field(default=2, ge=1, le=16)
@@ -230,7 +238,12 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
-    @field_validator("external_image_route_providers", mode="before")
+    @field_validator(
+        "external_image_route_providers",
+        "external_image_priority_primary_providers",
+        "external_image_priority_fallback_providers",
+        mode="before",
+    )
     @classmethod
     def parse_external_image_route_providers(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
@@ -259,6 +272,28 @@ class Settings(BaseSettings):
     def fill_redis_url(self) -> Self:
         if not self.redis_url:
             self.redis_url = self.celery_broker_url
+        if self.external_image_route_mode == "priority_fallback":
+            if self.external_image_priority_primary_providers != [
+                "jbb_gpt_image",
+                "dm_fox_gpt_image",
+            ]:
+                raise ValueError(
+                    "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS must be "
+                    "jbb_gpt_image,dm_fox_gpt_image."
+                )
+            if self.external_image_priority_fallback_providers != [
+                "cpa_gemini",
+                "volcengine",
+            ]:
+                raise ValueError(
+                    "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS must be "
+                    "cpa_gemini,volcengine."
+                )
+            if self.external_image_generation_max_attempts < 3:
+                raise ValueError(
+                    "EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS must be at least 3 "
+                    "for priority_fallback."
+                )
         return self
 
 @lru_cache

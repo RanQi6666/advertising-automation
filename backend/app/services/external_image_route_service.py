@@ -7,6 +7,7 @@ from backend.app.core.errors import AppError, ProviderError
 from backend.app.services.model_selection import effective_image_model
 
 EXTERNAL_IMAGE_ROUTE_REDIS_KEY = "external_image_generation:round_robin"
+EXTERNAL_IMAGE_PRIORITY_REDIS_KEY = "external_image_generation:priority_primary"
 ImageRouteProvider = Literal[
     "gateway",
     "volcengine",
@@ -16,6 +17,7 @@ ImageRouteProvider = Literal[
     "dm_fox_gpt_image",
     "newcli_gemini",
 ]
+ImageRouteStrategy = Literal["round_robin", "priority_fallback"]
 
 _redis_client_factory_for_tests: Callable[[str], object] | None = None
 
@@ -25,10 +27,11 @@ class ExternalImageRoute:
     sequence: int
     provider: ImageRouteProvider
     model: str
+    strategy: ImageRouteStrategy = "round_robin"
 
     def as_metadata(self) -> dict[str, str | int]:
         return {
-            "strategy": "round_robin",
+            "strategy": self.strategy,
             "sequence": self.sequence,
             "provider": self.provider,
             "model": self.model,
@@ -44,16 +47,23 @@ async def select_external_image_route(
     settings: Settings | None = None,
 ) -> ExternalImageRoute:
     settings = settings or get_settings()
-    if settings.external_image_route_mode != "round_robin":
-        raise AppError("External image round-robin routing is not enabled.")
-
-    providers = settings.external_image_route_providers
+    mode = settings.external_image_route_mode
+    if mode == "round_robin":
+        providers = settings.external_image_route_providers
+        redis_key = EXTERNAL_IMAGE_ROUTE_REDIS_KEY
+        strategy: ImageRouteStrategy = "round_robin"
+    elif mode == "priority_fallback":
+        providers = settings.external_image_priority_primary_providers
+        redis_key = EXTERNAL_IMAGE_PRIORITY_REDIS_KEY
+        strategy = "priority_fallback"
+    else:
+        raise AppError("External image routing is not enabled.")
     if not providers:
         raise AppError("EXTERNAL_IMAGE_ROUTE_PROVIDERS must contain at least one provider.")
 
     client = _make_redis_client(settings)
     try:
-        sequence = int(await client.incr(EXTERNAL_IMAGE_ROUTE_REDIS_KEY))
+        sequence = int(await client.incr(redis_key))
     except Exception as exc:
         raise ProviderError("External image route counter is unavailable.") from exc
     finally:
@@ -62,12 +72,22 @@ async def select_external_image_route(
     provider = providers[(sequence - 1) % len(providers)]
     routed_settings = settings_for_external_image_route(
         settings,
-        ExternalImageRoute(sequence=sequence, provider=provider, model=""),
+        ExternalImageRoute(
+            sequence=sequence,
+            provider=provider,
+            model="",
+            strategy=strategy,
+        ),
     )
     model = effective_image_model(routed_settings)
     if not model:
         raise AppError(f"No image model configured for route provider: {provider}.")
-    return ExternalImageRoute(sequence=sequence, provider=provider, model=model)
+    return ExternalImageRoute(
+        sequence=sequence,
+        provider=provider,
+        model=model,
+        strategy=strategy,
+    )
 
 
 def settings_for_external_image_route(
@@ -99,6 +119,7 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
     provider = route_data.get("provider")
     model = route_data.get("model")
     sequence = route_data.get("sequence")
+    strategy = route_data.get("strategy", "round_robin")
     supported_providers = {
         "gateway",
         "volcengine",
@@ -108,7 +129,12 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
         "dm_fox_gpt_image",
         "newcli_gemini",
     }
-    if provider not in supported_providers or not isinstance(model, str) or not model:
+    if (
+        provider not in supported_providers
+        or not isinstance(model, str)
+        or not model
+        or strategy not in {"round_robin", "priority_fallback"}
+    ):
         return None
     try:
         parsed_sequence = int(sequence)
@@ -120,6 +146,7 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
         sequence=parsed_sequence,
         provider=provider,
         model=model,
+        strategy=strategy,
     )
 
 
