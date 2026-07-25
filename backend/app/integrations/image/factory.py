@@ -1,6 +1,7 @@
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.errors import ProviderError
 from backend.app.integrations.image.base import ImageProvider
+from backend.app.integrations.image.cpa_gemini_provider import CpaGeminiImageProvider
 from backend.app.integrations.image.gateway_provider import GatewayImageProvider
 from backend.app.integrations.image.placeholder_provider import PlaceholderImageProvider
 from backend.app.integrations.image.volcengine_provider import VolcengineImageProvider
@@ -22,6 +23,28 @@ def get_image_provider(settings: Settings | None = None) -> ImageProvider:
             model=settings.volcengine_image_model,
             provider_size=settings.volcengine_image_size,
             watermark=settings.volcengine_image_watermark,
+        )
+    if settings.image_provider == "cpa_gemini":
+        api_key = settings.model_gateway_api_key or settings.openai_api_key
+        base_url = settings.model_gateway_base_url or settings.openai_base_url
+        if not api_key:
+            raise ProviderError(
+                "MODEL_GATEWAY_API_KEY is required when IMAGE_PROVIDER=cpa_gemini."
+            )
+        if not base_url:
+            raise ProviderError(
+                "MODEL_GATEWAY_BASE_URL is required when IMAGE_PROVIDER=cpa_gemini."
+            )
+        if not settings.model_gateway_gemini_image_model:
+            raise ProviderError(
+                "MODEL_GATEWAY_GEMINI_IMAGE_MODEL is required when IMAGE_PROVIDER=cpa_gemini."
+            )
+        return CpaGeminiImageProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=settings.model_gateway_gemini_image_model,
+            storage_root=settings.local_storage_root,
+            timeout_seconds=settings.model_gateway_image_timeout_seconds,
         )
     if settings.image_provider == "gateway":
         api_key = settings.model_gateway_api_key or settings.openai_api_key

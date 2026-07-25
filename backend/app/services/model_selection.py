@@ -58,6 +58,8 @@ def effective_image_model(settings: Settings, model_id: str | None = None) -> st
         return settings.model_gateway_image_model or ""
     if settings.image_provider == "volcengine":
         return settings.volcengine_image_model
+    if settings.image_provider == "cpa_gemini":
+        return settings.model_gateway_gemini_image_model or ""
     return settings.image_provider
 
 

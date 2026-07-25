@@ -7,7 +7,7 @@ from backend.app.core.errors import AppError, ProviderError
 from backend.app.services.model_selection import effective_image_model
 
 EXTERNAL_IMAGE_ROUTE_REDIS_KEY = "external_image_generation:round_robin"
-ImageRouteProvider = Literal["gateway", "volcengine"]
+ImageRouteProvider = Literal["gateway", "volcengine", "cpa_gemini"]
 
 _redis_client_factory_for_tests: Callable[[str], object] | None = None
 
@@ -71,6 +71,8 @@ def settings_for_external_image_route(
         updates["model_gateway_image_model"] = route.model
     if route.provider == "volcengine" and route.model:
         updates["volcengine_image_model"] = route.model
+    if route.provider == "cpa_gemini" and route.model:
+        updates["model_gateway_gemini_image_model"] = route.model
     return settings.model_copy(update=updates)
 
 
@@ -81,7 +83,8 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
     provider = route_data.get("provider")
     model = route_data.get("model")
     sequence = route_data.get("sequence")
-    if provider not in {"gateway", "volcengine"} or not isinstance(model, str) or not model:
+    supported_providers = {"gateway", "volcengine", "cpa_gemini"}
+    if provider not in supported_providers or not isinstance(model, str) or not model:
         return None
     try:
         parsed_sequence = int(sequence)
