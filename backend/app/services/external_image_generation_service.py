@@ -54,7 +54,10 @@ class ExternalImageGenerationService:
             return existing
 
         settings = get_settings()
-        route_metadata = await _round_robin_route_metadata(settings)
+        route_metadata = await _initial_route_metadata(
+            settings,
+            allow_priority_fallback=True,
+        )
         business_id = external_request_id or str(uuid4())
         task = await self.task_service.create_task(
             session,
@@ -503,8 +506,17 @@ class ExternalImageGenerationService:
         )
 
 
-async def _round_robin_route_metadata(settings) -> dict[str, dict[str, str | int]]:
-    if settings.external_image_route_mode != "round_robin":
+async def _initial_route_metadata(
+    settings,
+    *,
+    allow_priority_fallback: bool,
+) -> dict[str, dict[str, str | int]]:
+    if settings.external_image_route_mode == "fixed":
+        return {}
+    if (
+        settings.external_image_route_mode == "priority_fallback"
+        and not allow_priority_fallback
+    ):
         return {}
     route = await select_external_image_route(settings)
     return {"image_route": route.as_metadata()}

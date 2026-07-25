@@ -671,6 +671,67 @@ async def test_external_image_jobs_pin_round_robin_route_at_creation(
         get_settings.cache_clear()
         await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_external_image_jobs_pin_priority_primary_routes_at_creation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.services import external_image_route_service
+
+    redis = _RoundRobinRedis()
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS",
+        "jbb_gpt_image,dm_fox_gpt_image",
+    )
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS",
+        "cpa_gemini,volcengine",
+    )
+    monkeypatch.setenv("JBB_GPT_IMAGE_MODEL", "jbb-gpt-image-model")
+    monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-gpt-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
+    monkeypatch.setenv("VOLCENGINE_IMAGE_MODEL", "volcengine-image-model")
+    monkeypatch.setenv("EXTERNAL_IMAGE_GENERATION_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    external_image_route_service.set_redis_client_factory_for_tests(lambda _url: redis)
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            service = ExternalImageGenerationService()
+            single_image_task = await service.create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="priority-single", count=1)
+                ),
+            )
+            multi_image_task = await service.create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="priority-multi", count=2)
+                ),
+            )
+    finally:
+        external_image_route_service.set_redis_client_factory_for_tests(None)
+        get_settings.cache_clear()
+        await engine.dispose()
+
+    assert single_image_task.max_attempts == 3
+    assert single_image_task.metadata_json["image_route"] == {
+        "strategy": "priority_fallback",
+        "sequence": 1,
+        "provider": "jbb_gpt_image",
+        "model": "jbb-gpt-image-model",
+    }
+    assert multi_image_task.metadata_json["image_route"] == {
+        "strategy": "priority_fallback",
+        "sequence": 2,
+        "provider": "dm_fox_gpt_image",
+        "model": "dm-fox-gpt-image-model",
+    }
+
+
 @pytest.mark.asyncio
 async def test_external_image_task_executes_with_its_pinned_route(
     tmp_path,
