@@ -68,6 +68,10 @@ def effective_image_model(settings: Settings, model_id: str | None = None) -> st
         return settings.jbb_grok_image_model or ""
     if settings.image_provider == "jbb_gpt_image":
         return settings.jbb_gpt_image_model or ""
+    if settings.image_provider == "dm_fox_gpt_image":
+        return settings.dm_fox_gpt_image_model or ""
+    if settings.image_provider == "newcli_gemini":
+        return settings.newcli_gemini_image_model or ""
     return settings.image_provider
 
 

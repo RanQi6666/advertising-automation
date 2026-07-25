@@ -51,7 +51,17 @@ class Settings(BaseSettings):
     external_image_generation_max_attempts: int = Field(default=3, ge=1, le=5)
     external_image_route_mode: Literal["fixed", "round_robin"] = "fixed"
     external_image_route_providers: Annotated[
-        list[Literal["gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"]],
+        list[
+            Literal[
+                "gateway",
+                "volcengine",
+                "cpa_gemini",
+                "jbb_grok",
+                "jbb_gpt_image",
+                "dm_fox_gpt_image",
+                "newcli_gemini",
+            ]
+        ],
         NoDecode,
     ] = Field(default_factory=lambda: ["gateway", "volcengine"])
     video_queue_concurrency: int = Field(default=4, ge=1, le=16)
@@ -113,6 +123,15 @@ class Settings(BaseSettings):
     jbb_gpt_image_base_url: str | None = None
     jbb_gpt_image_model: str | None = None
     jbb_gpt_image_size: str = "1024x1024"
+    dm_fox_gpt_image_api_key: str | None = None
+    dm_fox_gpt_image_base_url: str | None = None
+    dm_fox_gpt_image_model: str | None = None
+    dm_fox_gpt_image_size: str = "1024x1024"
+    dm_fox_gpt_image_quality: str = "high"
+    newcli_gemini_image_api_key: str | None = None
+    newcli_gemini_image_base_url: str | None = None
+    newcli_gemini_image_model: str | None = None
+    newcli_gemini_image_aspect_ratio: str = "1:1"
     model_gateway_text_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     model_gateway_image_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ad_performance_llm_timeout_seconds: float = Field(default=45.0, ge=1, le=180)
@@ -142,7 +161,14 @@ class Settings(BaseSettings):
     volcengine_video_safety_identifier: str | None = None
 
     image_provider: Literal[
-        "placeholder", "volcengine", "gateway", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+        "placeholder",
+        "volcengine",
+        "gateway",
+        "cpa_gemini",
+        "jbb_grok",
+        "jbb_gpt_image",
+        "dm_fox_gpt_image",
+        "newcli_gemini",
     ] = "placeholder"
     video_provider: Literal["placeholder", "volcengine"] = "placeholder"
     object_storage_provider: Literal["local", "s3", "r2", "minio"] = "local"

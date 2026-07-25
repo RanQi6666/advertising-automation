@@ -8,7 +8,13 @@ from backend.app.services.model_selection import effective_image_model
 
 EXTERNAL_IMAGE_ROUTE_REDIS_KEY = "external_image_generation:round_robin"
 ImageRouteProvider = Literal[
-    "gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+    "gateway",
+    "volcengine",
+    "cpa_gemini",
+    "jbb_grok",
+    "jbb_gpt_image",
+    "dm_fox_gpt_image",
+    "newcli_gemini",
 ]
 
 _redis_client_factory_for_tests: Callable[[str], object] | None = None
@@ -79,6 +85,10 @@ def settings_for_external_image_route(
         updates["jbb_grok_image_model"] = route.model
     if route.provider == "jbb_gpt_image" and route.model:
         updates["jbb_gpt_image_model"] = route.model
+    if route.provider == "dm_fox_gpt_image" and route.model:
+        updates["dm_fox_gpt_image_model"] = route.model
+    if route.provider == "newcli_gemini" and route.model:
+        updates["newcli_gemini_image_model"] = route.model
     return settings.model_copy(update=updates)
 
 
@@ -90,7 +100,13 @@ def route_from_metadata(metadata: dict | None) -> ExternalImageRoute | None:
     model = route_data.get("model")
     sequence = route_data.get("sequence")
     supported_providers = {
-        "gateway", "volcengine", "cpa_gemini", "jbb_grok", "jbb_gpt_image"
+        "gateway",
+        "volcengine",
+        "cpa_gemini",
+        "jbb_grok",
+        "jbb_gpt_image",
+        "dm_fox_gpt_image",
+        "newcli_gemini",
     }
     if provider not in supported_providers or not isinstance(model, str) or not model:
         return None
