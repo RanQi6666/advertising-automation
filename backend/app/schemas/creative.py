@@ -9,7 +9,7 @@ from backend.app.schemas.common import TimestampedRead
 class CreativeGenerateRequest(BaseModel):
     draft_id: str
     count: int = Field(default=3, ge=1, le=6)
-    size: str = "1:1"
+    size: str = "9:16"
     target_index: int | None = Field(default=None, ge=1, le=6)
     target_indices: list[int] = Field(default_factory=list, max_length=6)
     model_id: str | None = Field(default=None, max_length=128)

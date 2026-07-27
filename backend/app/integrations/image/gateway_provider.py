@@ -56,6 +56,7 @@ class GatewayImageProvider:
         edit_path: str = "/images/edits",
         edit_model: str | None = None,
         http_client: httpx.AsyncClient | None = None,
+        provider_name: str = "gateway",
     ) -> None:
         self.api_key = api_key
         self.base_url = _normalize_gateway_image_base_url(base_url)
@@ -69,6 +70,7 @@ class GatewayImageProvider:
         self.edit_enabled = edit_enabled
         self.edit_path = _normalize_gateway_image_edit_path(edit_path)
         self.edit_model = edit_model or model
+        self.provider_name = provider_name
 
     async def generate_images(self, briefs: list[ImageBrief]) -> list[GeneratedImage]:
         results = await asyncio.gather(
@@ -122,7 +124,7 @@ class GatewayImageProvider:
             alt_text=brief.short_text,
             size=brief.size,
             metadata={
-                "provider": "gateway",
+                "provider": self.provider_name,
                 "model": self.model,
                 "provider_size": self.provider_size,
                 "response_format": self.response_format,
@@ -172,7 +174,7 @@ class GatewayImageProvider:
             alt_text=brief.short_text,
             size=brief.size,
             metadata={
-                "provider": "gateway",
+                "provider": self.provider_name,
                 "model": self.edit_model,
                 "base_model": self.model,
                 "provider_size": self.provider_size,

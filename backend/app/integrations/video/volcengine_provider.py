@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 import httpx
 
 from backend.app.core.errors import ProviderError
@@ -58,8 +60,9 @@ class VolcengineVideoProvider:
         )
 
     async def get_generation_status(self, provider_job_id: str) -> VideoGenerationStatus:
-        response = await self._request("GET", self.tasks_url, params={"id": provider_job_id})
-        task = _unwrap_task_response(response)
+        task_url = f"{self.tasks_url}/{quote(provider_job_id, safe='')}"
+        response = await self._request("GET", task_url)
+        task = _unwrap_task_response(response, provider_job_id)
         content = task.get("content") if isinstance(task.get("content"), dict) else {}
         return VideoGenerationStatus(
             provider_job_id=str(task.get("id") or provider_job_id),
@@ -167,10 +170,18 @@ def _error_message(error: object) -> str | None:
     return str(error)
 
 
-def _unwrap_task_response(response: dict) -> dict:
+def _unwrap_task_response(response: dict, provider_job_id: str) -> dict:
     items = response.get("items")
-    if isinstance(items, list) and items and isinstance(items[0], dict):
-        return items[0]
+    if items is not None:
+        if not isinstance(items, list):
+            raise ProviderError("Volcengine video API returned invalid task items.")
+        for item in items:
+            if isinstance(item, dict) and str(item.get("id") or "") == provider_job_id:
+                return item
+        raise ProviderError(f"Volcengine video task not found: {provider_job_id}")
+    response_id = response.get("id")
+    if response_id is not None and str(response_id) != provider_job_id:
+        raise ProviderError(f"Volcengine video API returned mismatched task id: {response_id}")
     return response
 
 

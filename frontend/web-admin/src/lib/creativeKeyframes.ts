@@ -55,7 +55,7 @@ export function creativeGenerationPlan(
   }
   return {
     count: 3,
-    size: "1:1",
+    size: "9:16",
     generationMode: "standard",
     isKeyframeVariant: false,
   };
@@ -85,7 +85,7 @@ export function imageGenerationPlanForMode(
 
   return {
     count: COPY_IMAGE_GENERATION_COUNT,
-    size: "1:1",
+    size: "9:16",
     generationMode: "standard",
     isKeyframeVariant: false,
   };

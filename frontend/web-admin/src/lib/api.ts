@@ -483,7 +483,7 @@ export const api = {
   generateCreatives: (
     draftId: string,
     count = 3,
-    size = "1:1",
+    size = "9:16",
     options: {
       modelId?: string | null;
       storyboard?: Record<string, unknown>[];
@@ -509,7 +509,7 @@ export const api = {
   generateCreativesTask: (
     draftId: string,
     count = 3,
-    size = "1:1",
+    size = "9:16",
     targetIndex?: number,
     options: {
       modelId?: string | null;
@@ -564,7 +564,7 @@ export const api = {
   generateCreativesStream: (
     draftId: string,
     count = 3,
-    size = "1:1",
+    size = "9:16",
     onEvent: (event: CreativeStreamEvent) => void,
     targetIndex?: number,
     options: {

@@ -7,7 +7,13 @@ from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.topic import ContentTopic
 from backend.app.schemas.ai import (
     CopyDraftCandidate,
+    DirectorActionCorrection,
+    FrameAnalysis,
+    FrameAnchoredDirectorPlan,
+    FrameAnchoredStoryboardDraft,
+    FrameAnchoredStoryboardTextCandidate,
     ImageBrief,
+    ReferenceVideoFrame,
     TopicCandidate,
     VideoStoryboardCandidate,
 )
@@ -79,6 +85,49 @@ class LLMProvider(Protocol):
         instructions: str | None = None,
     ) -> VideoStoryboardCandidate:
         """Create a scene-by-scene video storyboard from copy and image assets."""
+
+    async def analyze_video_frame_pair(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+        reference_frames: list[ReferenceVideoFrame] | None = None,
+        reference_video_duration_seconds: float | None = None,
+        reference_video_sample_interval_seconds: float | None = None,
+    ) -> FrameAnalysis:
+        """Analyze exact endpoint images and optional chronological reference frames."""
+
+    async def direct_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredDirectorPlan:
+        """Create a private evidence-backed cinematic director plan for one generated clip."""
+
+    async def generate_frame_anchored_video_storyboard_text(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> FrameAnchoredStoryboardTextCandidate:
+        """Create the final flexible director script for a frame-anchored generated clip."""
+
+    async def generate_frame_anchored_video_storyboard(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        frame_analysis: FrameAnalysis,
+        duration_seconds: int,
+        aspect_ratio: str,
+        director_corrections: list[DirectorActionCorrection] | None = None,
+    ) -> FrameAnchoredStoryboardDraft:
+        """Create a creative storyboard draft for deterministic backend compilation."""
 
     def stream_video_storyboard_text(
         self,

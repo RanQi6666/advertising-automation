@@ -15,21 +15,28 @@ from backend.app.db.models.video_asset import VideoAsset
 from backend.app.db.models.work_order import WorkOrder
 from backend.app.db.session import get_session
 from backend.app.integrations.video import factory as video_factory
-from backend.app.integrations.video.base import VideoGenerationStart, VideoGenerationStatus
+from backend.app.integrations.video.base import (
+    VideoGenerationStart,
+    VideoGenerationStatus,
+    VideoSourceImage,
+)
 from backend.app.integrations.video.volcengine_provider import VolcengineVideoProvider
 from backend.app.main import create_app
 from backend.app.services import external_video_generation_service as external_video_service_module
 from backend.app.services import generation_task_service as task_module
 from backend.app.services import video_service as video_service_module
 from backend.app.services.campaign_service import CampaignService
+from backend.app.services.external_sources import (
+    EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+    EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+)
 from backend.app.services.external_video_generation_service import ExternalVideoGenerationService
 from backend.app.services.generation_task_service import VIDEO_QUEUE_NAME, GenerationTaskService
 from backend.app.services.video_service import VideoService
 
 EXTERNAL_SOURCE = "external_video_generation"
 ONE_PIXEL_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-    "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
 
 
@@ -248,6 +255,53 @@ async def test_volcengine_video_request_error_includes_exception_type(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image_input", ["omitted", "empty"])
+async def test_external_video_generation_creates_text_mode_without_assets(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_input: str,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        lambda task_id, queue_name, priority, countdown_seconds=0: None,
+    )
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    payload = _video_payload(external_request_id=f"external-text-{image_input}")
+    if image_input == "omitted":
+        payload.pop("images")
+    else:
+        payload["images"] = []
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    assert response.json()["code"] == 1001
+    assert "generation_mode" not in response.json()["data"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert assets == []
+    assert len(videos) == 1
+    assert videos[0].source_asset_ids == []
+    assert (
+        videos[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    )
+    assert len(tasks) == 1
+    assert tasks[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_external_video_generation_create_returns_job_without_starting_provider(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -302,11 +356,13 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert create_body["code"] == 1001
     assert create_body["message"] == "processing"
     assert created["status"] == "processing"
+    assert "generation_mode" not in created
     assert poll_response.status_code == 200
     assert poll_body["code"] == 1001
     assert poll_body["message"] == "processing"
     assert polled["job_id"] == created["job_id"]
     assert polled["status"] == "processing"
+    assert "generation_mode" not in polled
     assert "url" not in polled
     assert len(enqueued) == 1
     start_task_id, start_queue_name, _priority = enqueued[0]
@@ -336,6 +392,10 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert videos[0].provider_job_id is None
     assert videos[0].metadata_json["source"] == EXTERNAL_SOURCE
     assert videos[0].metadata_json["external_request_id"] == "external-video-1"
+    assert (
+        videos[0].metadata_json["generation_mode"]
+        == EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME
+    )
     assert len(tasks) == 1
     assert tasks[0].id == start_task_id
     assert tasks[0].queue_name == VIDEO_QUEUE_NAME
@@ -345,7 +405,97 @@ async def test_external_video_generation_create_returns_job_without_starting_pro
     assert tasks[0].payload_json == {"video_id": videos[0].id}
     assert tasks[0].metadata_json["source"] == EXTERNAL_SOURCE
     assert tasks[0].metadata_json["external_request_id"] == "external-video-1"
+    assert (
+        tasks[0].metadata_json["generation_mode"] == EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME
+    )
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_does_not_persist_legacy_final_text_overlay_locks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        lambda *args, **kwargs: None,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    storyboard_text = "\n".join(
+        (
+            "The final reward is held over the last frame.",
+            "[FINAL_TEXT_OVERLAY_LOCKS]",
+            '[{"kind":"text","text":"x200,000","show_from_second":9.35,"placement":"lower_center"}]',
+            "[/FINAL_TEXT_OVERLAY_LOCKS]",
+        )
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id="video-final-text-lock",
+                duration_seconds=10,
+                storyboard_text=storyboard_text,
+            ),
+        )
+        job_id = response.json()["data"]["job_id"]
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    async with session_factory() as session:
+        video = await session.get(VideoAsset, job_id)
+
+    assert video is not None
+    assert "final_text_overlay_locks" not in (video.metadata_json or {})
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_video_transfer_does_not_apply_legacy_final_text_overlay_locks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "video-final-overlay-transfer.db")
+    storage_path = tmp_path / "storage" / "videos" / "overlay-test" / "provider.mp4"
+    storage_path.parent.mkdir(parents=True)
+    storage_path.write_bytes(b"saved-provider-video")
+    async with session_factory() as session:
+        campaign = Campaign(name="Overlay transfer campaign")
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            storage_key="local://videos/overlay-test/provider.mp4",
+            status=VideoStatus.GENERATED.value,
+            metadata_json={
+                "final_text_overlay_locks": [
+                    {
+                        "kind": "text",
+                        "text": "x200,000",
+                        "show_from_second": 9.35,
+                        "placement": "lower_center",
+                    }
+                ]
+            },
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+
+        transferred = await VideoService().transfer_completed_video(session, video.id)
+
+    assert "final_text_overlay_status" not in (transferred.metadata_json or {})
+    assert "final_text_overlay_applied_locks" not in (transferred.metadata_json or {})
     await engine.dispose()
 
 
@@ -418,6 +568,189 @@ async def test_external_video_generation_start_task_then_polling_returns_url(
     assert polled["status"] == "succeeded"
     assert polled["url"].startswith("https://ai.example.test/storage/videos/")
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("images", "expected_source_image_count", "request_id"),
+    [
+        ([], 0, "external-video-passthrough-text"),
+        (
+            [
+                ONE_PIXEL_PNG_BASE64,
+                f"data:image/png;base64,{ONE_PIXEL_PNG_BASE64}",
+            ],
+            2,
+            "external-video-passthrough-frames",
+        ),
+    ],
+)
+async def test_external_video_start_passes_storyboard_text_without_backend_augmentation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    images: list[str],
+    expected_source_image_count: int,
+    request_id: str,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+    captured_prompts: list[str] = []
+    captured_metadata: list[dict] = []
+    captured_source_images: list[list[VideoSourceImage]] = []
+
+    class CapturingVideoProvider:
+        async def start_generation(self, request):
+            captured_prompts.append(request.prompt)
+            captured_metadata.append(request.metadata)
+            captured_source_images.append(request.source_images)
+            return VideoGenerationStart(
+                provider_job_id="provider-passthrough-job",
+                provider_status="queued",
+                raw_response={"id": "provider-passthrough-job", "status": "queued"},
+                request_payload={"prompt": request.prompt},
+            )
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        video_service_module,
+        "get_video_provider",
+        lambda settings: CapturingVideoProvider(),
+    )
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, session_factory = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", session_factory)
+    storyboard_text = """
+777 casino lobby opens with a cash balance and withdraw button.
+Continue the exact first-frame action, then resolve into the supplied last frame.
+"""
+
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id=request_id,
+                images=images,
+                storyboard_text=storyboard_text,
+            ),
+        )
+        job_id = response.json()["data"]["job_id"]
+        start_task_id, start_queue_name, _priority = enqueued[0]
+        assert start_queue_name == VIDEO_QUEUE_NAME
+
+        async with session_factory() as session:
+            video = await session.get(VideoAsset, job_id)
+            assert video is not None
+            video.metadata_json = {
+                **(video.metadata_json or {}),
+                "creative_strategy": {
+                    "style_pack_id": "must-not-be-injected",
+                    "style_pack": {"visual_direction": "must-not-be-injected"},
+                    "market_game_style_pack": {"video_guidance": "must-not-be-injected"},
+                },
+            }
+            await session.commit()
+
+        await GenerationTaskService().process_task(start_task_id)
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 202
+    assert len(captured_source_images) == 1
+    assert len(captured_source_images[0]) == expected_source_image_count
+    if expected_source_image_count == 0:
+        assert captured_source_images == [[]]
+    assert captured_prompts == [storyboard_text.strip()]
+    assert len(captured_metadata) == 1
+    assert "creative_strategy" not in captured_metadata[0]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata_json",
+    [
+        {},
+        {"source": EXTERNAL_SOURCE},
+        {"source": EXTERNAL_SOURCE, "generation_mode": "unknown"},
+        {
+            "source": "internal",
+            "generation_mode": EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+        },
+    ],
+)
+async def test_video_service_rejects_zero_images_without_external_text_double_marker(
+    tmp_path, metadata_json: dict
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "zero-image-gate.db")
+    async with session_factory() as session:
+        campaign = Campaign(name="Zero image gate", metadata_json={})
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            source_asset_ids=[],
+            prompt="Generate directly from text.",
+            storyboard=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+            status=VideoStatus.REQUESTED.value,
+            metadata_json=metadata_json,
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+        with pytest.raises(AppError, match="Video task has no source images"):
+            await VideoService()._build_provider_request(session, video)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_video_service_rejects_text_mode_record_with_source_images(tmp_path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "corrupt-text-mode.db")
+    async with session_factory() as session:
+        campaign = Campaign(name="Corrupt text mode", metadata_json={})
+        session.add(campaign)
+        await session.flush()
+        video = VideoAsset(
+            campaign_id=campaign.id,
+            source_asset_ids=["unexpected-source-asset"],
+            prompt="Generate directly from text.",
+            storyboard=[],
+            duration_seconds=12,
+            aspect_ratio="9:16",
+            status=VideoStatus.REQUESTED.value,
+            metadata_json={
+                "source": EXTERNAL_SOURCE,
+                "generation_mode": EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+            },
+        )
+        session.add(video)
+        await session.commit()
+        await session.refresh(video)
+        with pytest.raises(
+            AppError,
+            match="External text-to-video tasks must not have source images",
+        ):
+            await VideoService()._build_provider_request(session, video)
     await engine.dispose()
 
 
@@ -643,7 +976,10 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
     assert video.status == VideoStatus.GENERATED.value
     assert video.url is None
     assert video.metadata_json["implementation_status"] == "pending_transfer"
-    assert video.metadata_json["provider_video_url"] == "https://volcengine.example.test/video-output.mp4"
+    assert (
+        video.metadata_json["provider_video_url"]
+        == "https://volcengine.example.test/video-output.mp4"
+    )
 
     await GenerationTaskService().process_task(transfer_task_id)
 
@@ -697,20 +1033,21 @@ async def test_external_video_polling_schedules_transfer_without_downloading_in_
 
 
 @pytest.mark.asyncio
-async def test_external_video_generation_rejects_image_counts_other_than_two(
+@pytest.mark.parametrize(
+    "images",
+    [[ONE_PIXEL_PNG_BASE64], [ONE_PIXEL_PNG_BASE64] * 3],
+)
+async def test_external_video_generation_rejects_unsupported_image_counts(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    images: list[str],
 ) -> None:
-    client, engine, app, _session_factory = await _client_with_db(
-        tmp_path,
-        monkeypatch,
-        token="video-token",
-    )
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
     try:
         response = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=_video_payload(images=[ONE_PIXEL_PNG_BASE64]),
+            json=_video_payload(images=images),
         )
     finally:
         app.dependency_overrides.clear()
@@ -719,7 +1056,30 @@ async def test_external_video_generation_rejects_image_counts_other_than_two(
 
     assert response.status_code == 400
     assert response.json()["code"] == 4001
-    assert "exactly 2" in response.json()["message"]
+    assert response.json()["message"] == (
+        "images must be omitted, empty, or contain exactly 2 base64 images"
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_rejects_null_images(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app, _ = await _client_with_db(tmp_path, monkeypatch, token="video-token")
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(images=None),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
 
 
 @pytest.mark.asyncio
@@ -856,9 +1216,151 @@ async def test_external_video_generation_reuses_duplicate_external_request_id(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_images", "second_images", "expected_mode", "expected_asset_count"),
+    [
+        (
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            [],
+            EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+            2,
+        ),
+        (
+            [],
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+            0,
+        ),
+    ],
+)
+async def test_external_video_generation_same_id_keeps_original_mode(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_images: list[str],
+    second_images: list[str],
+    expected_mode: str,
+    expected_asset_count: int,
+) -> None:
+    monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
+    get_settings.cache_clear()
+    enqueued: list[tuple[str, str, int]] = []
+
+    def capture_enqueue(
+        task_id: str,
+        queue_name: str,
+        priority: int,
+        countdown_seconds: int = 0,
+    ) -> None:
+        assert countdown_seconds == 0
+        enqueued.append((task_id, queue_name, priority))
+
+    monkeypatch.setattr(
+        "backend.app.services.generation_task_dispatcher._enqueue_celery_generation_task",
+        capture_enqueue,
+    )
+    client, engine, app, _ = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    request_id = f"same-id-{expected_mode}"
+    try:
+        first = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id=request_id,
+                images=first_images,
+            ),
+        )
+        second = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id=request_id,
+                images=second_images,
+            ),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["data"]["job_id"] == second.json()["data"]["job_id"]
+    assert "generation_mode" not in first.json()["data"]
+    assert "generation_mode" not in second.json()["data"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert len(assets) == expected_asset_count
+    assert len(videos) == 1
+    assert videos[0].metadata_json["generation_mode"] == expected_mode
+    assert len(tasks) == 1
+    assert tasks[0].metadata_json["generation_mode"] == expected_mode
+    assert len(enqueued) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_video_generation_invalid_frame_does_not_fallback_to_text(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app, _ = await _client_with_db(
+        tmp_path,
+        monkeypatch,
+        token="video-token",
+    )
+    try:
+        response = client.post(
+            "/api/v1/integrations/video-generation/videos",
+            headers=_authorized_headers(),
+            json=_video_payload(
+                external_request_id="invalid-frame-no-fallback",
+                images=[ONE_PIXEL_PNG_BASE64, "not-valid-base64"],
+            ),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 4001
+    assert "valid base64" in response.json()["message"]
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        assets = (await session.execute(select(CreativeAsset))).scalars().all()
+        videos = (await session.execute(select(VideoAsset))).scalars().all()
+        tasks = (await session.execute(select(GenerationTask))).scalars().all()
+    assert assets == []
+    assert videos == []
+    assert tasks == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_images", "second_images", "expected_mode"),
+    [
+        (
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            [],
+            EXTERNAL_VIDEO_GENERATION_MODE_FIRST_LAST_FRAME,
+        ),
+        (
+            [],
+            [ONE_PIXEL_PNG_BASE64] * 2,
+            EXTERNAL_VIDEO_GENERATION_MODE_TEXT_TO_VIDEO,
+        ),
+    ],
+)
 async def test_external_video_generation_requeues_retryable_failed_duplicate_request(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    first_images: list[str],
+    second_images: list[str],
+    expected_mode: str,
 ) -> None:
     monkeypatch.setenv("GENERATION_TASK_EXECUTION_BACKEND", "celery")
     get_settings.cache_clear()
@@ -882,12 +1384,19 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
         monkeypatch,
         token="video-token",
     )
-    payload = _video_payload(external_request_id="external-video-requeue")
+    first_payload = _video_payload(
+        external_request_id=f"external-video-requeue-{expected_mode}",
+        images=first_images,
+    )
+    second_payload = _video_payload(
+        external_request_id=f"external-video-requeue-{expected_mode}",
+        images=second_images,
+    )
     try:
         first = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=payload,
+            json=first_payload,
         )
         first_job_id = first.json()["data"]["job_id"]
         assert len(enqueued) == 1
@@ -921,7 +1430,7 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
         second = client.post(
             "/api/v1/integrations/video-generation/videos",
             headers=_authorized_headers(),
-            json=payload,
+            json=second_payload,
         )
     finally:
         app.dependency_overrides.clear()
@@ -956,9 +1465,11 @@ async def test_external_video_generation_requeues_retryable_failed_duplicate_req
     assert video.metadata_json["previous_provider_start_error"] == (
         "Volcengine video API request failed: request failed before response"
     )
+    assert video.metadata_json["generation_mode"] == expected_mode
     assert len(tasks) == 2
     assert tasks[-1].status == "queued"
     assert tasks[-1].task_type == "external_video_start"
+    assert tasks[-1].metadata_json["generation_mode"] == expected_mode
     await engine.dispose()
 
 

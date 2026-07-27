@@ -53,6 +53,43 @@ def schedule_generation_task_id(
     return True
 
 
+def schedule_ad_research_job(
+    task_id: str,
+    background_tasks: _BackgroundTaskScheduler | None = None,
+) -> bool:
+    """Dispatch an ad-research task to its dedicated queue.
+
+    This deliberately bypasses GenerationTaskService because a research task owns a
+    separate long-running collector/model state machine.
+    """
+    settings = get_settings()
+    if settings.generation_task_execution_backend == "celery":
+        _enqueue_celery_ad_research_job(task_id)
+        return True
+    if background_tasks is not None:
+        background_tasks.add_task(_process_background_ad_research_job, task_id)
+    else:
+        asyncio.create_task(_process_background_ad_research_job(task_id))
+    return True
+
+
+async def _process_background_ad_research_job(task_id: str) -> None:
+    from backend.app.db.models.generation_task import GenerationTask
+    from backend.app.db.session import AsyncSessionLocal
+    from backend.app.services.ad_research_orchestrator import AdResearchOrchestrator
+
+    async with AsyncSessionLocal() as session:
+        task = await session.get(GenerationTask, task_id)
+        if task is not None:
+            await AdResearchOrchestrator().execute_task(session, task)
+
+
+def _enqueue_celery_ad_research_job(task_id: str) -> None:
+    from backend.app.worker.tasks import process_ad_research_job
+
+    process_ad_research_job.apply_async(args=[task_id], queue="ad_research_queue")
+
+
 def schedule_ad_generation_job(
     job_id: str,
     background_tasks: _BackgroundTaskScheduler | None = None,

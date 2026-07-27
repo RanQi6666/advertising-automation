@@ -39,13 +39,17 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
       LOCAL_STORAGE_ROOT: /data/storage
+      AD_ANALYSIS_MEDIA_ROOT: /data/ad-analysis-media
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - storage_data:/data/storage
+      - ad_analysis_media_data:/data/ad-analysis-media
     depends_on:
       db:
         condition: service_healthy
@@ -110,6 +114,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
       LOCAL_STORAGE_ROOT: /data/storage
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
       GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
@@ -213,6 +218,87 @@ services:
       --concurrency=${CALLBACK_QUEUE_CONCURRENCY:-3}
       --hostname=callback@%h
 
+  worker_ad_analysis:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env.production}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
+      LOCAL_STORAGE_ROOT: /data/storage
+      AD_ANALYSIS_MEDIA_ROOT: /data/ad-analysis-media
+      GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ad_analysis_media_data:/data/ad-analysis-media
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A backend.app.worker.celery_app:celery_app worker
+      --loglevel=INFO
+      --queues=ad_analysis_queue
+      --concurrency=${AD_ANALYSIS_QUEUE_CONCURRENCY:-2}
+      --hostname=ad-analysis@%h
+  meta_ads_collector:
+    build:
+      context: .
+      dockerfile: collector/meta_ads_bridge/Dockerfile
+      args:
+        META_ADS_SCRAPER_REF: ${META_ADS_SCRAPER_REF:-5a83208e4e69e66ba5ba1eb9817771043ac169ed}
+        APT_MIRROR_HOST: ${META_ADS_APT_MIRROR_HOST:-mirrors.aliyun.com}
+    restart: unless-stopped
+    # No host port: collector is only reachable by the internal research worker.
+    tmpfs:
+      - /tmp
+      - /opt/meta-ads-scraper/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  worker_ad_research:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env.production}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ad_automation}
+      LOCAL_STORAGE_ROOT: /data/storage
+      AD_RESEARCH_MEDIA_ROOT: /data/storage/ad-research
+      GENERATION_TASK_EXECUTION_BACKEND: ${GENERATION_TASK_EXECUTION_BACKEND:-celery}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
+      AD_RESEARCH_COLLECTOR_BASE_URL: ${AD_RESEARCH_COLLECTOR_BASE_URL:-http://meta_ads_collector:8090}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - storage_data:/data/storage
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meta_ads_collector:
+        condition: service_healthy
+    command: >
+      celery -A backend.app.worker.celery_app:celery_app worker
+      --loglevel=INFO
+      --queues=ad_research_queue
+      --concurrency=${AD_RESEARCH_WORKER_CONCURRENCY:-2}
+      --hostname=ad-research@%h
+
   web:
     build:
       context: .
@@ -229,4 +315,5 @@ services:
 volumes:
   postgres_data:
   storage_data:
+  ad_analysis_media_data:
   redis_data:

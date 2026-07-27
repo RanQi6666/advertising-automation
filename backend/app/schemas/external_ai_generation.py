@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,3 +64,43 @@ class ExternalAIVideoStoryboardCreate(ExternalAIRequestBase):
     duration_seconds: int = Field(default=12, ge=1, le=300)
     aspect_ratio: str = Field(default="9:16", max_length=32)
     prompt: str | None = None
+
+
+class ExternalAIReferenceVideoURL(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["url"]
+    video_url: str = Field(min_length=1, max_length=2048)
+
+
+class ExternalAIReferenceVideoUpload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["uploaded_asset"]
+    upload_asset_id: str = Field(min_length=1, max_length=255)
+
+
+class ExternalAIReferenceVideoAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["video_asset"]
+    video_asset_id: str = Field(min_length=1, max_length=255)
+
+
+ExternalAIReferenceVideo = Annotated[
+    ExternalAIReferenceVideoURL
+    | ExternalAIReferenceVideoUpload
+    | ExternalAIReferenceVideoAsset,
+    Field(discriminator="source_type"),
+]
+
+
+class ExternalAIFrameAnchoredStoryboardCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_request_id: str | None = Field(default=None, max_length=128)
+    first_frame_image_url: str = Field(min_length=1, max_length=10_000_000)
+    last_frame_image_url: str = Field(min_length=1, max_length=10_000_000)
+    reference_video: ExternalAIReferenceVideo | None = None
+    duration_seconds: int = Field(default=12, ge=1, le=300)
+    aspect_ratio: str = Field(default="9:16", max_length=32)

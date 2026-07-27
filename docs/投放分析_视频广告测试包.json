@@ -1,0 +1,314 @@
+{
+  "external_request_id": "fb-analysis-20260713-video-000001",
+  "source_type": "external",
+  "date_preset": "last_7d",
+  "date_start": "2026-06-15",
+  "date_stop": "2026-06-21",
+  "campaign": {
+    "id": "23",
+    "name": "IN Smart TV Sales",
+    "status": "ACTIVE",
+    "objective": "OUTCOME_SALES",
+    "daily_budget": "5000",
+    "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+    "switch_time": "9-18"
+  },
+  "adset": {
+    "id": "19",
+    "name": "IN - Purchase - 25-45",
+    "status": "ACTIVE",
+    "daily_budget": null,
+    "billing_event": "IMPRESSIONS",
+    "optimization_goal": "OFFSITE_CONVERSIONS",
+    "pixel_id": "1234567890",
+    "custom_event_type": "PURCHASE",
+    "promoted_object": {
+      "pixel_id": "1234567890",
+      "custom_event_type": "PURCHASE"
+    },
+    "countries": "IN",
+    "age_min": 25,
+    "age_max": 45,
+    "scale_threshold": "8.50",
+    "stop_threshold": "20.00",
+    "genders": "MALE",
+    "audience": "India, male, age 25-45, interested in home entertainment and sports watching"
+  },
+  "creative": {
+    "id": "20",
+    "name": "IN Smart TV - video - 001",
+    "ad_status": "ACTIVE",
+    "page_id": "1152925037905592",
+    "headline": "स्मार्ट टीवी | आसान किस्तों में उपलब्ध",
+    "message": "स्पोर्ट्स और फिल्में बड़ी स्क्रीन पर साफ देखें। आसान किस्तों में स्मार्ट टीवी उपलब्ध है, साथ में फ्री होम इंस्टॉलेशन भी।",
+    "description": "क्रिस्टल क्लियर स्क्रीन और स्मूद मोशन के साथ। अभी पूरी डिटेल देखें।",
+    "link": "https://www.mensparadise.store/TV.html",
+    "btn_type": "LEARN_MORE",
+    "asset_id": "c79cab99-5baf-4366-a855-b6bfa2f968f1",
+    "asset_name": "smart-tv-video-001.mp4",
+    "asset_type": "video",
+    "creative_type": "video",
+    "video_url": "https://newpixel.messrocts.com/uploads/ads/2026/07/smart-tv-video-001.mp4",
+    "storyboard": [
+      {
+        "scene_index": 1,
+        "start_second": 0,
+        "end_second": 4,
+        "visual": "Family watching a cricket match on a smart TV in a warm living room.",
+        "subtitle": "लाइव क्रिकेट मैच बिल्कुल स्पष्ट"
+      },
+      {
+        "scene_index": 2,
+        "start_second": 4,
+        "end_second": 8,
+        "visual": "Close-up of smooth motion and high refresh-rate sports footage.",
+        "subtitle": "हर मूवमेंट साफ और स्मूद"
+      },
+      {
+        "scene_index": 3,
+        "start_second": 8,
+        "end_second": 12,
+        "visual": "CTA card with installment and free installation message.",
+        "subtitle": "आसान किस्तों में अभी जानें"
+      }
+    ]
+  },
+  "insight": {
+    "spend": "100.00",
+    "impressions": "82000",
+    "reach": "56000",
+    "frequency": "1.46",
+    "clicks": "1200",
+    "ctr": "1.46",
+    "cpc": "0.0833",
+    "cpm": "1.2195",
+    "actions": [
+      {
+        "action_type": "link_click",
+        "value": "860"
+      },
+      {
+        "action_type": "landing_page_view",
+        "value": "560"
+      },
+      {
+        "action_type": "complete_registration",
+        "value": "120"
+      },
+      {
+        "action_type": "purchase",
+        "value": "15"
+      },
+      {
+        "action_type": "first_recharge",
+        "value": "8"
+      },
+      {
+        "action_type": "add_to_cart",
+        "value": "38"
+      },
+      {
+        "action_type": "lead",
+        "value": "0"
+      }
+    ],
+    "date_start": "2026-06-15",
+    "date_stop": "2026-06-21",
+    "video_play_actions": [
+      {
+        "action_type": "video_view",
+        "value": "720"
+      }
+    ],
+    "video_p25_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "430"
+      }
+    ],
+    "video_p50_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "250"
+      }
+    ],
+    "video_p75_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "140"
+      }
+    ],
+    "video_p95_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "90"
+      }
+    ],
+    "video_p100_watched_actions": [
+      {
+        "action_type": "video_view",
+        "value": "62"
+      }
+    ],
+    "status": "ACTIVE"
+  },
+  "siblings": [
+    {
+      "creative": {
+        "id": "sibling_001",
+        "name": "Comparable creative A",
+        "creative_type": "video",
+        "message": "Variant A uses a more direct product benefit in the opening.",
+        "headline": "Direct benefit hook",
+        "description": "Comparable sibling ad for same-period performance analysis.",
+        "btn_type": "LEARN_MORE",
+        "link": "https://www.example.com/product"
+      },
+      "insight": {
+        "spend": "80.00",
+        "impressions": "61000",
+        "reach": "47000",
+        "frequency": "1.30",
+        "clicks": "720",
+        "ctr": "1.18",
+        "cpc": "0.1111",
+        "cpm": "1.3115",
+        "actions": [
+          {
+            "action_type": "link_click",
+            "value": "600"
+          },
+          {
+            "action_type": "landing_page_view",
+            "value": "510"
+          },
+          {
+            "action_type": "purchase",
+            "value": "20"
+          }
+        ],
+        "date_start": "2026-06-15",
+        "date_stop": "2026-06-21",
+        "status": "ACTIVE",
+        "video_play_actions": [
+          {
+            "action_type": "video_view",
+            "value": "9000"
+          }
+        ],
+        "video_p25_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "5700"
+          }
+        ],
+        "video_p50_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "3300"
+          }
+        ],
+        "video_p75_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "1800"
+          }
+        ],
+        "video_p95_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "900"
+          }
+        ],
+        "video_p100_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "620"
+          }
+        ]
+      }
+    },
+    {
+      "creative": {
+        "id": "sibling_002",
+        "name": "Comparable creative B",
+        "creative_type": "video",
+        "message": "Variant B focuses on the offer and the call to action.",
+        "headline": "Offer and CTA hook",
+        "description": "Comparable sibling ad for same-period performance analysis.",
+        "btn_type": "LEARN_MORE",
+        "link": "https://www.example.com/product"
+      },
+      "insight": {
+        "spend": "65.00",
+        "impressions": "53000",
+        "reach": "41000",
+        "frequency": "1.29",
+        "clicks": "390",
+        "ctr": "0.74",
+        "cpc": "0.1667",
+        "cpm": "1.2264",
+        "actions": [
+          {
+            "action_type": "link_click",
+            "value": "320"
+          },
+          {
+            "action_type": "landing_page_view",
+            "value": "240"
+          },
+          {
+            "action_type": "purchase",
+            "value": "8"
+          }
+        ],
+        "date_start": "2026-06-15",
+        "date_stop": "2026-06-21",
+        "status": "PAUSED",
+        "video_play_actions": [
+          {
+            "action_type": "video_view",
+            "value": "6800"
+          }
+        ],
+        "video_p25_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "3900"
+          }
+        ],
+        "video_p50_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "2100"
+          }
+        ],
+        "video_p75_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "1050"
+          }
+        ],
+        "video_p95_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "480"
+          }
+        ],
+        "video_p100_watched_actions": [
+          {
+            "action_type": "video_view",
+            "value": "300"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata_json": {
+    "source": "external_ad_system",
+    "product_name": "Smart TV",
+    "industry": "consumer_electronics",
+    "note": "Complete async Facebook video ad analysis sample. Caller sends video_url only; AI system extracts thumbnail/keyframes internally.",
+    "generated_for": "video_url_ai_analysis_test"
+  }
+}

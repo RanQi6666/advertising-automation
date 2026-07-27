@@ -14,7 +14,7 @@ class ExternalImageGenerationCreate(BaseModel):
     external_request_id: str | None = Field(default=None, max_length=128)
     prompt: str = Field(min_length=1)
     count: int = Field(default=1, ge=1, le=5)
-    size: str = "1:1"
+    size: str = "9:16"
     model_id: str | None = Field(default=None, max_length=128)
 
 

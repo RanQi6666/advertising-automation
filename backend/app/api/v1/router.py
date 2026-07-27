@@ -4,6 +4,7 @@ from backend.app.api.deps import require_ai_ads_access_token
 from backend.app.api.v1.endpoints import (
     ad_generation,
     ad_performance,
+    ad_research,
     campaigns,
     copywriting,
     creatives,
@@ -36,6 +37,11 @@ api_router.include_router(
 api_router.include_router(
     ad_performance.router,
     tags=["ad-performance"],
+    dependencies=protected_dependencies,
+)
+api_router.include_router(
+    ad_research.router,
+    tags=["ad-research"],
     dependencies=protected_dependencies,
 )
 api_router.include_router(

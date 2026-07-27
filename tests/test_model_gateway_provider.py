@@ -98,6 +98,97 @@ async def test_gateway_responses_provider_sends_fast_and_long_request_timeouts()
 
 
 @pytest.mark.asyncio
+async def test_gateway_responses_provider_uses_operator_contract_for_external_analysis() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "summary": "建议先核对关键转化事件。",
+                        "overall_decision": {
+                            "action": "monitor",
+                            "priority": "medium",
+                            "main_problem": "关键转化事件数据不足。",
+                        },
+                        "targeting_analysis": [],
+                        "adjustment_plans": [
+                            {
+                                "priority": "high",
+                                "category": "tracking",
+                                "title": "核对事件回传",
+                                "action": "检查 Pixel 与 CAPI。",
+                                "reason": "未提供下游事件。",
+                                "expected_effect": "提高判断可靠性。",
+                                "what_to_watch": "purchase 和 CPA。",
+                            }
+                        ],
+                        "copywriting_analysis": {
+                            "summary": "未提供足够文案信息。",
+                            "problems": [],
+                            "suggestions": [],
+                            "recommended_primary_text": None,
+                            "recommended_headline": None,
+                            "recommended_description": None,
+                        },
+                        "media_analysis": {
+                            "media_type": "image",
+                            "summary": "当前没有可靠的画面补充结论。",
+                            "improvements": [],
+                        },
+                        "market_intelligence": {
+                            "status": "unavailable",
+                            "summary": "没有足够公开创意参考。",
+                            "references": [],
+                            "limitation": "公开来源不能证明真实投放成效。",
+                        },
+                        "data_gaps": ["缺少 purchase 数据。"],
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://model.ggcss.xyz/v1",
+    ) as client:
+        provider = GatewayResponsesLLMProvider(
+            api_key="gateway-key",
+            base_url="https://model.ggcss.xyz/v1",
+            model="gpt-5.5",
+            http_client=client,
+        )
+        result = await provider.analyze_ad_performance(
+            {
+                "metrics": {},
+                "creative": {"creative_type": "image"},
+                "result_contract": {
+                    "schema_version": "facebook_ad_analysis_v1",
+                    "operator_sections": ["summary"],
+                },
+            }
+        )
+
+    system_prompt = captured["payload"]["input"][0]["content"]
+    assert "overall_decision" in system_prompt
+    assert "Do not output old fields" in system_prompt
+    assert set(result) == {
+        "summary",
+        "overall_decision",
+        "targeting_analysis",
+        "adjustment_plans",
+        "copywriting_analysis",
+        "media_analysis",
+        "market_intelligence",
+        "data_gaps",
+    }
+
+
+@pytest.mark.asyncio
 async def test_gateway_responses_llm_provider_posts_json_completion_to_responses() -> None:
     captured: dict = {}
 

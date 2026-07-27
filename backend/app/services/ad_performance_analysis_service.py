@@ -1785,7 +1785,6 @@ def _llm_analysis_context(
                 "cpc",
                 "cpm",
                 "actions",
-                "cost_per_action_type",
                 "video_play_actions",
                 "video_p25_watched_actions",
                 "video_p50_watched_actions",

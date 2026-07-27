@@ -1,0 +1,182 @@
+{
+  "external_request_id": "fb-analysis-20260713-basic-000001",
+  "source_type": "external",
+  "date_preset": "last_7d",
+  "date_start": "2026-06-15",
+  "date_stop": "2026-06-21",
+  "campaign": {
+    "id": "23",
+    "name": "IN Smart TV Sales",
+    "status": "ACTIVE",
+    "objective": "OUTCOME_SALES",
+    "daily_budget": "5000",
+    "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+    "switch_time": "9-18"
+  },
+  "adset": {
+    "id": "19",
+    "name": "IN - Purchase - 25-45",
+    "status": "ACTIVE",
+    "daily_budget": null,
+    "billing_event": "IMPRESSIONS",
+    "optimization_goal": "OFFSITE_CONVERSIONS",
+    "pixel_id": "1234567890",
+    "custom_event_type": "PURCHASE",
+    "promoted_object": {
+      "pixel_id": "1234567890",
+      "custom_event_type": "PURCHASE"
+    },
+    "countries": "IN",
+    "age_min": 25,
+    "age_max": 45,
+    "scale_threshold": "8.50",
+    "stop_threshold": "20.00",
+    "genders": "MALE",
+    "audience": "India, male, age 25-45, interested in home entertainment and sports watching"
+  },
+  "creative": {
+    "id": "19",
+    "name": "IN Smart TV - image - 001",
+    "ad_status": "ACTIVE",
+    "page_id": "1152925037905592",
+    "headline": "स्मार्ट टीवी | आसान किस्तों में उपलब्ध",
+    "message": "अपने पसंदीदा स्पोर्ट्स मैच और फिल्में अब बिना किसी परेशानी के घर बैठे देखें! आसान किस्तों में स्मार्ट टीवी उपलब्ध है, साथ में फ्री होम इंस्टॉलेशन भी।",
+    "description": "उच्च रिफ्रेश रेट स्क्रीन, कोई छिपा हुआ शुल्क नहीं, मुफ्त इंस्टॉलेशन सुविधा के साथ। अभी जानें पूरी डिटेल।",
+    "link": "https://www.mensparadise.store/TV.html",
+    "btn_type": "LEARN_MORE",
+    "asset_id": "570ecccb-9c13-45e4-b993-e217632d87f6",
+    "asset_name": "smart-tv-image-001.jpg",
+    "asset_type": "image",
+    "creative_type": "image",
+    "image_url": "https://newpixel.messrocts.com/uploads/ads/2026/07/smart-tv-image-001.jpg"
+  },
+  "insight": {
+    "spend": "100.00",
+    "impressions": "82000",
+    "reach": "56000",
+    "frequency": "1.46",
+    "clicks": "1200",
+    "ctr": "1.46",
+    "cpc": "0.0833",
+    "cpm": "1.2195",
+    "actions": [
+      {
+        "action_type": "link_click",
+        "value": "860"
+      },
+      {
+        "action_type": "landing_page_view",
+        "value": "560"
+      },
+      {
+        "action_type": "complete_registration",
+        "value": "120"
+      },
+      {
+        "action_type": "purchase",
+        "value": "15"
+      },
+      {
+        "action_type": "first_recharge",
+        "value": "8"
+      },
+      {
+        "action_type": "add_to_cart",
+        "value": "38"
+      },
+      {
+        "action_type": "lead",
+        "value": "0"
+      }
+    ],
+    "date_start": "2026-06-15",
+    "date_stop": "2026-06-21",
+    "status": "ACTIVE"
+  },
+  "siblings": [
+    {
+      "creative": {
+        "id": "sibling_001",
+        "name": "Comparable creative A",
+        "creative_type": "image",
+        "message": "Variant A uses a more direct product benefit in the opening.",
+        "headline": "Direct benefit hook",
+        "description": "Comparable sibling ad for same-period performance analysis.",
+        "btn_type": "LEARN_MORE",
+        "link": "https://www.example.com/product"
+      },
+      "insight": {
+        "spend": "80.00",
+        "impressions": "61000",
+        "reach": "47000",
+        "frequency": "1.30",
+        "clicks": "720",
+        "ctr": "1.18",
+        "cpc": "0.1111",
+        "cpm": "1.3115",
+        "actions": [
+          {
+            "action_type": "link_click",
+            "value": "600"
+          },
+          {
+            "action_type": "landing_page_view",
+            "value": "510"
+          },
+          {
+            "action_type": "purchase",
+            "value": "20"
+          }
+        ],
+        "date_start": "2026-06-15",
+        "date_stop": "2026-06-21",
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "creative": {
+        "id": "sibling_002",
+        "name": "Comparable creative B",
+        "creative_type": "image",
+        "message": "Variant B focuses on the offer and the call to action.",
+        "headline": "Offer and CTA hook",
+        "description": "Comparable sibling ad for same-period performance analysis.",
+        "btn_type": "LEARN_MORE",
+        "link": "https://www.example.com/product"
+      },
+      "insight": {
+        "spend": "65.00",
+        "impressions": "53000",
+        "reach": "41000",
+        "frequency": "1.29",
+        "clicks": "390",
+        "ctr": "0.74",
+        "cpc": "0.1667",
+        "cpm": "1.2264",
+        "actions": [
+          {
+            "action_type": "link_click",
+            "value": "320"
+          },
+          {
+            "action_type": "landing_page_view",
+            "value": "240"
+          },
+          {
+            "action_type": "purchase",
+            "value": "8"
+          }
+        ],
+        "date_start": "2026-06-15",
+        "date_stop": "2026-06-21",
+        "status": "PAUSED"
+      }
+    }
+  ],
+  "metadata_json": {
+    "source": "external_ad_system",
+    "product_name": "Smart TV",
+    "industry": "consumer_electronics",
+    "note": "Complete async Facebook ad analysis sample. Caller sends only image_url or video_url; AI system derives thumbnails/keyframes internally."
+  }
+}

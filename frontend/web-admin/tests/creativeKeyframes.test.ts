@@ -69,7 +69,7 @@ test("copy image mode generates exactly two standard images without keyframe met
   const plan = imageGenerationPlanForMode("copy_images", 12, "9:16", 3);
 
   assert.equal(plan.count, 2);
-  assert.equal(plan.size, "1:1");
+  assert.equal(plan.size, "9:16");
   assert.equal(plan.generationMode, "standard");
   assert.equal(plan.isKeyframeVariant, false);
   assert.equal(plan.variantCount, undefined);

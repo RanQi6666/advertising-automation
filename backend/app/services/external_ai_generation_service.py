@@ -1,20 +1,29 @@
 import asyncio
+import re
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.errors import AppError, NotFoundError
+from backend.app.core.errors import AppError, NotFoundError, ProviderError
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
 from backend.app.db.models.creative_asset import CreativeAsset
 from backend.app.db.models.generation_task import GenerationTask
 from backend.app.db.models.topic import ContentTopic
 from backend.app.integrations.llm import get_llm_provider
-from backend.app.schemas.ai import CopyDraftCandidate, TopicCandidate, VideoStoryboardCandidate
+from backend.app.schemas.ai import (
+    CopyDraftCandidate,
+    DirectorActionCoverageReview,
+    FrameAnalysis,
+    FrameAnchoredStoryboard,
+    TopicCandidate,
+    VideoStoryboardCandidate,
+)
 from backend.app.schemas.external_ai_generation import (
     ExternalAICopyGenerationCreate,
+    ExternalAIFrameAnchoredStoryboardCreate,
     ExternalAITopicSelectionCreate,
     ExternalAIVideoStoryboardCreate,
     ExternalAIWorkOrderAnalysisCreate,
@@ -34,6 +43,11 @@ from backend.app.services.generation_task_service import (
     GenerationTaskService,
 )
 from backend.app.services.llm_rate_limit import ExternalAIIdempotencyLock, llm_text_rate_limiter
+from backend.app.services.storyboard_reference_video_service import (
+    PreparedReferenceVideo,
+    StoryboardReferenceVideoService,
+    adapt_reference_behavior_timeline,
+)
 from backend.app.services.work_order_parser import parse_work_order_text
 from backend.app.services.work_order_service import WorkOrderService
 
@@ -43,11 +57,13 @@ EXTERNAL_WORK_ORDER_ANALYSIS_TASK_TYPE = "external_work_order_analysis"
 EXTERNAL_TOPIC_SELECTION_TASK_TYPE = "external_topic_selection"
 EXTERNAL_COPY_GENERATION_TASK_TYPE = "external_copy_generation"
 EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE = "external_video_storyboard"
+EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE = "external_video_storyboard_v2"
 EXTERNAL_AI_TEXT_TASK_TYPES = {
     EXTERNAL_WORK_ORDER_ANALYSIS_TASK_TYPE,
     EXTERNAL_TOPIC_SELECTION_TASK_TYPE,
     EXTERNAL_COPY_GENERATION_TASK_TYPE,
     EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE,
+    EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE,
 }
 
 
@@ -104,6 +120,18 @@ class ExternalAIGenerationService:
             external_request_id=payload.external_request_id,
         )
 
+    async def create_frame_anchored_video_storyboard_job(
+        self,
+        session: AsyncSession,
+        payload: ExternalAIFrameAnchoredStoryboardCreate,
+    ) -> GenerationTask:
+        return await self._create_job(
+            session,
+            task_type=EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE,
+            payload=payload.model_dump(mode="json"),
+            external_request_id=payload.external_request_id,
+        )
+
     async def get_job(self, session: AsyncSession, job_id: str) -> GenerationTask:
         task = await session.get(GenerationTask, job_id)
         if task is None or task.task_type not in EXTERNAL_AI_TEXT_TASK_TYPES:
@@ -119,6 +147,8 @@ class ExternalAIGenerationService:
             return await self.execute_copy_generation(session, task)
         if task.task_type == EXTERNAL_VIDEO_STORYBOARD_TASK_TYPE:
             return await self.execute_video_storyboard(session, task)
+        if task.task_type == EXTERNAL_VIDEO_STORYBOARD_V2_TASK_TYPE:
+            return await self.execute_frame_anchored_video_storyboard(session, task)
         raise AppError(f"Unsupported external ai task type: {task.task_type}")
 
     async def execute_work_order_analysis(
@@ -351,6 +381,107 @@ class ExternalAIGenerationService:
             "duration_seconds": payload.duration_seconds,
             "aspect_ratio": payload.aspect_ratio,
         }
+
+    async def execute_frame_anchored_video_storyboard(
+        self,
+        session: AsyncSession,
+        task: GenerationTask,
+    ) -> dict[str, Any]:
+        payload = ExternalAIFrameAnchoredStoryboardCreate.model_validate(task.payload_json or {})
+        llm = get_llm_provider()
+        reference_service = StoryboardReferenceVideoService()
+        prepared_reference: PreparedReferenceVideo | None = None
+        frame_analysis = _cached_frame_anchored_analysis(task)
+        try:
+            if frame_analysis is None:
+                if payload.reference_video is not None:
+                    prepared_reference = await reference_service.prepare(
+                        session,
+                        payload.reference_video,
+                        task_id=task.id,
+                    )
+                async with llm_text_rate_limiter():
+                    frame_analysis = await llm.analyze_video_frame_pair(
+                        first_frame_image_url=payload.first_frame_image_url,
+                        last_frame_image_url=payload.last_frame_image_url,
+                        duration_seconds=payload.duration_seconds,
+                        aspect_ratio=payload.aspect_ratio,
+                        reference_frames=(
+                            prepared_reference.frames if prepared_reference is not None else None
+                        ),
+                        reference_video_duration_seconds=(
+                            prepared_reference.duration_seconds
+                            if prepared_reference is not None
+                            else None
+                        ),
+                        reference_video_sample_interval_seconds=(
+                            prepared_reference.sample_interval_seconds
+                            if prepared_reference is not None
+                            else None
+                        ),
+                    )
+                if (
+                    payload.reference_video is not None
+                    and frame_analysis.reference_video_analysis is None
+                ):
+                    raise ProviderError("Visual model did not return reference video analysis.")
+                if frame_analysis.reference_video_analysis is not None:
+                    frame_analysis = frame_analysis.model_copy(
+                        update={
+                            "timeline_adaptation_plan": adapt_reference_behavior_timeline(
+                                frame_analysis.reference_video_analysis,
+                                target_duration_seconds=payload.duration_seconds,
+                            )
+                        }
+                    )
+                await _store_frame_anchored_private_metadata(
+                    session,
+                    task,
+                    frame_analysis=frame_analysis.model_dump(mode="json"),
+                )
+
+            if frame_analysis.director_plan is not None:
+                frame_analysis = frame_analysis.model_copy(update={"director_plan": None})
+                await _store_frame_anchored_private_metadata(
+                    session,
+                    task,
+                    frame_analysis=frame_analysis.model_dump(mode="json"),
+                )
+
+            async with llm_text_rate_limiter():
+                storyboard_candidate = await llm.generate_frame_anchored_video_storyboard_text(
+                    first_frame_image_url=payload.first_frame_image_url,
+                    last_frame_image_url=payload.last_frame_image_url,
+                    frame_analysis=frame_analysis,
+                    duration_seconds=payload.duration_seconds,
+                    aspect_ratio=payload.aspect_ratio,
+                )
+            raw_storyboard_text = getattr(storyboard_candidate, "storyboard_text", "")
+            if not isinstance(raw_storyboard_text, str) or not raw_storyboard_text.strip():
+                raise ProviderError("LLM returned empty frame-anchored storyboard text.")
+            normalized_storyboard_text = raw_storyboard_text.strip()
+            await _store_frame_anchored_private_metadata(
+                session,
+                task,
+                storyboard_text_candidate={
+                    "storyboard_text": normalized_storyboard_text,
+                },
+            )
+            storyboard_text = _scrub_frame_anchored_storyboard_text(
+                normalized_storyboard_text,
+                private_sources=(frame_analysis.model_dump(mode="json"),),
+            ).strip()
+            if not storyboard_text:
+                raise ProviderError("LLM returned empty frame-anchored storyboard text.")
+            return {
+                "request_id": _request_id(payload.external_request_id, task.id),
+                "storyboard_text": storyboard_text,
+                "duration_seconds": payload.duration_seconds,
+                "aspect_ratio": payload.aspect_ratio,
+            }
+        finally:
+            if prepared_reference is not None:
+                await reference_service.cleanup(prepared_reference)
 
     async def _create_job(
         self,
@@ -685,6 +816,444 @@ def _format_external_storyboard_text(storyboard: VideoStoryboardCandidate) -> st
             )
         )
     return "\n\n".join(blocks)
+
+
+def _cached_frame_anchored_analysis(task: GenerationTask) -> FrameAnalysis | None:
+    metadata = task.metadata_json or {}
+    cached = metadata.get("frame_analysis")
+    if not isinstance(cached, dict):
+        return None
+    try:
+        return FrameAnalysis.model_validate(cached)
+    except ValueError:
+        return None
+
+
+async def _store_frame_anchored_private_metadata(
+    session: AsyncSession,
+    task: GenerationTask,
+    *,
+    frame_analysis: dict[str, Any] | None = None,
+    director_action_coverage_review: dict[str, Any] | None = None,
+    storyboard_candidate: dict[str, Any] | None = None,
+    storyboard_text_candidate: dict[str, Any] | None = None,
+    storyboard: dict[str, Any] | None = None,
+) -> None:
+    metadata = task.metadata_json or {}
+    if frame_analysis is not None:
+        metadata = {**metadata, "frame_analysis": frame_analysis}
+    if director_action_coverage_review is not None:
+        metadata = {
+            **metadata,
+            "director_action_coverage_review": director_action_coverage_review,
+        }
+    if storyboard_candidate is not None:
+        metadata = {
+            **metadata,
+            "frame_anchored_storyboard_candidate": storyboard_candidate,
+        }
+    if storyboard_text_candidate is not None:
+        metadata = {
+            **metadata,
+            "frame_anchored_storyboard_text_candidate": storyboard_text_candidate,
+        }
+    if storyboard is not None:
+        metadata = {**metadata, "frame_anchored_storyboard": storyboard}
+    task.metadata_json = metadata
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+
+_SAFE_PRIVATE_ID_PATTERN = re.compile(
+    r"^(?:__sbv2_(?:behavior|beat|window|moment|claim)_\d+__|"
+    r"[A-Za-z0-9]+(?:[_:.-][A-Za-z0-9]+)+)$"
+)
+
+
+def _private_namespace_map(values: list[str], namespace: str) -> dict[str, str]:
+    normalized_values = [value.strip() for value in values if value.strip()]
+    reserved_pattern = re.compile(rf"^__sbv2_{re.escape(namespace)}_\d+__$")
+    reserved_ids = {
+        value for value in normalized_values if reserved_pattern.fullmatch(value)
+    }
+    mapping: dict[str, str] = {}
+    used_ids = set(reserved_ids)
+    next_index = 1
+    for clean in normalized_values:
+        if clean in mapping:
+            continue
+        if clean in reserved_ids:
+            mapping[clean] = clean
+            continue
+        while True:
+            candidate = f"__sbv2_{namespace}_{next_index:03d}__"
+            next_index += 1
+            if candidate not in used_ids:
+                break
+        mapping[clean] = candidate
+        used_ids.add(candidate)
+    return mapping
+
+
+def _mapped_private_id(value: str | None, mapping: dict[str, str]) -> str | None:
+    if value is None:
+        return None
+    clean = value.strip()
+    return mapping.get(clean, clean)
+
+
+def _replace_private_ids_in_text(value: str, mapping: dict[str, str]) -> str:
+    replacements = {
+        original: replacement
+        for original, replacement in mapping.items()
+        if original and original != replacement
+    }
+    if not replacements:
+        return value
+    aliases = sorted(replacements, key=len, reverse=True)
+    alias_pattern = "|".join(re.escape(alias) for alias in aliases)
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_])(?<![A-Za-z0-9][_:.-])"
+        rf"(?:{alias_pattern})"
+        rf"(?![A-Za-z0-9_])(?![_:.-][A-Za-z0-9])"
+    )
+    return pattern.sub(lambda match: replacements[match.group(0)], value)
+
+
+def _replace_private_id_aliases(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                _mapped_private_id(item, mapping)
+                if key == "claim_id" and (item is None or isinstance(item, str))
+                else _replace_private_id_aliases(item, mapping)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_replace_private_id_aliases(item, mapping) for item in value]
+    if not isinstance(value, str):
+        return value
+    return _replace_private_ids_in_text(value, mapping)
+
+
+def _normalize_private_storyboard_claim_namespace(
+    storyboard: FrameAnchoredStoryboard,
+) -> FrameAnchoredStoryboard:
+    claim_values = [
+        evidence.claim_id
+        for scene in storyboard.scenes
+        for evidence in scene.execution_evidence
+    ]
+    claim_map = _private_namespace_map(claim_values, "claim")
+    normalized_payload = _replace_private_id_aliases(
+        storyboard.model_dump(mode="python"),
+        claim_map,
+    )
+    return FrameAnchoredStoryboard.model_validate(normalized_payload)
+
+
+def _normalize_private_storyboard_namespace(frame_analysis: FrameAnalysis) -> FrameAnalysis:
+    reference = frame_analysis.reference_video_analysis
+    reference_graph = reference.behavior_graph if reference is not None else None
+    timeline = frame_analysis.timeline_adaptation_plan
+    plan = frame_analysis.director_plan
+
+    behavior_values: list[str] = []
+    if reference_graph is not None:
+        for beat in reference_graph.beats:
+            behavior_values.extend([beat.beat_id, *beat.depends_on])
+    if timeline is not None:
+        for beat in timeline.beats:
+            behavior_values.extend([beat.beat_id, *beat.depends_on])
+    if plan is not None:
+        for moment in plan.signature_moment_plan:
+            behavior_values.extend(moment.source_behavior_beat_ids)
+    behavior_map = _private_namespace_map(behavior_values, "behavior")
+
+    director_values: list[str] = []
+    window_values: list[str] = []
+    moment_values: list[str] = []
+    if plan is not None:
+        for beat in plan.climax_beats:
+            director_values.extend([beat.beat_id, *beat.depends_on])
+        for window in plan.action_arc_windows:
+            window_values.extend([window.window_id, *window.depends_on])
+        for moment in plan.signature_moment_plan:
+            moment_values.append(moment.moment_id)
+            if moment.assigned_beat_id:
+                director_values.append(moment.assigned_beat_id)
+    director_map = _private_namespace_map(director_values, "beat")
+    window_map = _private_namespace_map(window_values, "window")
+    moment_map = _private_namespace_map(moment_values, "moment")
+
+    normalized_reference = reference
+    if reference is not None and reference_graph is not None:
+        normalized_reference = reference.model_copy(
+            update={
+                "behavior_graph": reference_graph.model_copy(
+                    update={
+                        "beats": [
+                            beat.model_copy(
+                                update={
+                                    "beat_id": _mapped_private_id(
+                                        beat.beat_id, behavior_map
+                                    ),
+                                    "depends_on": [
+                                        _mapped_private_id(dependency, behavior_map)
+                                        for dependency in beat.depends_on
+                                    ],
+                                }
+                            )
+                            for beat in reference_graph.beats
+                        ]
+                    }
+                )
+            }
+        )
+
+    normalized_timeline = timeline
+    if timeline is not None:
+        normalized_timeline = timeline.model_copy(
+            update={
+                "beats": [
+                    beat.model_copy(
+                        update={
+                            "beat_id": _mapped_private_id(beat.beat_id, behavior_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, behavior_map)
+                                for dependency in beat.depends_on
+                            ],
+                        }
+                    )
+                    for beat in timeline.beats
+                ]
+            }
+        )
+
+    normalized_plan = plan
+    if plan is not None:
+        normalized_plan = plan.model_copy(
+            update={
+                "climax_beats": [
+                    beat.model_copy(
+                        update={
+                            "beat_id": _mapped_private_id(beat.beat_id, director_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, director_map)
+                                for dependency in beat.depends_on
+                            ],
+                        }
+                    )
+                    for beat in plan.climax_beats
+                ],
+                "action_arc_windows": [
+                    window.model_copy(
+                        update={
+                            "window_id": _mapped_private_id(window.window_id, window_map),
+                            "depends_on": [
+                                _mapped_private_id(dependency, window_map)
+                                for dependency in window.depends_on
+                            ],
+                        }
+                    )
+                    for window in plan.action_arc_windows
+                ],
+                "signature_moment_plan": [
+                    moment.model_copy(
+                        update={
+                            "moment_id": _mapped_private_id(moment.moment_id, moment_map),
+                            "source_behavior_beat_ids": [
+                                _mapped_private_id(beat_id, behavior_map)
+                                for beat_id in moment.source_behavior_beat_ids
+                            ],
+                            "assigned_beat_id": _mapped_private_id(
+                                moment.assigned_beat_id, director_map
+                            ),
+                        }
+                    )
+                    for moment in plan.signature_moment_plan
+                ],
+            }
+        )
+
+    normalized = frame_analysis.model_copy(
+        update={
+            "reference_video_analysis": normalized_reference,
+            "timeline_adaptation_plan": normalized_timeline,
+            "director_plan": normalized_plan,
+        }
+    )
+    return FrameAnalysis.model_validate(normalized.model_dump(mode="python"))
+
+
+def _public_unrecoverable_director_reason(
+    review: DirectorActionCoverageReview,
+) -> str:
+    normalized_reasons = [reason.casefold() for reason in review.unrecoverable_reasons]
+    if review.invalid_omission_moment_ids or any(
+        "invalid omission contract" in reason for reason in normalized_reasons
+    ):
+        return "invalid omission contract"
+    if any("signature/source linkage" in reason for reason in normalized_reasons):
+        return "required signature/source linkage is missing"
+    return "director action coverage contract is invalid"
+
+
+def _private_id_values(value: Any, *, field_name: str | None = None) -> set[str]:
+    private_ids: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            private_ids.update(_private_id_values(item, field_name=str(key)))
+        return private_ids
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            private_ids.update(_private_id_values(item, field_name=field_name))
+        return private_ids
+    is_private_id_field = bool(
+        field_name
+        and (
+            field_name.endswith("_id")
+            or field_name.endswith("_ids")
+            or field_name in {"depends_on", "cinematic_beat", "cinematic_beats"}
+        )
+    )
+    if is_private_id_field and isinstance(value, str) and value.strip():
+        private_ids.add(value.strip())
+    return private_ids
+
+
+def _private_storyboard_ids(
+    storyboard: FrameAnchoredStoryboard,
+    private_sources: tuple[Any, ...] = (),
+) -> tuple[str, ...]:
+    private_ids = {
+        private_id
+        for private_id in _private_id_values(storyboard.model_dump(mode="json"))
+        if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
+    }
+    for source in private_sources:
+        private_ids.update(
+            private_id
+            for private_id in _private_id_values(source)
+            if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
+        )
+    return tuple(sorted(private_ids, key=len, reverse=True))
+
+
+def _scrub_private_storyboard_ids(value: str | None, private_ids: tuple[str, ...]) -> str:
+    return _replace_private_ids_in_text(
+        value or "",
+        {private_id: "linked item" for private_id in private_ids},
+    )
+
+
+_PRIVATE_STORYBOARD_TOKEN_PATTERN = re.compile(r"__sbv2_[A-Za-z0-9_:.-]+__")
+
+
+def _scrub_frame_anchored_storyboard_text(
+    value: str,
+    *,
+    private_sources: tuple[Any, ...] = (),
+) -> str:
+    private_ids = {
+        private_id
+        for source in private_sources
+        for private_id in _private_id_values(source)
+        if _SAFE_PRIVATE_ID_PATTERN.fullmatch(private_id)
+    }
+    scrubbed = _replace_private_ids_in_text(
+        value,
+        {private_id: "linked item" for private_id in private_ids},
+    )
+    return _PRIVATE_STORYBOARD_TOKEN_PATTERN.sub("linked item", scrubbed)
+
+
+def _format_frame_anchored_storyboard_text(
+    storyboard: FrameAnchoredStoryboard,
+    *,
+    private_sources: tuple[Any, ...] = (),
+) -> str:
+    private_ids = _private_storyboard_ids(storyboard, private_sources)
+
+    def clean(value: str | None) -> str:
+        return _scrub_private_storyboard_ids(value, private_ids)
+
+    blocks = [
+        f"Duration: {storyboard.duration_seconds}s",
+        f"Aspect ratio: {storyboard.aspect_ratio}",
+    ]
+    for index, scene in enumerate(storyboard.scenes, start=1):
+        scene_index = scene.scene_index or index
+        timing = _scene_timing(scene.start_second, scene.end_second)
+        lines = [
+            f"Scene {scene_index} ({timing})",
+            f"Anchor: {scene.frame_anchor}",
+            f"Visual: {clean(scene.visual)}",
+            f"Tension stage: {clean(scene.tension_stage) or '-'}",
+            f"Camera and motion: {clean(scene.motion) or '-'}",
+            f"Camera instruction: {clean(scene.camera_instruction) or '-'}",
+            f"Transition goal: {clean(scene.transition_goal) or '-'}",
+            f"Action-result requirement: {clean(scene.action_result_requirement) or '-'}",
+            f"Effect timing: {clean(scene.effect_timing) or '-'}",
+            (
+                "Subject motion intensity: "
+                f"{_format_optional_intensity(scene.subject_motion_intensity)}"
+            ),
+            f"Camera intensity: {_format_optional_intensity(scene.camera_intensity)}",
+            f"Effect intensity: {_format_optional_intensity(scene.effect_intensity)}",
+            f"Return to final anchor: {clean(scene.anchor_return_instruction) or '-'}",
+            f"Anti-flattening requirement: {clean(scene.anti_flattening_requirement) or '-'}",
+            f"Subtitle: {clean(scene.subtitle) or '-'}",
+            f"Voiceover: {clean(scene.voiceover) or '-'}",
+            f"Sound effects: {', '.join(clean(item) for item in scene.sound_effects) or '-'}",
+        ]
+        if scene.overlay_instruction is not None:
+            overlay = scene.overlay_instruction
+            if isinstance(overlay, str):
+                lines.append(f"Overlay lifecycle: {clean(overlay)}")
+            else:
+                lines.append(
+                    "Overlay lifecycle: "
+                    f"{clean(overlay.reference_element)} -> {overlay.strategy}; "
+                    f"timing: {clean(overlay.timing_instruction)}; "
+                    f"final frame: {clean(overlay.final_frame_requirement)}"
+                )
+        if scene.notes:
+            lines.append(f"Notes: {clean(scene.notes)}")
+        blocks.append("\n".join(lines))
+    blocks.extend(
+        [
+            f"Music: {clean(storyboard.sound_design.music) or '-'}",
+            f"Ambience: {clean(storyboard.sound_design.ambience) or '-'}",
+        ]
+    )
+    if storyboard.rationale:
+        blocks.append(f"Overall direction: {clean(storyboard.rationale)}")
+    return "\n\n".join(blocks)
+
+
+def _format_optional_intensity(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _scene_timing(start_second: float | None, end_second: float | None) -> str:
+    if start_second is None and end_second is None:
+        return "timing not specified"
+    start = _format_timeline_second(start_second)
+    end = _format_timeline_second(end_second)
+    return f"{start}-{end}s"
+
+
+def _format_timeline_second(value: float | None) -> str:
+    if value is None:
+        return "?"
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def _request_id(external_request_id: str | None, task_id: str) -> str:

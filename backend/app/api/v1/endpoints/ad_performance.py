@@ -1,13 +1,31 @@
 import json
+from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from starlette.responses import StreamingResponse
 
 from backend.app.api.deps import CurrentOperator, DbSession, OptionalOperator
+from backend.app.core.config import get_settings
+from backend.app.core.errors import AppError, NotFoundError
 from backend.app.db.models.ad_performance_analysis import AdPerformanceAnalysis
 from backend.app.schemas.ad_performance import (
     AdPerformanceAnalysisCreate,
     AdPerformanceAnalysisRead,
+)
+from backend.app.schemas.external_ad_performance_analysis import (
+    AD_ANALYSIS_CODE_ACCEPTED,
+    AD_ANALYSIS_CODE_SERVER_ERROR,
+    AD_ANALYSIS_CODE_SUCCESS,
+    AD_ANALYSIS_CODE_VALIDATION_ERROR,
+    AdAnalysisCreateData,
+    AdAnalysisEnvelope,
+    AdAnalysisJobData,
+    AdAnalysisJobError,
+    ExternalAdPerformanceAnalysisCreate,
 )
 from backend.app.services.ad_performance_analysis_service import AdPerformanceAnalysisService
 from backend.app.services.collaboration import (
@@ -15,9 +33,123 @@ from backend.app.services.collaboration import (
     record_can_edit,
     require_read_access,
 )
+from backend.app.services.external_ad_performance_analysis_service import (
+    AdAnalysisIdempotencyConflict,
+    ExternalAdPerformanceAnalysisService,
+)
+from backend.app.services.generation_task_dispatcher import schedule_generation_task
 
-router = APIRouter()
+
+class AdPerformanceRoute(APIRoute):
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            try:
+                return await original_route_handler(request)
+            except RequestValidationError as exc:
+                if "/integrations/ad-performance/analysis-jobs" not in request.url.path:
+                    raise
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content=AdAnalysisEnvelope(
+                        code=AD_ANALYSIS_CODE_VALIDATION_ERROR,
+                        message="request validation failed",
+                        data={"errors": jsonable_encoder(exc.errors())},
+                    ).model_dump(mode="json"),
+                )
+
+        return custom_route_handler
+
+
+router = APIRouter(route_class=AdPerformanceRoute)
 service = AdPerformanceAnalysisService()
+external_analysis_service = ExternalAdPerformanceAnalysisService()
+
+
+@router.post(
+    "/integrations/ad-performance/analysis-jobs",
+    response_model=AdAnalysisEnvelope,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_external_ad_performance_analysis_job(
+    payload: ExternalAdPerformanceAnalysisCreate,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+):
+    try:
+        result = await external_analysis_service.create_analysis_job(session, payload)
+    except AdAnalysisIdempotencyConflict as exc:
+        return _ad_analysis_error_response(exc, status.HTTP_409_CONFLICT)
+    except AppError as exc:
+        return _ad_analysis_error_response(exc, status.HTTP_400_BAD_REQUEST)
+
+    if result.task is not None:
+        try:
+            scheduled = schedule_generation_task(result.task, background_tasks)
+            if not scheduled:
+                raise RuntimeError("analysis task dispatch was not accepted")
+        except Exception as exc:  # noqa: BLE001 - persist broker failure for idempotent retry.
+            await external_analysis_service.record_dispatch_failure(
+                session,
+                result.analysis,
+                exc,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content=AdAnalysisEnvelope(
+                    code=AD_ANALYSIS_CODE_SERVER_ERROR,
+                    message="analysis task dispatch failed; retry the same external_request_id",
+                    data={
+                        "analysis_id": str(
+                            result.analysis.analysis_id or result.analysis.id
+                        ),
+                        "external_request_id": str(
+                            result.analysis.external_request_id or ""
+                        ),
+                    },
+                ).model_dump(mode="json"),
+            )
+        await external_analysis_service.record_dispatch_success(
+            session,
+            result.analysis,
+        )
+    http_status = status.HTTP_200_OK if result.idempotent_replay else status.HTTP_202_ACCEPTED
+    code = AD_ANALYSIS_CODE_SUCCESS if result.idempotent_replay else AD_ANALYSIS_CODE_ACCEPTED
+    message = "ok" if result.idempotent_replay else "accepted"
+    return JSONResponse(
+        status_code=http_status,
+        content=AdAnalysisEnvelope(
+            code=code,
+            message=message,
+            data=_analysis_create_data(
+                result.analysis,
+                idempotent_replay=result.idempotent_replay,
+            ),
+        ).model_dump(mode="json"),
+    )
+
+
+@router.get(
+    "/integrations/ad-performance/analysis-jobs/{analysis_id}",
+    response_model=AdAnalysisEnvelope,
+)
+async def get_external_ad_performance_analysis_job(
+    analysis_id: str,
+    session: DbSession,
+):
+    try:
+        analysis = await external_analysis_service.get_analysis_job(session, analysis_id)
+    except NotFoundError as exc:
+        return _ad_analysis_error_response(exc, status.HTTP_404_NOT_FOUND)
+    except AppError as exc:
+        return _ad_analysis_error_response(exc, status.HTTP_400_BAD_REQUEST)
+
+    return AdAnalysisEnvelope(
+        code=AD_ANALYSIS_CODE_SUCCESS,
+        message="ok",
+        data=_analysis_job_data(analysis),
+    )
 
 
 @router.post(
@@ -148,6 +280,80 @@ def _analysis_read(
         locked_at=analysis.locked_at,
         can_edit=record_can_edit(analysis, operator),
     )
+
+
+def _analysis_create_data(
+    analysis: AdPerformanceAnalysis,
+    *,
+    idempotent_replay: bool,
+) -> dict:
+    return AdAnalysisCreateData(
+        analysis_id=str(analysis.analysis_id or analysis.id),
+        external_request_id=str(analysis.external_request_id or ""),
+        status=_external_status(analysis.status),
+        stage=str(analysis.stage or analysis.status or "queued"),
+        created_at=_iso(analysis.created_at),
+        poll_url=_poll_url(str(analysis.analysis_id or analysis.id)),
+        idempotent_replay=idempotent_replay,
+    ).model_dump(mode="json")
+
+
+def _analysis_job_data(analysis: AdPerformanceAnalysis) -> dict:
+    error = None
+    if analysis.status == "failed":
+        error = AdAnalysisJobError(
+            error_code=analysis.error_code or "ad_analysis_failed",
+            message=analysis.error_message or "Analysis failed.",
+            retryable=bool(analysis.error_retryable),
+        )
+    return AdAnalysisJobData(
+        analysis_id=str(analysis.analysis_id or analysis.id),
+        external_request_id=str(analysis.external_request_id or ""),
+        status=_external_status(analysis.status),
+        stage=str(analysis.stage or analysis.status or "queued"),
+        progress=max(min(int(analysis.progress or 0), 100), 0),
+        created_at=_iso(analysis.created_at),
+        started_at=_iso_optional(analysis.started_at),
+        completed_at=_iso_optional(analysis.completed_at),
+        result=analysis.analysis_result if analysis.status == "succeeded" else None,
+        error=error,
+    ).model_dump(mode="json")
+
+
+def _ad_analysis_error_response(exc: Exception, http_status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=http_status,
+        content=AdAnalysisEnvelope(
+            code=AD_ANALYSIS_CODE_VALIDATION_ERROR,
+            message=str(exc) or exc.__class__.__name__,
+            data={},
+        ).model_dump(mode="json"),
+    )
+
+
+def _external_status(value: str | None) -> str:
+    if value in {"queued", "processing", "succeeded", "failed"}:
+        return value
+    if value in {"completed", "success"}:
+        return "succeeded"
+    if value in {"running"}:
+        return "processing"
+    return "queued"
+
+
+def _poll_url(analysis_id: str) -> str:
+    base = get_settings().public_base_url.rstrip("/")
+    return f"{base}/api/v1/integrations/ad-performance/analysis-jobs/{analysis_id}"
+
+
+def _iso(value) -> str:
+    return _iso_optional(value) or ""
+
+
+def _iso_optional(value) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _sse_event(event: str, data: dict) -> str:
