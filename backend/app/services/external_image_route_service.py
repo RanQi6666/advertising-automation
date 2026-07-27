@@ -177,8 +177,6 @@ def advance_priority_fallback_route_metadata(
 ) -> dict | None:
     if task_type != "external_image_generate":
         return None
-    if int((payload or {}).get("count") or 1) != 1:
-        return None
     if error_code not in PRIORITY_FALLBACK_ERROR_CODES:
         return None
 

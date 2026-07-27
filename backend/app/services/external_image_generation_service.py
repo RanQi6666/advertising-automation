@@ -17,10 +17,12 @@ from backend.app.schemas.external_image_generation import (
     ExternalImageRevisionCreate,
 )
 from backend.app.services.external_image_route_service import (
+    PRIORITY_FALLBACK_ERROR_CODES,
     route_from_metadata,
     select_external_image_route,
     settings_for_external_image_route,
 )
+from backend.app.services.generation_attempt_service import classify_generation_error
 from backend.app.services.generation_task_service import (
     IMAGE_QUEUE_NAME,
     GenerationTaskService,
@@ -343,6 +345,11 @@ class ExternalImageGenerationService:
             settings = settings_for_external_image_route(get_settings(), route)
         provider = get_image_provider(settings)
         image_model = effective_image_model(settings)
+        existing_result = dict(task.result_json or {})
+        slots = _image_slots(existing_result, count)
+        pending_indexes = [
+            index for index, slot in slots.items() if slot.get("status") != "succeeded"
+        ]
         briefs = [
             ImageBrief(
                 image_index=index,
@@ -362,7 +369,7 @@ class ExternalImageGenerationService:
                 reference_image_data_url=reference_image_data_url,
                 revision_instruction=revision_instruction,
             )
-            for index in range(1, count + 1)
+            for index in pending_indexes
         ]
         generated_lists = await asyncio.gather(
             *(
@@ -370,21 +377,34 @@ class ExternalImageGenerationService:
                     lambda brief=brief: provider.generate_images([brief])
                 )
                 for brief in briefs
-            )
+            ),
+            return_exceptions=True,
         )
-        generated_images = [image for images in generated_lists for image in images]
-        if len(generated_images) < count:
-            raise ProviderError("Image provider returned fewer images than requested.")
-
-        images: list[dict] = []
-        result_mode: str | None = None
-        for index, image in enumerate(generated_images[:count], start=1):
-            public_url, storage_key = await self.image_storage.transfer_external_image(
-                source_url=image.url,
-                job_id=task.id,
-                image_index=index,
-                source_storage_key=image.storage_key,
-            )
+        errors: list[Exception] = []
+        result_mode = _clean_mode(existing_result.get("mode"))
+        for brief, generated in zip(briefs, generated_lists, strict=True):
+            index = brief.image_index
+            if isinstance(generated, Exception):
+                errors.append(generated)
+                slots[index] = _failed_image_slot(index, generated)
+                continue
+            image = generated[0] if generated else None
+            if image is None:
+                error = ProviderError("Image provider returned fewer images than requested.")
+                errors.append(error)
+                slots[index] = _failed_image_slot(index, error)
+                continue
+            try:
+                public_url, storage_key = await self.image_storage.transfer_external_image(
+                    source_url=image.url,
+                    job_id=task.id,
+                    image_index=index,
+                    source_storage_key=image.storage_key,
+                )
+            except Exception as exc:
+                errors.append(exc)
+                slots[index] = _failed_image_slot(index, exc)
+                continue
             image_metadata = dict(image.metadata)
             if is_revision:
                 mode = _clean_mode(image_metadata.get("mode")) or "generate"
@@ -406,25 +426,30 @@ class ExternalImageGenerationService:
                         "source_storage_key": source_storage_key,
                     }
                 )
-            images.append(
-                {
-                    "index": index,
-                    "url": public_url,
-                    "storage_key": storage_key,
-                    "prompt": image.prompt,
-                    "size": image.size,
-                    "model": image_model,
-                    "metadata": {
-                        **image_metadata,
-                        "source": (
-                            EXTERNAL_IMAGE_EDIT_SOURCE
-                            if is_from_image
-                            else EXTERNAL_IMAGE_GENERATION_SOURCE
-                        ),
-                        "external_request_id": external_request_id,
-                    },
-                }
-            )
+            image_result = {
+                "index": index,
+                "url": public_url,
+                "storage_key": storage_key,
+                "prompt": image.prompt,
+                "size": image.size,
+                "model": image_model,
+                "metadata": {
+                    **image_metadata,
+                    "source": (
+                        EXTERNAL_IMAGE_EDIT_SOURCE
+                        if is_from_image
+                        else EXTERNAL_IMAGE_GENERATION_SOURCE
+                    ),
+                    "external_request_id": external_request_id,
+                },
+            }
+            slots[index] = {"index": index, "status": "succeeded", "image": image_result}
+
+        images = [
+            slot["image"]
+            for _, slot in sorted(slots.items())
+            if slot.get("status") == "succeeded" and isinstance(slot.get("image"), dict)
+        ]
 
         if is_revision:
             task.metadata_json = {
@@ -447,6 +472,7 @@ class ExternalImageGenerationService:
             "size": size,
             "model_id": image_model if route is not None else model_id,
             "image_model": image_model,
+            "slots": [slots[index] for index in sorted(slots)],
         }
         if is_revision:
             result["source_job_id"] = source_job_id
@@ -454,6 +480,21 @@ class ExternalImageGenerationService:
         elif is_from_image:
             result["mode"] = "from_image"
             result["source_storage_key"] = source_storage_key
+        if errors:
+            task.result_json = result
+            await session.commit()
+            await session.refresh(task)
+            raise next(
+                (
+                    error
+                    for error in errors
+                    if classify_generation_error(
+                        str(error) or error.__class__.__name__
+                    )
+                    in PRIORITY_FALLBACK_ERROR_CODES
+                ),
+                errors[0],
+            )
         return result
 
     async def _find_existing_task(
@@ -487,10 +528,12 @@ class ExternalImageGenerationService:
             for image in result.get("images", [])
             if isinstance(image, dict) and image.get("url") and image.get("index")
         ]
+        if task.status not in {"succeeded", "failed"}:
+            images = []
         return ExternalImageGenerationJobRead(
             job_id=task.id,
             status=_external_status(task),
-            images=images if task.status == "succeeded" else [],
+            images=images,
             error_message=task.error_message,
             count=int(result.get("count") or payload.get("count") or 1),
             size=str(result.get("size") or payload.get("size") or "9:16"),
@@ -520,6 +563,45 @@ async def _initial_route_metadata(
         return {}
     route = await select_external_image_route(settings)
     return {"image_route": route.as_metadata()}
+
+
+def _image_slots(result: dict, count: int) -> dict[int, dict]:
+    slots: dict[int, dict] = {}
+    for raw_slot in result.get("slots", []):
+        if not isinstance(raw_slot, dict):
+            continue
+        index = _positive_int(raw_slot.get("index"), 0)
+        if index < 1 or index > count:
+            continue
+        if raw_slot.get("status") == "succeeded" and isinstance(raw_slot.get("image"), dict):
+            slots[index] = {
+                "index": index,
+                "status": "succeeded",
+                "image": dict(raw_slot["image"]),
+            }
+        elif raw_slot.get("status") in {"queued", "running", "failed"}:
+            slots[index] = {"index": index, "status": str(raw_slot["status"])}
+
+    for image in result.get("images", []):
+        if not isinstance(image, dict):
+            continue
+        index = _positive_int(image.get("index"), 0)
+        if 1 <= index <= count and index not in slots:
+            slots[index] = {"index": index, "status": "succeeded", "image": dict(image)}
+
+    for index in range(1, count + 1):
+        slots.setdefault(index, {"index": index, "status": "queued"})
+    return slots
+
+
+def _failed_image_slot(index: int, exc: Exception) -> dict:
+    message = str(exc) or exc.__class__.__name__
+    return {
+        "index": index,
+        "status": "failed",
+        "error_code": classify_generation_error(message),
+        "error_message": message,
+    }
 
 
 def _external_status(task: GenerationTask) -> str:

@@ -343,19 +343,6 @@ def test_priority_fallback_route_metadata_advances_technical_failures(
                     "model": "jbb-gpt-image-model",
                 }
             },
-            {"prompt": "test", "count": 2},
-            "external_image_generate",
-            "provider_timeout",
-        ),
-        (
-            {
-                "image_route": {
-                    "strategy": "priority_fallback",
-                    "sequence": 1,
-                    "provider": "jbb_gpt_image",
-                    "model": "jbb-gpt-image-model",
-                }
-            },
             {"prompt": "test", "count": 1},
             "external_image_generate",
             "provider_400",
@@ -392,3 +379,29 @@ def test_priority_fallback_route_metadata_does_not_advance_ineligible_tasks(
         )
         is None
     )
+
+
+def test_priority_fallback_route_metadata_advances_multi_image_task(
+    priority_fallback_settings: FakeRedis,
+) -> None:
+    metadata = {
+        "image_route": {
+            "strategy": "priority_fallback",
+            "sequence": 1,
+            "provider": "jbb_gpt_image",
+            "model": "jbb-gpt-image-model",
+        }
+    }
+
+    updated = external_image_route_service.advance_priority_fallback_route_metadata(
+        metadata,
+        payload={"prompt": "test", "count": 3},
+        task_type="external_image_generate",
+        attempt_count=1,
+        error_code="provider_timeout",
+    )
+
+    assert updated is not None
+    assert updated["image_route"]["provider"] == "cpa_gemini"
+    assert updated["image_route_history"][0]["next_provider"] == "cpa_gemini"
+    assert metadata["image_route"]["provider"] == "jbb_gpt_image"

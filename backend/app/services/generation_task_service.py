@@ -816,7 +816,8 @@ class GenerationTaskService:
         if task.status == "failed" and not task.retryable:
             raise AppError("This generation task is not retryable.")
         task.status = "queued"
-        task.result_json = None
+        if task.task_type != "external_image_generate":
+            task.result_json = None
         task.error_code = None
         task.error_message = None
         task.retryable = False

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.services.generation_task_service as task_module
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ProviderError
 from backend.app.db.base import Base, utcnow
 from backend.app.db.models.campaign import Campaign
 from backend.app.db.models.copy_draft import CopyDraft
@@ -780,3 +781,269 @@ async def test_external_image_task_executes_with_its_pinned_route(
 
     assert selected == {"provider": "gateway", "model": "gateway-image-model"}
     assert result["model_id"] == "gateway-image-model"
+
+
+@pytest.mark.asyncio
+async def test_external_multi_image_retry_preserves_successes_and_only_generates_failed_slot(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.services.external_image_generation_service as service_module
+    from backend.app.integrations.image.placeholder_provider import PlaceholderImageProvider
+
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_PRIMARY_PROVIDERS",
+        "jbb_gpt_image,dm_fox_gpt_image,alita_gpt_image",
+    )
+    monkeypatch.setenv(
+        "EXTERNAL_IMAGE_PRIORITY_FALLBACK_PROVIDERS",
+        "cpa_gemini,volcengine",
+    )
+    monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
+    get_settings.cache_clear()
+
+    class PartialProvider:
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+            self.placeholder = PlaceholderImageProvider()
+
+        async def generate_images(self, briefs):
+            brief = briefs[0]
+            calls.append((self.provider, brief.image_index))
+            if self.provider == "dm_fox_gpt_image" and brief.image_index == 3:
+                raise ProviderError("Gateway image API request timed out")
+            return await self.placeholder.generate_images(briefs)
+
+    def fake_get_image_provider(settings):
+        return PartialProvider(settings.image_provider)
+
+    monkeypatch.setattr(service_module, "get_image_provider", fake_get_image_provider)
+    monkeypatch.setattr(task_module, "_schedule_auto_retry_task", lambda *_args: None)
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            service = ExternalImageGenerationService()
+            task = await service.task_service.create_task(
+                session,
+                queue_name="image_queue",
+                task_type="external_image_generate",
+                business_type="external_image",
+                business_id="partial-route",
+                campaign_id=None,
+                payload=_image_payload(count=3),
+                metadata={
+                    "image_route": {
+                        "strategy": "priority_fallback",
+                        "sequence": 2,
+                        "provider": "dm_fox_gpt_image",
+                        "model": "dm-fox-image-model",
+                    }
+                },
+                max_attempts=3,
+            )
+
+            with pytest.raises(ProviderError, match="timed out"):
+                await service.execute_task(session, task)
+
+            assert [image["index"] for image in task.result_json["images"]] == [1, 2]
+            first_storage_keys = [
+                image["storage_key"] for image in task.result_json["images"]
+            ]
+
+            task.status = "running"
+            task.attempt_count = 1
+            await session.commit()
+            await task_module.GenerationTaskService()._mark_failed(
+                session,
+                task,
+                ProviderError("Gateway image API request timed out"),
+            )
+
+            result = await service.execute_task(session, task)
+
+        assert calls == [
+            ("dm_fox_gpt_image", 1),
+            ("dm_fox_gpt_image", 2),
+            ("dm_fox_gpt_image", 3),
+            ("cpa_gemini", 3),
+        ]
+        assert [image["index"] for image in result["images"]] == [1, 2, 3]
+        assert [image["storage_key"] for image in result["images"][:2]] == first_storage_keys
+    finally:
+        get_settings.cache_clear()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_multi_image_retry_prefers_timeout_over_400_for_fallback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.services.external_image_generation_service as service_module
+    from backend.app.integrations.image.placeholder_provider import PlaceholderImageProvider
+
+    monkeypatch.setenv("EXTERNAL_IMAGE_ROUTE_MODE", "priority_fallback")
+    monkeypatch.setenv("DM_FOX_GPT_IMAGE_MODEL", "dm-fox-image-model")
+    monkeypatch.setenv("MODEL_GATEWAY_GEMINI_IMAGE_MODEL", "cpa-gemini-image-model")
+    get_settings.cache_clear()
+
+    class MixedFailureProvider:
+        def __init__(self) -> None:
+            self.placeholder = PlaceholderImageProvider()
+
+        async def generate_images(self, briefs):
+            brief = briefs[0]
+            if brief.image_index == 1:
+                raise ProviderError("Gateway image API returned 400 Bad Request")
+            if brief.image_index == 3:
+                raise ProviderError("Gateway image API request timed out")
+            return await self.placeholder.generate_images(briefs)
+
+    monkeypatch.setattr(
+        service_module,
+        "get_image_provider",
+        lambda _settings: MixedFailureProvider(),
+    )
+    monkeypatch.setattr(task_module, "_schedule_auto_retry_task", lambda *_args: None)
+    engine, session_factory = await _session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            service = ExternalImageGenerationService()
+            task = await service.task_service.create_task(
+                session,
+                queue_name="image_queue",
+                task_type="external_image_generate",
+                business_type="external_image",
+                business_id="mixed-failure-route",
+                campaign_id=None,
+                payload=_image_payload(count=3),
+                metadata={
+                    "image_route": {
+                        "strategy": "priority_fallback",
+                        "sequence": 2,
+                        "provider": "dm_fox_gpt_image",
+                        "model": "dm-fox-image-model",
+                    }
+                },
+                max_attempts=3,
+            )
+
+            with pytest.raises(ProviderError, match="timed out") as error:
+                await service.execute_task(session, task)
+
+            task.status = "running"
+            task.attempt_count = 1
+            await session.commit()
+            await task_module.GenerationTaskService()._mark_failed(session, task, error.value)
+
+        assert task.status == "queued"
+        assert task.metadata_json["image_route"]["provider"] == "cpa_gemini"
+    finally:
+        get_settings.cache_clear()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_external_failed_multi_image_job_returns_saved_successful_images(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            task = await ExternalImageGenerationService().create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="partial-failed-job", count=3)
+                ),
+            )
+            task.status = "failed"
+            task.error_message = "Gateway image API request timed out"
+            task.result_json = {
+                "images": [
+                    {
+                        "index": 1,
+                        "url": "https://ai.example.test/storage/one.png",
+                        "storage_key": "local://images/one.png",
+                        "prompt": "first",
+                        "size": "9:16",
+                        "model": "dm-fox-image-model",
+                    },
+                    {
+                        "index": 2,
+                        "url": "https://ai.example.test/storage/two.png",
+                        "storage_key": "local://images/two.png",
+                        "prompt": "second",
+                        "size": "9:16",
+                        "model": "dm-fox-image-model",
+                    },
+                ],
+                "generated_count": 2,
+                "count": 3,
+                "size": "9:16",
+            }
+            await session.commit()
+
+        response = client.get(
+            f"/api/v1/integrations/image-generation/jobs/{task.id}",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "failed"
+    assert body["count"] == 3
+    assert [image["index"] for image in body["images"]] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_external_processing_multi_image_job_hides_partial_images(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, app = await _client_with_db(tmp_path, monkeypatch, token="image-token")
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            task = await ExternalImageGenerationService().create_job(
+                session,
+                ExternalImageGenerationCreate.model_validate(
+                    _image_payload(external_request_id="partial-processing-job", count=3)
+                ),
+            )
+            task.result_json = {
+                "images": [
+                    {
+                        "index": 1,
+                        "url": "https://ai.example.test/storage/one.png",
+                        "storage_key": "local://images/one.png",
+                        "prompt": "first",
+                        "size": "9:16",
+                        "model": "dm-fox-image-model",
+                    }
+                ],
+                "generated_count": 1,
+                "count": 3,
+                "size": "9:16",
+            }
+            await session.commit()
+
+        response = client.get(
+            f"/api/v1/integrations/image-generation/jobs/{task.id}",
+            headers=_authorized_headers(),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        client.close()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "processing"
+    assert body["images"] == []

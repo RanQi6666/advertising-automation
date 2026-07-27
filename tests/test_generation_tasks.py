@@ -1750,7 +1750,7 @@ async def test_priority_fallback_auto_retry_advances_technical_failure_route(
 
 
 @pytest.mark.asyncio
-async def test_priority_fallback_does_not_advance_multi_image_or_final_route(
+async def test_priority_fallback_advances_multi_image_but_not_final_route(
     priority_fallback_retry_settings: None,
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1826,13 +1826,65 @@ async def test_priority_fallback_does_not_advance_multi_image_or_final_route(
 
     assert stored_multi is not None
     assert stored_multi.status == "queued"
-    assert stored_multi.metadata_json["image_route"]["provider"] == "jbb_gpt_image"
-    assert "image_route_history" not in stored_multi.metadata_json
+    assert stored_multi.metadata_json["image_route"]["provider"] == "cpa_gemini"
+    assert stored_multi.metadata_json["image_route_history"] == [
+        {
+            "attempt": 1,
+            "provider": "jbb_gpt_image",
+            "model": "jbb-gpt-image-model",
+            "error_code": "provider_timeout",
+            "next_provider": "cpa_gemini",
+            "next_model": "cpa-gemini-image-model",
+        }
+    ]
     assert stored_final is not None
     assert stored_final.status == "failed"
     assert "image_route_history" not in stored_final.metadata_json
     assert scheduled == [stored_multi.id]
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_preserves_partial_external_image_result(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'manual-partial.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        service = GenerationTaskService()
+        task = await service.create_task(
+            session,
+            queue_name=IMAGE_QUEUE_NAME,
+            task_type="external_image_generate",
+            business_type="external_image",
+            business_id="manual-partial",
+            campaign_id=None,
+            payload={"prompt": "priority image", "count": 3, "size": "9:16"},
+            max_attempts=3,
+        )
+        partial_result = {
+            "images": [{"index": 1, "url": "https://example.test/one.png"}],
+            "slots": [
+                {
+                    "index": 1,
+                    "status": "succeeded",
+                    "image": {"index": 1, "url": "https://example.test/one.png"},
+                },
+                {"index": 2, "status": "failed"},
+                {"index": 3, "status": "failed"},
+            ],
+        }
+        task.status = "failed"
+        task.retryable = True
+        task.result_json = partial_result
+        await session.commit()
+
+        retried = await service.retry_task(session, task.id)
+
+    assert retried.status == "queued"
+    assert retried.result_json == partial_result
     await engine.dispose()
 
 
